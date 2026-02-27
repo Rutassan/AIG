@@ -108,3 +108,5 @@
 /home/rutasan/AIG/tests/AIG.Game.Tests/obj/Debug/net8.0/AIG.Game.Tests.pdb
 /home/rutasan/AIG/tests/AIG.Game.Tests/obj/Debug/net8.0/AIG.Game.Tests.genruntimeconfig.cache
 /home/rutasan/AIG/tests/AIG.Game.Tests/obj/Debug/net8.0/ref/AIG.Game.Tests.dll
+/home/rutasan/AIG/tests/AIG.Game.Tests/obj/Debug/net8.0/AIG.Game.Tests.sourcelink.json
+/home/rutasan/AIG/tests/AIG.Game.Tests/bin/Debug/net8.0/assets/fonts/NotoSans-Regular.ttf

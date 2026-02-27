@@ -20,3 +20,5 @@
 /home/rutasan/AIG/src/AIG.Game/obj/Debug/net8.0/AIG.Game.pdb
 /home/rutasan/AIG/src/AIG.Game/obj/Debug/net8.0/AIG.Game.genruntimeconfig.cache
 /home/rutasan/AIG/src/AIG.Game/obj/Debug/net8.0/ref/AIG.Game.dll
+/home/rutasan/AIG/src/AIG.Game/obj/Debug/net8.0/AIG.Game.sourcelink.json
+/home/rutasan/AIG/src/AIG.Game/bin/Debug/net8.0/assets/fonts/NotoSans-Regular.ttf

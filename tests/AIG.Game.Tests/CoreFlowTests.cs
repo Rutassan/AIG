@@ -85,42 +85,134 @@ public sealed class CoreFlowTests
         Assert.Equal(-1f, input.MoveRight);
     }
 
-    [Fact(DisplayName = "Run выполняет один кадр, отрисовывает мир и закрывает окно")]
-    public void Run_ExecutesFrameAndClosesResources()
+    [Fact(DisplayName = "На старте показывается меню и мир не рендерится до нажатия кнопки")]
+    public void Run_StartsInMainMenu()
     {
         var platform = new FakeGamePlatform();
         platform.EnqueueWindowShouldClose(false, true);
 
-        var world = new WorldMap(width: 2, height: 3, depth: 2);
-        world.SetBlock(1, 2, 1, (BlockType)999);
-
-        var app = new GameApp(new GameConfig(), platform, world);
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
+        Assert.True(platform.SetExitKeyCalled);
+        Assert.Equal(KeyboardKey.Null, platform.ExitKey);
+        Assert.True(platform.LoadUiFontCalled);
+        Assert.True(platform.UnloadUiFontCalled);
         Assert.True(platform.InitWindowCalled);
-        Assert.True(platform.DisableCursorCalled);
-        Assert.True(platform.EnableCursorCalled);
-        Assert.True(platform.CloseWindowCalled);
-        Assert.Equal(120, platform.SetTargetFpsValue);
-        Assert.Equal(1, platform.BeginDrawingCalls);
-        Assert.Equal(1, platform.EndDrawingCalls);
-        Assert.True(platform.DrawCubeCalls > 0);
-        Assert.Equal(platform.DrawCubeCalls, platform.DrawCubeWiresCalls);
-        Assert.True(platform.DrawTextCalls >= 2);
+        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.Equal(0, platform.DrawLineCalls);
+        Assert.True(platform.DrawRectangleCalls > 0);
+        Assert.True(platform.DrawTextCalls > 0);
     }
 
-    [Fact(DisplayName = "Run корректно завершает окно даже без входа в цикл")]
-    public void Run_ClosesWhenWindowShouldCloseImmediately()
+    [Fact(DisplayName = "Кнопка Начать игру запускает игровой режим")]
+    public void Run_StartButton_TransitionsToPlaying()
     {
         var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(true);
+        platform.EnqueueWindowShouldClose(false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
 
         var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
-        Assert.True(platform.EnableCursorCalled);
+        Assert.True(platform.DisableCursorCalled);
+        Assert.True(platform.DrawCubeCalls > 0);
+        Assert.True(platform.DrawLineCalls > 0);
+    }
+
+    [Fact(DisplayName = "После старта выполняется апдейт игрока в игровом состоянии")]
+    public void Run_PlayingState_UpdatesPlayerPosition()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), downKeys: [KeyboardKey.W]);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
+
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 8, height: 4, depth: 8));
+        app.Run();
+
+        var posTexts = platform.DrawnUiTexts.Where(t => t.StartsWith("Pos:", StringComparison.Ordinal)).ToList();
+        Assert.True(posTexts.Count >= 2);
+        Assert.NotEqual(posTexts[0], posTexts[1]);
+    }
+
+    [Fact(DisplayName = "Кнопка Выход закрывает игру из главного меню")]
+    public void Run_ExitButton_ClosesFromMenu()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 395f), leftMousePressed: true);
+
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
+        app.Run();
+
         Assert.True(platform.CloseWindowCalled);
-        Assert.Equal(0, platform.BeginDrawingCalls);
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "Клики вне кнопок меню не меняют состояние")]
+    public void Run_MenuClickOutsideButtons_DoesNotStartOrExit()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(300f, 320f), leftMousePressed: true); // левее кнопки
+        platform.EnqueueFrameInput(mousePosition: new Vector2(980f, 320f), leftMousePressed: true); // правее кнопки
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 250f), leftMousePressed: true); // выше кнопки
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 500f), leftMousePressed: true); // ниже кнопки
+
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
+        app.Run();
+
+        Assert.False(platform.DisableCursorCalled);
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "ESC в игре открывает паузу, и игровой HUD перестает рисовать прицел")]
+    public void Run_EscapeInGame_OpensPauseMenuAndPausesHud()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, true);
+
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), pressedKeys: [KeyboardKey.Escape]);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
+
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
+        app.Run();
+
+        Assert.True(platform.DisableCursorCalled);
+        Assert.True(platform.EnableCursorCalled);
+        Assert.Equal(2, platform.DrawLineCalls);
+        Assert.True(platform.DrawRectangleCalls >= 4);
+    }
+
+    [Fact(DisplayName = "Рендер мира использует default-цвет для неизвестного типа блока")]
+    public void Run_DrawWorld_UsesDefaultBlockColorForUnknownType()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+
+        var world = new WorldMap(width: 3, height: 4, depth: 3);
+        world.SetBlock(1, 3, 1, (BlockType)999);
+
+        var app = new GameApp(new GameConfig(), platform, world);
+        app.Run();
+
+        Assert.True(platform.DrawCubeCalls > 0);
+    }
+
+    [Fact(DisplayName = "ResolveUiFontPath возвращает пустую строку, если пути не существуют")]
+    public void ResolveUiFontPath_ReturnsEmpty_WhenNoFilesExist()
+    {
+        var result = GameApp.ResolveUiFontPath(
+        [
+            "/tmp/aig-missing-font-1.ttf",
+            "/tmp/aig-missing-font-2.ttf"
+        ]);
+
+        Assert.Equal(string.Empty, result);
     }
 
     [Fact(DisplayName = "Пустой конструктор GameApp создаёт экземпляр")]

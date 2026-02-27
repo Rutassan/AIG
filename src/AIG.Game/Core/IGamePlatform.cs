@@ -6,6 +6,7 @@ namespace AIG.Game.Core;
 public interface IGamePlatform
 {
     void SetConfigFlags(ConfigFlags flags);
+    void SetExitKey(KeyboardKey key);
     void InitWindow(int width, int height, string title);
     void SetTargetFps(int fps);
     void DisableCursor();
@@ -16,6 +17,10 @@ public interface IGamePlatform
     bool IsKeyDown(KeyboardKey key);
     bool IsKeyPressed(KeyboardKey key);
     Vector2 GetMouseDelta();
+    Vector2 GetMousePosition();
+    bool IsMouseButtonPressed(MouseButton button);
+    void LoadUiFont(string fontPath, int fontSize);
+    void UnloadUiFont();
     void BeginDrawing();
     void ClearBackground(Color color);
     void BeginMode3D(Camera3D camera);
@@ -27,6 +32,7 @@ public interface IGamePlatform
     void DrawLine(int startPosX, int startPosY, int endPosX, int endPosY, Color color);
     void DrawRectangle(int posX, int posY, int width, int height, Color color);
     int GetFps();
+    void DrawUiText(string text, Vector2 position, float fontSize, float spacing, Color color);
     void DrawText(string text, int posX, int posY, int fontSize, Color color);
     void EndDrawing();
 }

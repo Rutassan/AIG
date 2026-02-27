@@ -15,4 +15,10 @@
     <InternalsVisibleTo Include="AIG.Game.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="assets/fonts/*.ttf">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
