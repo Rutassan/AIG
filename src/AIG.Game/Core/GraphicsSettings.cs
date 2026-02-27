@@ -1,4 +1,5 @@
 using AIG.Game.Config;
+using Raylib_cs;
 
 namespace AIG.Game.Core;
 
@@ -24,6 +25,9 @@ internal sealed class GraphicsSettings
     public float FogFar { get; private set; }
     public float LightStrength { get; private set; }
     public float Contrast { get; private set; }
+    public Color FogColor { get; private set; }
+    public float TextureNoiseStrength { get; private set; }
+    public float ViewBobScale { get; private set; }
 
     public void CycleQuality()
     {
@@ -53,6 +57,9 @@ internal sealed class GraphicsSettings
                 FogFar = 60f;
                 LightStrength = 0.7f;
                 Contrast = 0.95f;
+                FogColor = new Color(166, 174, 179, 255);
+                TextureNoiseStrength = 0.55f;
+                ViewBobScale = 0.75f;
                 break;
             case GraphicsQuality.Medium:
                 RenderDistance = 28;
@@ -61,6 +68,9 @@ internal sealed class GraphicsSettings
                 FogFar = 78f;
                 LightStrength = 0.9f;
                 Contrast = 1.03f;
+                FogColor = new Color(162, 171, 176, 255);
+                TextureNoiseStrength = 0.8f;
+                ViewBobScale = 1f;
                 break;
             default:
                 RenderDistance = 32;
@@ -69,6 +79,9 @@ internal sealed class GraphicsSettings
                 FogFar = 95f;
                 LightStrength = 1f;
                 Contrast = 1.1f;
+                FogColor = new Color(156, 166, 171, 255);
+                TextureNoiseStrength = 1f;
+                ViewBobScale = 1.15f;
                 break;
         }
     }

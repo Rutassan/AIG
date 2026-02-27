@@ -10,7 +10,7 @@ public static class Program
     internal static Func<string, IGameRunner> AutoCaptureFactory { get; set; } = static outputDir => new AutoCaptureRunner(outputDir);
     internal static Func<GameConfig> AutoCaptureConfigFactory { get; set; } = static () => new GameConfig
     {
-        Title = "AIG 0.004 Autocap",
+        Title = "AIG 0.005 Autocap",
         FullscreenByDefault = false,
         GraphicsQuality = GraphicsQuality.High
     };

@@ -491,6 +491,23 @@ public sealed class CoreFlowTests
         Assert.True(platform.DrawRectangleCalls >= 4);
     }
 
+    [Fact(DisplayName = "В игре клавиша V переключает режим камеры, и HUD показывает 3-е лицо")]
+    public void Run_ToggleCameraMode_KeyV_UpdatesHudLabel()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, false, true);
+
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true); // Start
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), pressedKeys: [KeyboardKey.V]); // Toggle camera
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f)); // Render frame with new mode
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 777));
+        app.Run();
+
+        Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Камера: 3-е лицо", StringComparison.Ordinal));
+    }
+
     [Fact(DisplayName = "ResolveUiFontPath возвращает пустую строку, если пути не существуют")]
     public void ResolveUiFontPath_ReturnsEmpty_WhenNoFilesExist()
     {

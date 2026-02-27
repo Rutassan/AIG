@@ -20,11 +20,14 @@ public class GameApp : IGameRunner
     private readonly WorldMap _world;
     private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone];
     private readonly GraphicsSettings _graphics;
+    private readonly PlayerVisualState _playerVisual = new();
 
     private PlayerController _player = null!;
     private AppState _state = AppState.MainMenu;
+    private CameraMode _cameraMode = CameraMode.FirstPerson;
     private int _selectedHotbarIndex;
     private float _lastFrameMs;
+    private float _cameraBobPhase;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -51,9 +54,11 @@ public class GameApp : IGameRunner
         InitializePlatform(enableFullscreen: true);
 
         _player = new PlayerController(_config, new Vector3(_world.Width / 2f, 4f, _world.Depth / 2f));
+        _playerVisual.Reset(_player.Position);
 
         var shouldExit = false;
         var currentHit = (BlockRaycastHit?)null;
+        var currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, 0f);
 
         while (!shouldExit && !_platform.WindowShouldClose())
         {
@@ -65,14 +70,28 @@ public class GameApp : IGameRunner
 
             var delta = _platform.GetFrameTime();
             _lastFrameMs = delta * 1000f;
+            var cameraBob = 0f;
+
             if (_state == AppState.Playing)
             {
+                if (_platform.IsKeyPressed(KeyboardKey.V) || _platform.IsKeyPressed(KeyboardKey.F5))
+                {
+                    _cameraMode = CameraViewBuilder.Toggle(_cameraMode);
+                }
+
                 HandleHotbarInput();
 
                 var input = ReadInput(_platform);
                 _player.Update(_world, input, delta);
+                _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
 
-                currentHit = VoxelRaycaster.Raycast(_world, _player.EyePosition, _player.LookDirection, _config.InteractionDistance);
+                var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
+                _cameraBobPhase += delta * (7f + walkBob * 6f);
+                cameraBob = MathF.Sin(_cameraBobPhase) * 0.06f * walkBob;
+
+                currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
+
+                currentHit = VoxelRaycaster.Raycast(_world, currentView.RayOrigin, currentView.RayDirection, _config.InteractionDistance);
                 if (_platform.IsMouseButtonPressed(MouseButton.Left))
                 {
                     BlockInteraction.TryBreak(_world, currentHit);
@@ -111,7 +130,12 @@ public class GameApp : IGameRunner
                 }
             }
 
-            DrawFrame(currentHit);
+            if (_state != AppState.Playing)
+            {
+                currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
+            }
+
+            DrawFrame(currentHit, currentView);
         }
 
         ShutdownPlatform();
@@ -123,22 +147,27 @@ public class GameApp : IGameRunner
 
         InitializePlatform(enableFullscreen: false);
         _state = AppState.Playing;
+        _cameraMode = CameraMode.FirstPerson;
         _platform.DisableCursor();
 
         var shots = GetAutoCaptureShots();
         if (shots.Length > 0)
         {
             var warmupHit = PrepareAutoCaptureShot(shots[0]);
-            DrawFrame(warmupHit);
-            DrawFrame(warmupHit);
+            var warmupView = CameraViewBuilder.Build(_player, _world, CameraMode.FirstPerson, 0f);
+            for (var i = 0; i < 8; i++)
+            {
+                DrawFrame(warmupHit, warmupView);
+            }
             _platform.TakeScreenshot(Path.Combine(outputDirectory, "autocap-warmup.png"));
         }
 
         foreach (var shot in shots)
         {
             var hit = PrepareAutoCaptureShot(shot);
-            DrawFrame(hit);
-            DrawFrame(hit);
+            var view = CameraViewBuilder.Build(_player, _world, CameraMode.FirstPerson, 0f);
+            DrawFrame(hit, view);
+            DrawFrame(hit, view);
 
             _platform.TakeScreenshot(Path.Combine(outputDirectory, shot.FileName));
         }
@@ -250,25 +279,18 @@ public class GameApp : IGameRunner
             && mouse.Y <= rect.Y + rect.H;
     }
 
-    private void DrawFrame(BlockRaycastHit? hit)
+    private void DrawFrame(BlockRaycastHit? hit, CameraViewBuilder.CameraView view)
     {
         _platform.BeginDrawing();
         _platform.ClearBackground(GetSkyColor());
 
         if (_state != AppState.MainMenu)
         {
-            var camera = new Camera3D
-            {
-                Position = _player.EyePosition,
-                Target = _player.EyePosition + _player.LookDirection,
-                Up = Vector3.UnitY,
-                FovY = 75f,
-                Projection = CameraProjection.Perspective
-            };
-
-            _platform.BeginMode3D(camera);
+            _platform.BeginMode3D(view.Camera);
             DrawWorld();
+            DrawPlayerAvatar();
             DrawBlockHighlight(hit);
+            DrawFirstPersonHand(view.Camera);
             _platform.EndMode3D();
 
             DrawHud(_state == AppState.Playing);
@@ -321,12 +343,12 @@ public class GameApp : IGameRunner
                     var center = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f);
                     var color = block switch
                     {
-                        BlockType.Dirt => new Color(124, 91, 59, 255),
-                        BlockType.Stone => new Color(112, 112, 122, 255),
+                        BlockType.Dirt => new Color(136, 98, 63, 255),
+                        BlockType.Stone => new Color(124, 120, 113, 255),
                         _ => Color.White
                     };
                     var topVisible = IsTopFaceVisible(x, y, z);
-                    color = ApplyVisualStyle(color, x, y, z, centerX, centerZ, topVisible);
+                    color = ApplyVisualStyle(color, block, x, y, z, centerX, centerZ, topVisible);
 
                     _platform.DrawCube(center, 1f, 1f, 1f, color);
                     if (_graphics.DrawBlockWires)
@@ -361,10 +383,19 @@ public class GameApp : IGameRunner
             || !_world.IsSolid(x, y - 1, z - 1);
     }
 
-    private Color ApplyVisualStyle(Color baseColor, int x, int y, int z, int centerX, int centerZ, bool topVisible)
+    private Color ApplyVisualStyle(Color baseColor, BlockType block, int x, int y, int z, int centerX, int centerZ, bool topVisible)
     {
-        var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 11) - 5;
-        var textured = ChangeRgb(baseColor, noise, noise, noise);
+        var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 15) - 7;
+        var noiseScale = _graphics.TextureNoiseStrength;
+
+        var dr = (int)(noise * noiseScale);
+        var dg = block == BlockType.Stone
+            ? (int)(noise * 0.92f * noiseScale)
+            : (int)(noise * 0.88f * noiseScale);
+        var db = block == BlockType.Stone
+            ? (int)(noise * 0.56f * noiseScale)
+            : (int)(noise * 0.76f * noiseScale);
+        var textured = ChangeRgb(baseColor, dr, dg, db);
 
         var visibleFaces = CountVisibleFaces(x, y, z);
         var brightness = topVisible ? 1.06f : 0.9f;
@@ -381,7 +412,8 @@ public class GameApp : IGameRunner
             }
         }
 
-        brightness *= _graphics.LightStrength;
+        var sunExposure = Math.Clamp(CountSkyExposure(x, y, z) / 5f, 0f, 1f);
+        brightness *= (0.94f + sunExposure * 0.16f) * _graphics.LightStrength;
 
         var lit = MultiplyRgb(textured, brightness);
         var contrasted = ApplyContrast(lit, _graphics.Contrast);
@@ -395,7 +427,7 @@ public class GameApp : IGameRunner
         var dz = z - centerZ;
         var distance = MathF.Sqrt(dx * dx + dz * dz);
         var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
-        return LerpColor(contrasted, GetSkyColor(), fogT);
+        return LerpColor(contrasted, _graphics.FogColor, fogT);
     }
 
     private int CountVisibleFaces(int x, int y, int z)
@@ -458,6 +490,74 @@ public class GameApp : IGameRunner
     private static Color GetSkyColor()
     {
         return new Color(132, 188, 243, 255);
+    }
+
+    private void DrawPlayerAvatar()
+    {
+        if (_cameraMode != CameraMode.ThirdPerson)
+        {
+            return;
+        }
+
+        var yaw = _player.Yaw;
+        var forward = new Vector3(MathF.Sin(yaw), 0f, MathF.Cos(yaw));
+        forward = Vector3.Normalize(forward);
+
+        var right = new Vector3(-forward.Z, 0f, forward.X);
+        var walkSwing = MathF.Sin(_playerVisual.WalkPhase) * 0.22f * _playerVisual.WalkBlend;
+        var armLift = _playerVisual.IsJumping ? 0.08f : _playerVisual.IsFalling ? -0.05f : 0f;
+        var root = _player.Position + new Vector3(0f, 0.04f, 0f);
+
+        var torso = root + new Vector3(0f, 1.08f, 0f);
+        var head = root + new Vector3(0f, 1.82f, 0f) + forward * 0.04f;
+        var leftArm = root + Vector3.UnitY * (1.12f + armLift) - right * 0.38f + forward * walkSwing;
+        var rightArm = root + Vector3.UnitY * (1.12f + armLift) + right * 0.38f - forward * walkSwing;
+        var leftLeg = root + Vector3.UnitY * 0.44f - right * 0.16f - forward * walkSwing;
+        var rightLeg = root + Vector3.UnitY * 0.44f + right * 0.16f + forward * walkSwing;
+
+        _platform.DrawCube(torso, 0.6f, 0.9f, 0.36f, new Color(88, 145, 205, 255));
+        _platform.DrawCube(head, 0.46f, 0.46f, 0.46f, new Color(232, 200, 170, 255));
+        _platform.DrawCube(leftArm, 0.2f, 0.72f, 0.2f, new Color(64, 112, 176, 255));
+        _platform.DrawCube(rightArm, 0.2f, 0.72f, 0.2f, new Color(64, 112, 176, 255));
+        _platform.DrawCube(leftLeg, 0.24f, 0.74f, 0.24f, new Color(74, 87, 122, 255));
+        _platform.DrawCube(rightLeg, 0.24f, 0.74f, 0.24f, new Color(74, 87, 122, 255));
+        _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.74f, 0.02f, 0.74f, new Color(0, 0, 0, 35));
+    }
+
+    private void DrawFirstPersonHand(Camera3D camera)
+    {
+        if (_cameraMode != CameraMode.FirstPerson || _state == AppState.MainMenu)
+        {
+            return;
+        }
+
+        var forward = Vector3.Normalize(camera.Target - camera.Position);
+        var rightRaw = Vector3.Cross(forward, Vector3.UnitY);
+        var right = rightRaw.LengthSquared() < 0.000001f
+            ? Vector3.UnitX
+            : Vector3.Normalize(rightRaw);
+        var up = Vector3.Normalize(Vector3.Cross(right, forward));
+
+        var bob = MathF.Sin(_playerVisual.WalkPhase * 2f) * 0.03f * _playerVisual.WalkBlend * _graphics.ViewBobScale;
+        var hand = camera.Position + forward * 0.72f + right * 0.34f - up * 0.28f + up * bob;
+        var held = hand + forward * 0.16f + right * 0.08f;
+
+        _platform.DrawCube(hand, 0.16f, 0.26f, 0.18f, new Color(232, 202, 172, 255));
+        _platform.DrawCube(held, 0.18f, 0.18f, 0.18f, GetHeldBlockColor(_hotbar[_selectedHotbarIndex]));
+        if (_graphics.DrawBlockWires)
+        {
+            _platform.DrawCubeWires(held, 0.18f, 0.18f, 0.18f, new Color(0, 0, 0, 35));
+        }
+    }
+
+    private static Color GetHeldBlockColor(BlockType block)
+    {
+        return block switch
+        {
+            BlockType.Dirt => new Color(146, 106, 72, 255),
+            BlockType.Stone => new Color(128, 123, 116, 255),
+            _ => new Color(220, 220, 220, 255)
+        };
     }
 
     private void DrawBlockHighlight(BlockRaycastHit? hit)
@@ -527,10 +627,11 @@ public class GameApp : IGameRunner
             _platform.DrawLine(centerX, centerY - 8, centerX, centerY + 8, Color.Black);
         }
 
-        _platform.DrawRectangle(8, 8, 420, 88, new Color(255, 255, 255, 190));
+        _platform.DrawRectangle(8, 8, 460, 112, new Color(255, 255, 255, 190));
         _platform.DrawUiText($"FPS: {_platform.GetFps()}", new Vector2(16, 14), 20, 1f, Color.Black);
         _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(16, 38), 20, 1f, Color.DarkGray);
         _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(16, 62), 18, 1f, Color.DarkGray);
+        _platform.DrawUiText($"Камера: {GetCameraModeName(_cameraMode)}", new Vector2(16, 84), 18, 1f, Color.DarkGray);
     }
 
     private void DrawHotbar()
@@ -556,7 +657,7 @@ public class GameApp : IGameRunner
 
     private void DrawMenu()
     {
-        var title = _state == AppState.MainMenu ? "AIG 0.003" : "Пауза";
+        var title = _state == AppState.MainMenu ? "AIG 0.005" : "Пауза";
         var startLabel = _state == AppState.MainMenu ? "Начать игру" : "Продолжить";
         var fullscreenLabel = _platform.IsWindowFullscreen() ? "Оконный режим" : "Полный экран";
         var graphicsLabel = $"Графика: {GetQualityName(_graphics.Quality)}";
@@ -677,6 +778,11 @@ public class GameApp : IGameRunner
         };
     }
 
+    internal static string GetCameraModeName(CameraMode mode)
+    {
+        return mode == CameraMode.FirstPerson ? "1-е лицо" : "3-е лицо";
+    }
+
     internal static string ResolveUiFontPath(IEnumerable<string>? candidates = null)
     {
         candidates ??= new[]
@@ -743,6 +849,7 @@ public class GameApp : IGameRunner
     private BlockRaycastHit? PrepareAutoCaptureShot(AutoCaptureShot shot)
     {
         _player = new PlayerController(_config, shot.Position);
+        _playerVisual.Reset(shot.Position);
         _player.SetPose(shot.Position, shot.LookTarget - _player.EyePosition);
         return VoxelRaycaster.Raycast(_world, _player.EyePosition, _player.LookDirection, _config.InteractionDistance);
     }
