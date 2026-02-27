@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=AIG Game
+Comment=Запуск версии 0.001
+Exec=bash -lc 'cd /home/rutasan/AIG && dotnet run --project src/AIG.Game/AIG.Game.csproj'
+Path=/home/rutasan/AIG
+Terminal=true
+Categories=Game;

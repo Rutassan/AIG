@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "dgSpecHash": "fYJeiDRuIEU5UrBlCn5ayCpVkixJkQ4MIumcOXFp3e5ve/A2nATN9p74mCOgzMpiHJz7a+nw8adxe/J3plkGaQ==",
+  "success": true,
+  "projectFilePath": "/home/rutasan/AIG/src/AIG.Game/AIG.Game.csproj",
+  "expectedPackageFiles": [
+    "/home/rutasan/.nuget/packages/raylib-cs/7.0.2/raylib-cs.7.0.2.nupkg.sha512",
+    "/home/rutasan/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.23/microsoft.aspnetcore.app.ref.8.0.23.nupkg.sha512"
+  ],
+  "logs": []
+}
