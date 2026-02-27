@@ -84,6 +84,12 @@ public sealed class RaylibGamePlatform : IGamePlatform
     }
 
     public void DrawText(string text, int posX, int posY, int fontSize, Color color) => Raylib.DrawText(text, posX, posY, fontSize, color);
+    public void TakeScreenshot(string filePath)
+    {
+        var image = Raylib.LoadImageFromScreen();
+        Raylib.ExportImage(image, filePath);
+        Raylib.UnloadImage(image);
+    }
     public void EndDrawing() => Raylib.EndDrawing();
 
     private static int[] BuildCodepoints(string value)

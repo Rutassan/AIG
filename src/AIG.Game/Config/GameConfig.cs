@@ -4,7 +4,7 @@ public sealed class GameConfig
 {
     public int WindowWidth { get; init; } = 1280;
     public int WindowHeight { get; init; } = 720;
-    public string Title { get; init; } = "AIG 0.003";
+    public string Title { get; init; } = "AIG 0.004";
     public float MouseSensitivity { get; init; } = 0.0025f;
     public float MoveSpeed { get; init; } = 5.5f;
     public float JumpSpeed { get; init; } = 6.2f;
@@ -16,4 +16,7 @@ public sealed class GameConfig
     public int ChunkSize { get; init; } = 16;
     public int RenderDistance { get; init; } = 28;
     public bool DrawBlockWires { get; init; } = false;
+    public GraphicsQuality GraphicsQuality { get; init; } = GraphicsQuality.Medium;
+    public bool FogEnabled { get; init; } = true;
+    public bool ReliefContoursEnabled { get; init; } = true;
 }

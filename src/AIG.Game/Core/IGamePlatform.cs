@@ -36,5 +36,6 @@ public interface IGamePlatform
     int GetFps();
     void DrawUiText(string text, Vector2 position, float fontSize, float spacing, Color color);
     void DrawText(string text, int posX, int posY, int fontSize, Color color);
+    void TakeScreenshot(string filePath);
     void EndDrawing();
 }

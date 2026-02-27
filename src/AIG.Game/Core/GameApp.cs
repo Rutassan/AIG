@@ -13,15 +13,18 @@ public class GameApp : IGameRunner
     private const int MenuButtonWidth = 360;
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
+    private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
 
     private readonly GameConfig _config;
     private readonly IGamePlatform _platform;
     private readonly WorldMap _world;
     private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone];
+    private readonly GraphicsSettings _graphics;
 
     private PlayerController _player = null!;
     private AppState _state = AppState.MainMenu;
     private int _selectedHotbarIndex;
+    private float _lastFrameMs;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -33,6 +36,7 @@ public class GameApp : IGameRunner
         _config = config;
         _platform = platform;
         _world = world;
+        _graphics = new GraphicsSettings(config);
     }
 
     private enum AppState
@@ -44,18 +48,7 @@ public class GameApp : IGameRunner
 
     public void Run()
     {
-        _platform.SetConfigFlags(ConfigFlags.ResizableWindow);
-        _platform.InitWindow(_config.WindowWidth, _config.WindowHeight, _config.Title);
-        _platform.SetExitKey(KeyboardKey.Null);
-        _platform.SetTargetFps(_config.TargetFps);
-
-        if (_config.FullscreenByDefault && !_platform.IsWindowFullscreen())
-        {
-            _platform.ToggleFullscreen();
-        }
-
-        _platform.LoadUiFont(ResolveUiFontPath(), 42);
-        _platform.EnableCursor();
+        InitializePlatform(enableFullscreen: true);
 
         _player = new PlayerController(_config, new Vector3(_world.Width / 2f, 4f, _world.Depth / 2f));
 
@@ -71,6 +64,7 @@ public class GameApp : IGameRunner
             }
 
             var delta = _platform.GetFrameTime();
+            _lastFrameMs = delta * 1000f;
             if (_state == AppState.Playing)
             {
                 HandleHotbarInput();
@@ -102,6 +96,15 @@ public class GameApp : IGameRunner
                     case MenuAction.ToggleFullscreen:
                         _platform.ToggleFullscreen();
                         break;
+                    case MenuAction.CycleGraphicsQuality:
+                        _graphics.CycleQuality();
+                        break;
+                    case MenuAction.ToggleFog:
+                        _graphics.ToggleFog();
+                        break;
+                    case MenuAction.ToggleReliefContours:
+                        _graphics.ToggleReliefContours();
+                        break;
                     case MenuAction.Exit:
                         shouldExit = true;
                         break;
@@ -111,9 +114,36 @@ public class GameApp : IGameRunner
             DrawFrame(currentHit);
         }
 
-        _platform.UnloadUiFont();
-        _platform.EnableCursor();
-        _platform.CloseWindow();
+        ShutdownPlatform();
+    }
+
+    internal void RunAutoCapture(string outputDirectory)
+    {
+        Directory.CreateDirectory(outputDirectory);
+
+        InitializePlatform(enableFullscreen: false);
+        _state = AppState.Playing;
+        _platform.DisableCursor();
+
+        var shots = GetAutoCaptureShots();
+        if (shots.Length > 0)
+        {
+            var warmupHit = PrepareAutoCaptureShot(shots[0]);
+            DrawFrame(warmupHit);
+            DrawFrame(warmupHit);
+            _platform.TakeScreenshot(Path.Combine(outputDirectory, "autocap-warmup.png"));
+        }
+
+        foreach (var shot in shots)
+        {
+            var hit = PrepareAutoCaptureShot(shot);
+            DrawFrame(hit);
+            DrawFrame(hit);
+
+            _platform.TakeScreenshot(Path.Combine(outputDirectory, shot.FileName));
+        }
+
+        ShutdownPlatform();
     }
 
     internal static PlayerInput ReadInput(IGamePlatform platform)
@@ -145,7 +175,7 @@ public class GameApp : IGameRunner
         return new PlayerInput(
             MoveForward: forward,
             MoveRight: right,
-            Jump: platform.IsKeyPressed(KeyboardKey.Space),
+            Jump: platform.IsKeyPressed(KeyboardKey.Space) || platform.IsKeyDown(KeyboardKey.Space),
             LookDeltaX: mouse.X,
             LookDeltaY: mouse.Y
         );
@@ -188,6 +218,21 @@ public class GameApp : IGameRunner
             return MenuAction.Exit;
         }
 
+        if (IsButtonClicked(GetGraphicsButtonRect()))
+        {
+            return MenuAction.CycleGraphicsQuality;
+        }
+
+        if (IsButtonClicked(GetFogButtonRect()))
+        {
+            return MenuAction.ToggleFog;
+        }
+
+        if (IsButtonClicked(GetReliefButtonRect()))
+        {
+            return MenuAction.ToggleReliefContours;
+        }
+
         return MenuAction.None;
     }
 
@@ -208,7 +253,7 @@ public class GameApp : IGameRunner
     private void DrawFrame(BlockRaycastHit? hit)
     {
         _platform.BeginDrawing();
-        _platform.ClearBackground(new Color(140, 197, 248, 255));
+        _platform.ClearBackground(GetSkyColor());
 
         if (_state != AppState.MainMenu)
         {
@@ -240,7 +285,7 @@ public class GameApp : IGameRunner
 
     private void DrawWorld()
     {
-        var renderDistance = _config.RenderDistance;
+        var renderDistance = _graphics.RenderDistance;
         var centerX = (int)MathF.Floor(_player.Position.X);
         var centerY = (int)MathF.Floor(_player.Position.Y);
         var centerZ = (int)MathF.Floor(_player.Position.Z);
@@ -280,9 +325,11 @@ public class GameApp : IGameRunner
                         BlockType.Stone => new Color(112, 112, 122, 255),
                         _ => Color.White
                     };
+                    var topVisible = IsTopFaceVisible(x, y, z);
+                    color = ApplyVisualStyle(color, x, y, z, centerX, centerZ, topVisible);
 
                     _platform.DrawCube(center, 1f, 1f, 1f, color);
-                    if (_config.DrawBlockWires)
+                    if (_graphics.DrawBlockWires)
                     {
                         _platform.DrawCubeWires(center, 1f, 1f, 1f, new Color(0, 0, 0, 35));
                     }
@@ -294,11 +341,123 @@ public class GameApp : IGameRunner
     private bool IsBlockVisible(int x, int y, int z)
     {
         return !_world.IsSolid(x + 1, y, z)
-            | !_world.IsSolid(x - 1, y, z)
-            | !_world.IsSolid(x, y + 1, z)
-            | !_world.IsSolid(x, y - 1, z)
-            | !_world.IsSolid(x, y, z + 1)
-            | !_world.IsSolid(x, y, z - 1);
+            || !_world.IsSolid(x - 1, y, z)
+            || !_world.IsSolid(x, y + 1, z)
+            || !_world.IsSolid(x, y - 1, z)
+            || !_world.IsSolid(x, y, z + 1)
+            || !_world.IsSolid(x, y, z - 1);
+    }
+
+    private bool IsTopFaceVisible(int x, int y, int z)
+    {
+        return !_world.IsSolid(x, y + 1, z);
+    }
+
+    private bool HasSteepDropNear(int x, int y, int z)
+    {
+        return !_world.IsSolid(x + 1, y - 1, z)
+            || !_world.IsSolid(x - 1, y - 1, z)
+            || !_world.IsSolid(x, y - 1, z + 1)
+            || !_world.IsSolid(x, y - 1, z - 1);
+    }
+
+    private Color ApplyVisualStyle(Color baseColor, int x, int y, int z, int centerX, int centerZ, bool topVisible)
+    {
+        var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 11) - 5;
+        var textured = ChangeRgb(baseColor, noise, noise, noise);
+
+        var visibleFaces = CountVisibleFaces(x, y, z);
+        var brightness = topVisible ? 1.06f : 0.9f;
+        brightness += (visibleFaces - 2) * 0.028f;
+
+        if (topVisible)
+        {
+            var skyExposure = CountSkyExposure(x, y, z);
+            brightness *= 0.82f + skyExposure * 0.05f;
+
+            if (_graphics.ReliefContoursEnabled && HasSteepDropNear(x, y, z))
+            {
+                brightness *= 0.88f;
+            }
+        }
+
+        brightness *= _graphics.LightStrength;
+
+        var lit = MultiplyRgb(textured, brightness);
+        var contrasted = ApplyContrast(lit, _graphics.Contrast);
+
+        if (!_graphics.FogEnabled)
+        {
+            return contrasted;
+        }
+
+        var dx = x - centerX;
+        var dz = z - centerZ;
+        var distance = MathF.Sqrt(dx * dx + dz * dz);
+        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+        return LerpColor(contrasted, GetSkyColor(), fogT);
+    }
+
+    private int CountVisibleFaces(int x, int y, int z)
+    {
+        var count = 0;
+        if (!_world.IsSolid(x + 1, y, z)) count++;
+        if (!_world.IsSolid(x - 1, y, z)) count++;
+        if (!_world.IsSolid(x, y + 1, z)) count++;
+        if (!_world.IsSolid(x, y - 1, z)) count++;
+        if (!_world.IsSolid(x, y, z + 1)) count++;
+        if (!_world.IsSolid(x, y, z - 1)) count++;
+        return count;
+    }
+
+    private int CountSkyExposure(int x, int y, int z)
+    {
+        var count = 0;
+        if (!_world.IsSolid(x, y + 1, z)) count++;
+        if (!_world.IsSolid(x + 1, y + 1, z)) count++;
+        if (!_world.IsSolid(x - 1, y + 1, z)) count++;
+        if (!_world.IsSolid(x, y + 1, z + 1)) count++;
+        if (!_world.IsSolid(x, y + 1, z - 1)) count++;
+        return count;
+    }
+
+    private static Color MultiplyRgb(Color color, float factor)
+    {
+        return new Color(
+            (byte)Math.Clamp((int)(color.R * factor), 0, 255),
+            (byte)Math.Clamp((int)(color.G * factor), 0, 255),
+            (byte)Math.Clamp((int)(color.B * factor), 0, 255),
+            color.A);
+    }
+
+    private static Color ChangeRgb(Color color, int dr, int dg, int db)
+    {
+        return new Color(
+            (byte)Math.Clamp(color.R + dr, 0, 255),
+            (byte)Math.Clamp(color.G + dg, 0, 255),
+            (byte)Math.Clamp(color.B + db, 0, 255),
+            color.A);
+    }
+
+    private static Color ApplyContrast(Color color, float contrast)
+    {
+        int C(int v) => (int)Math.Clamp(((v / 255f - 0.5f) * contrast + 0.5f) * 255f, 0, 255);
+        return new Color((byte)C(color.R), (byte)C(color.G), (byte)C(color.B), color.A);
+    }
+
+    private static Color LerpColor(Color from, Color to, float t)
+    {
+        byte Lerp(byte a, byte b) => (byte)Math.Clamp((int)(a + (b - a) * t), 0, 255);
+        return new Color(
+            Lerp(from.R, to.R),
+            Lerp(from.G, to.G),
+            Lerp(from.B, to.B),
+            (byte)255);
+    }
+
+    private static Color GetSkyColor()
+    {
+        return new Color(132, 188, 243, 255);
     }
 
     private void DrawBlockHighlight(BlockRaycastHit? hit)
@@ -309,8 +468,53 @@ public class GameApp : IGameRunner
         }
 
         var h = hit.Value;
-        var center = new Vector3(h.X + 0.5f, h.Y + 0.5f, h.Z + 0.5f);
-        _platform.DrawCubeWires(center, 1.02f, 1.02f, 1.02f, Color.Yellow);
+        if (!TryGetHitFaceNormal(h, out var faceNormal))
+        {
+            var fallbackCenter = new Vector3(h.X + 0.5f, h.Y + 0.5f, h.Z + 0.5f);
+            _platform.DrawCubeWires(fallbackCenter, 1.02f, 1.02f, 1.02f, Color.Yellow);
+            return;
+        }
+
+        DrawHitFaceHighlight(h, faceNormal);
+    }
+
+    private void DrawHitFaceHighlight(BlockRaycastHit hit, Vector3 faceNormal)
+    {
+        var center = new Vector3(hit.X + 0.5f, hit.Y + 0.5f, hit.Z + 0.5f);
+        var faceCenter = center + faceNormal * 0.51f;
+
+        const float faceSize = 1.02f;
+        const float faceThickness = 0.04f;
+
+        var width = MathF.Abs(faceNormal.X) > 0.5f ? faceThickness : faceSize;
+        var height = MathF.Abs(faceNormal.Y) > 0.5f ? faceThickness : faceSize;
+        var length = MathF.Abs(faceNormal.Z) > 0.5f ? faceThickness : faceSize;
+
+        _platform.DrawCube(faceCenter, width, height, length, new Color(255, 232, 87, 110));
+        _platform.DrawCubeWires(faceCenter, width, height, length, Color.Yellow);
+    }
+
+    private static bool TryGetHitFaceNormal(BlockRaycastHit hit, out Vector3 faceNormal)
+    {
+        var dx = hit.PreviousX - hit.X;
+        var dy = hit.PreviousY - hit.Y;
+        var dz = hit.PreviousZ - hit.Z;
+
+        var axisCount = (dx != 0 ? 1 : 0) + (dy != 0 ? 1 : 0) + (dz != 0 ? 1 : 0);
+        if (axisCount != 1)
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        if (Math.Abs(dx) > 1 || Math.Abs(dy) > 1 || Math.Abs(dz) > 1)
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        faceNormal = new Vector3(dx, dy, dz);
+        return true;
     }
 
     private void DrawHud(bool drawCrosshair)
@@ -323,9 +527,10 @@ public class GameApp : IGameRunner
             _platform.DrawLine(centerX, centerY - 8, centerX, centerY + 8, Color.Black);
         }
 
-        _platform.DrawRectangle(8, 8, 320, 64, new Color(255, 255, 255, 190));
+        _platform.DrawRectangle(8, 8, 420, 88, new Color(255, 255, 255, 190));
         _platform.DrawUiText($"FPS: {_platform.GetFps()}", new Vector2(16, 14), 20, 1f, Color.Black);
         _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(16, 38), 20, 1f, Color.DarkGray);
+        _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(16, 62), 18, 1f, Color.DarkGray);
     }
 
     private void DrawHotbar()
@@ -354,6 +559,9 @@ public class GameApp : IGameRunner
         var title = _state == AppState.MainMenu ? "AIG 0.003" : "Пауза";
         var startLabel = _state == AppState.MainMenu ? "Начать игру" : "Продолжить";
         var fullscreenLabel = _platform.IsWindowFullscreen() ? "Оконный режим" : "Полный экран";
+        var graphicsLabel = $"Графика: {GetQualityName(_graphics.Quality)}";
+        var fogLabel = $"Туман: {(_graphics.FogEnabled ? "Вкл" : "Выкл")}";
+        var reliefLabel = $"Контуры рельефа: {(_graphics.ReliefContoursEnabled ? "Вкл" : "Выкл")}";
 
         _platform.DrawRectangle(0, 0, _platform.GetScreenWidth(), _platform.GetScreenHeight(), new Color(10, 16, 26, 150));
         _platform.DrawUiText(title, new Vector2(_platform.GetScreenWidth() / 2f - 95, 100), 48, 1f, Color.White);
@@ -361,14 +569,23 @@ public class GameApp : IGameRunner
         var start = GetStartButtonRect();
         var fullscreen = GetFullscreenButtonRect();
         var exit = GetExitButtonRect();
+        var graphics = GetGraphicsButtonRect();
+        var fog = GetFogButtonRect();
+        var relief = GetReliefButtonRect();
 
         _platform.DrawRectangle(start.X, start.Y, start.W, start.H, new Color(228, 233, 241, 240));
         _platform.DrawRectangle(fullscreen.X, fullscreen.Y, fullscreen.W, fullscreen.H, new Color(194, 220, 255, 240));
         _platform.DrawRectangle(exit.X, exit.Y, exit.W, exit.H, new Color(220, 98, 98, 245));
+        _platform.DrawRectangle(graphics.X, graphics.Y, graphics.W, graphics.H, new Color(231, 240, 217, 240));
+        _platform.DrawRectangle(fog.X, fog.Y, fog.W, fog.H, new Color(233, 225, 248, 240));
+        _platform.DrawRectangle(relief.X, relief.Y, relief.W, relief.H, new Color(233, 225, 248, 240));
 
         _platform.DrawUiText(startLabel, new Vector2(start.X + 70, start.Y + 16), 28, 1f, Color.Black);
         _platform.DrawUiText(fullscreenLabel, new Vector2(fullscreen.X + 70, fullscreen.Y + 16), 28, 1f, Color.Black);
         _platform.DrawUiText("Выход", new Vector2(exit.X + 125, exit.Y + 16), 28, 1f, Color.White);
+        _platform.DrawUiText(graphicsLabel, new Vector2(graphics.X + 30, graphics.Y + 16), 28, 1f, Color.Black);
+        _platform.DrawUiText(fogLabel, new Vector2(fog.X + 30, fog.Y + 16), 26, 1f, Color.Black);
+        _platform.DrawUiText(reliefLabel, new Vector2(relief.X + 30, relief.Y + 16), 26, 1f, Color.Black);
     }
 
     private (int X, int Y, int W, int H) GetStartButtonRect()
@@ -389,6 +606,27 @@ public class GameApp : IGameRunner
     {
         var x = _platform.GetScreenWidth() / 2 - MenuButtonWidth / 2;
         var y = _platform.GetScreenHeight() / 2 + MenuButtonHeight + MenuButtonsGap;
+        return (x, y, MenuButtonWidth, MenuButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetGraphicsButtonRect()
+    {
+        var x = _platform.GetScreenWidth() / 2 - MenuButtonWidth / 2;
+        var y = _platform.GetScreenHeight() / 2 + (MenuButtonHeight + MenuButtonsGap) * 2;
+        return (x, y, MenuButtonWidth, MenuButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetFogButtonRect()
+    {
+        var x = _platform.GetScreenWidth() / 2 - MenuButtonWidth / 2;
+        var y = _platform.GetScreenHeight() / 2 + (MenuButtonHeight + MenuButtonsGap) * 3;
+        return (x, y, MenuButtonWidth, MenuButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetReliefButtonRect()
+    {
+        var x = _platform.GetScreenWidth() / 2 - MenuButtonWidth / 2;
+        var y = _platform.GetScreenHeight() / 2 + (MenuButtonHeight + MenuButtonsGap) * 4;
         return (x, y, MenuButtonWidth, MenuButtonHeight);
     }
 
@@ -423,7 +661,20 @@ public class GameApp : IGameRunner
         None,
         Start,
         ToggleFullscreen,
+        CycleGraphicsQuality,
+        ToggleFog,
+        ToggleReliefContours,
         Exit
+    }
+
+    internal static string GetQualityName(GraphicsQuality quality)
+    {
+        return quality switch
+        {
+            GraphicsQuality.Low => "Низкая",
+            GraphicsQuality.Medium => "Средняя",
+            _ => "Высокая"
+        };
     }
 
     internal static string ResolveUiFontPath(IEnumerable<string>? candidates = null)
@@ -449,6 +700,51 @@ public class GameApp : IGameRunner
         }
 
         return string.Empty;
+    }
+
+    private void InitializePlatform(bool enableFullscreen)
+    {
+        _platform.SetConfigFlags(ConfigFlags.ResizableWindow);
+        _platform.InitWindow(_config.WindowWidth, _config.WindowHeight, _config.Title);
+        _platform.SetExitKey(KeyboardKey.Null);
+        _platform.SetTargetFps(_config.TargetFps);
+
+        if (enableFullscreen && _config.FullscreenByDefault && !_platform.IsWindowFullscreen())
+        {
+            _platform.ToggleFullscreen();
+        }
+
+        _platform.LoadUiFont(ResolveUiFontPath(), 42);
+        _platform.EnableCursor();
+    }
+
+    private void ShutdownPlatform()
+    {
+        _platform.UnloadUiFont();
+        _platform.EnableCursor();
+        _platform.CloseWindow();
+    }
+
+    private static AutoCaptureShot[] GetAutoCaptureShots()
+    {
+        return
+        [
+            new AutoCaptureShot(
+                "autocap-1.png",
+                new Vector3(47.26f, 3.0f, 47.27f),
+                new Vector3(47.50f, 2.20f, 46.70f)),
+            new AutoCaptureShot(
+                "autocap-2.png",
+                new Vector3(47.26f, 3.0f, 47.27f),
+                new Vector3(47.50f, 2.10f, 47.20f))
+        ];
+    }
+
+    private BlockRaycastHit? PrepareAutoCaptureShot(AutoCaptureShot shot)
+    {
+        _player = new PlayerController(_config, shot.Position);
+        _player.SetPose(shot.Position, shot.LookTarget - _player.EyePosition);
+        return VoxelRaycaster.Raycast(_world, _player.EyePosition, _player.LookDirection, _config.InteractionDistance);
     }
 
     private static GameConfig CreateDefaultConfig()

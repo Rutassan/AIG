@@ -8,9 +8,15 @@ public sealed class PlayerController
 {
     private const float HalfWidth = 0.3f;
     private const float Height = 1.8f;
+    private const float JumpBufferSeconds = 0.14f;
+    private const float CoyoteSeconds = 0.10f;
+    private const float MaxPhysicsStep = 1f / 120f;
+    private const int MaxSubsteps = 8;
 
     private readonly GameConfig _config;
     private float _verticalVelocity;
+    private float _jumpBufferTimer;
+    private float _coyoteTimer;
 
     public PlayerController(GameConfig config, Vector3 startPosition)
     {
@@ -39,11 +45,52 @@ public sealed class PlayerController
         }
     }
 
+    internal void SetPose(Vector3 position, Vector3 lookDirection)
+    {
+        Position = position;
+        _verticalVelocity = 0f;
+        _jumpBufferTimer = 0f;
+        _coyoteTimer = 0f;
+        IsGrounded = false;
+
+        if (lookDirection.LengthSquared() <= 0.000001f)
+        {
+            return;
+        }
+
+        var dir = Vector3.Normalize(lookDirection);
+        var limit = 1.54f;
+        Pitch = Math.Clamp(MathF.Asin(Math.Clamp(dir.Y, -1f, 1f)), -limit, limit);
+
+        var horizontalLenSq = dir.X * dir.X + dir.Z * dir.Z;
+        if (horizontalLenSq > 0.000001f)
+        {
+            Yaw = MathF.Atan2(dir.X, dir.Z);
+        }
+    }
+
     public void Update(WorldMap world, PlayerInput input, float deltaTime)
     {
         ApplyLook(input);
-        ApplyHorizontalMovement(world, input, deltaTime);
-        ApplyVerticalMovement(world, input.Jump, deltaTime);
+
+        if (input.Jump)
+        {
+            _jumpBufferTimer = JumpBufferSeconds;
+        }
+        else
+        {
+            _jumpBufferTimer = MathF.Max(0f, _jumpBufferTimer - deltaTime);
+        }
+
+        var clampedDelta = Math.Clamp(deltaTime, 0f, 0.2f);
+        var substeps = Math.Clamp((int)MathF.Ceiling(clampedDelta / MaxPhysicsStep), 1, MaxSubsteps);
+        var stepDelta = clampedDelta / substeps;
+
+        for (var i = 0; i < substeps; i++)
+        {
+            ApplyHorizontalMovement(world, input, stepDelta);
+            ApplyVerticalMovement(world, stepDelta);
+        }
     }
 
     private void ApplyLook(PlayerInput input)
@@ -84,16 +131,26 @@ public sealed class PlayerController
         Position = next;
     }
 
-    private void ApplyVerticalMovement(WorldMap world, bool jumpPressed, float deltaTime)
+    private void ApplyVerticalMovement(WorldMap world, float deltaTime)
     {
         IsGrounded = IsStandingOnSolid(world);
-        if (IsGrounded && _verticalVelocity < 0f)
+        if (IsGrounded)
         {
-            _verticalVelocity = 0f;
+            _coyoteTimer = CoyoteSeconds;
+            if (_verticalVelocity < 0f)
+            {
+                _verticalVelocity = 0f;
+            }
+        }
+        else
+        {
+            _coyoteTimer = MathF.Max(0f, _coyoteTimer - deltaTime);
         }
 
-        if (IsGrounded && jumpPressed)
+        if (_jumpBufferTimer > 0f && _coyoteTimer > 0f)
         {
+            _jumpBufferTimer = 0f;
+            _coyoteTimer = 0f;
             _verticalVelocity = _config.JumpSpeed;
             IsGrounded = false;
         }

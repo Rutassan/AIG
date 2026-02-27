@@ -1,5 +1,7 @@
 using System.Numerics;
+using AIG.Game.Config;
 using AIG.Game.Gameplay;
+using AIG.Game.Player;
 using AIG.Game.World;
 
 namespace AIG.Game.Tests;
@@ -12,6 +14,23 @@ public sealed class GameplayTests
         var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
         var hit = VoxelRaycaster.Raycast(world, new Vector3(1.5f, 1.5f, 1.5f), Vector3.Zero, 5f);
         Assert.Null(hit);
+    }
+
+    [Fact(DisplayName = "Рейкаст сразу возвращает блок, если стартовая точка внутри твердого блока")]
+    public void Raycast_ReturnsCurrentCell_WhenOriginInsideSolid()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        world.SetBlock(3, 3, 3, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(3.2f, 3.2f, 3.2f), new Vector3(0f, 0f, 1f), 4f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(3, hit.Value.X);
+        Assert.Equal(3, hit.Value.Y);
+        Assert.Equal(3, hit.Value.Z);
+        Assert.Equal(3, hit.Value.PreviousX);
+        Assert.Equal(3, hit.Value.PreviousY);
+        Assert.Equal(3, hit.Value.PreviousZ);
     }
 
     [Fact(DisplayName = "Рейкаст возвращает null, если блоки вне дистанции")]
@@ -79,6 +98,281 @@ public sealed class GameplayTests
 
         Assert.NotNull(hit);
         Assert.Equal(12, hit.Value.X);
+    }
+
+    [Fact(DisplayName = "Рейкаст на границе осей выбирает один из граничных кандидатов")]
+    public void Raycast_TieBreak_ReturnsEdgeCandidate()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(3, 2, 2, BlockType.Stone);
+        world.SetBlock(2, 2, 3, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 1f), 5f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.Y);
+        var isXCandidate = hit.Value.X == 3 && hit.Value.Z == 2;
+        var isZCandidate = hit.Value.X == 2 && hit.Value.Z == 3;
+        Assert.True(isXCandidate || isZCandidate);
+    }
+
+    [Fact(DisplayName = "Рейкаст на угле не пропускает Z-кандидат, если X-кандидат пуст")]
+    public void Raycast_CornerTouch_HitsZCandidateWhenXIsEmpty()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(2, 2, 3, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 1f), 5f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.X);
+        Assert.Equal(2, hit.Value.Y);
+        Assert.Equal(3, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Рейкаст на ребре с Y/Z корректно выбирает Y-кандидат")]
+    public void Raycast_EdgeTouch_PrefersYCandidateWhenAvailable()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(2, 3, 2, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(0f, 1f, 1f), 6f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.X);
+        Assert.Equal(3, hit.Value.Y);
+        Assert.Equal(2, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Рейкаст из-за границы мира корректно нормализует previous координаты")]
+    public void Raycast_FromOutsideWorld_NormalizesPreviousCell()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        world.SetBlock(0, 2, 2, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(-0.5f, 2.5f, 2.5f), Vector3.UnitX, 2f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(0, hit.Value.X);
+        Assert.Equal(2, hit.Value.Y);
+        Assert.Equal(2, hit.Value.Z);
+        Assert.Equal(hit.Value.X, hit.Value.PreviousX);
+        Assert.Equal(hit.Value.Y, hit.Value.PreviousY);
+        Assert.Equal(hit.Value.Z, hit.Value.PreviousZ);
+    }
+
+    [Fact(DisplayName = "Рейкаст на точном пределе дистанции обрабатывает tie без probe-совпадения")]
+    public void Raycast_TieAtDistanceLimit_WorksWithoutProbeMatch()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(3, 2, 2, BlockType.Stone);
+        world.SetBlock(2, 2, 3, BlockType.Stone);
+
+        var maxDistance = MathF.Sqrt(0.5f);
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.5f, 2.5f, 2.5f), new Vector3(1f, 0f, 1f), maxDistance);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.Y);
+        var isXCandidate = hit.Value.X == 3 && hit.Value.Z == 2;
+        var isZCandidate = hit.Value.X == 2 && hit.Value.Z == 3;
+        Assert.True(isXCandidate || isZCandidate);
+    }
+
+    [Fact(DisplayName = "Рейкаст на граничном tie выбирает клетку по направлению после пересечения")]
+    public void Raycast_TieUsesForwardProbe_ForDeterministicSelection()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(3, 2, 2, BlockType.Stone);
+        world.SetBlock(3, 3, 2, BlockType.Stone);
+
+        var direction = Vector3.Normalize(new Vector3(1f, 1f, 0f));
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.5f, 2.5f, 2.5f), direction, 6f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(3, hit.Value.X);
+        Assert.Equal(3, hit.Value.Y);
+        Assert.Equal(2, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Рейкаст отсекает блоки, если вход в них дальше maxDistance")]
+    public void Raycast_RejectsBlocksBeyondDistance()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        world.SetBlock(1, 2, 2, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(0.1f, 2.5f, 2.5f), Vector3.UnitX, 0.01f);
+
+        Assert.Null(hit);
+    }
+
+    [Fact(DisplayName = "Рейкаст использует fallback Y, если доминирующий X-кандидат пуст")]
+    public void Raycast_FallbackY_WhenDominantXCandidateIsEmpty()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(2, 3, 2, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.25f, 2.5f, 2.5f), new Vector3(1.5f, 1f, 0f), 6f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.X);
+        Assert.Equal(3, hit.Value.Y);
+        Assert.Equal(2, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Рейкаст использует fallback Z, если доминирующий X-кандидат пуст")]
+    public void Raycast_FallbackZ_WhenDominantXCandidateIsEmpty()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(2, 2, 3, BlockType.Stone);
+
+        var hit = VoxelRaycaster.Raycast(world, new Vector3(2.25f, 2.5f, 2.5f), new Vector3(1.5f, 0f, 1f), 6f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(2, hit.Value.X);
+        Assert.Equal(2, hit.Value.Y);
+        Assert.Equal(3, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Луч из позиции глаз игрока попадает в центральный блок по направлению взгляда")]
+    public void Raycast_FromPlayerEye_HitsExpectedBlock()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        world.SetBlock(12, 5, 12, BlockType.Air);
+        world.SetBlock(12, 5, 11, BlockType.Air);
+        world.SetBlock(12, 5, 10, BlockType.Stone);
+        var player = new PlayerController(new GameConfig(), new Vector3(12.5f, 4f, 12.5f));
+
+        var hit = VoxelRaycaster.Raycast(world, player.EyePosition, player.LookDirection, 6.5f);
+
+        Assert.NotNull(hit);
+        Assert.Equal(12, hit.Value.X);
+        Assert.Equal(5, hit.Value.Y);
+        Assert.Equal(10, hit.Value.Z);
+    }
+
+    [Fact(DisplayName = "Рейкаст на позиции игрока из скрина выбирает ту же грань, что и точное AABB-пересечение")]
+    public void Raycast_UserScreenshotPose_MatchesAabbFaceAcrossDirections()
+    {
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: 16, seed: 777);
+        var player = new PlayerController(new GameConfig(), new Vector3(47.73f, 3.00f, 45.37f));
+        var origin = player.EyePosition;
+        const float maxDistance = 6.5f;
+
+        for (var yaw = -MathF.PI; yaw <= MathF.PI; yaw += 0.16f)
+        {
+            for (var pitch = -1.25f; pitch <= 1.25f; pitch += 0.14f)
+            {
+                var direction = BuildDirection(yaw, pitch);
+                var hit = VoxelRaycaster.Raycast(world, origin, direction, maxDistance);
+                if (hit is null)
+                {
+                    continue;
+                }
+
+                var actual = new Vector3(
+                    hit.Value.PreviousX - hit.Value.X,
+                    hit.Value.PreviousY - hit.Value.Y,
+                    hit.Value.PreviousZ - hit.Value.Z);
+
+                var nonZero = (actual.X != 0 ? 1 : 0) + (actual.Y != 0 ? 1 : 0) + (actual.Z != 0 ? 1 : 0);
+                Assert.Equal(1, nonZero);
+                Assert.InRange(MathF.Abs(actual.X + actual.Y + actual.Z), 1f, 1f);
+
+                var hasExpected = TryGetExpectedAabbEntryFace(origin, direction, hit.Value, out var expected, out var ambiguous);
+                Assert.True(hasExpected);
+
+                if (ambiguous)
+                {
+                    continue;
+                }
+
+                Assert.True(Vector3.Distance(expected, actual) < 0.001f,
+                    $"Несовпадение грани. yaw={yaw:0.000}, pitch={pitch:0.000}, expected={expected}, actual={actual}, hit=({hit.Value.X},{hit.Value.Y},{hit.Value.Z}) prev=({hit.Value.PreviousX},{hit.Value.PreviousY},{hit.Value.PreviousZ})");
+            }
+        }
+    }
+
+    private static Vector3 BuildDirection(float yaw, float pitch)
+    {
+        var x = MathF.Sin(yaw) * MathF.Cos(pitch);
+        var y = MathF.Sin(pitch);
+        var z = MathF.Cos(yaw) * MathF.Cos(pitch);
+        return Vector3.Normalize(new Vector3(x, y, z));
+    }
+
+    private static bool TryGetExpectedAabbEntryFace(
+        Vector3 origin,
+        Vector3 direction,
+        BlockRaycastHit hit,
+        out Vector3 expectedFace,
+        out bool ambiguous)
+    {
+        const float eps = 0.0001f;
+        var min = new Vector3(hit.X, hit.Y, hit.Z);
+        var max = min + Vector3.One;
+
+        if (!TryAxis(origin.X, direction.X, min.X, max.X, out var nearX, out var farX)
+            || !TryAxis(origin.Y, direction.Y, min.Y, max.Y, out var nearY, out var farY)
+            || !TryAxis(origin.Z, direction.Z, min.Z, max.Z, out var nearZ, out var farZ))
+        {
+            expectedFace = Vector3.Zero;
+            ambiguous = false;
+            return false;
+        }
+
+        var entry = MathF.Max(MathF.Max(nearX, nearY), nearZ);
+        var exit = MathF.Min(MathF.Min(farX, farY), farZ);
+        if (exit < entry || exit < 0f)
+        {
+            expectedFace = Vector3.Zero;
+            ambiguous = false;
+            return false;
+        }
+
+        var xHit = MathF.Abs(entry - nearX) <= eps;
+        var yHit = MathF.Abs(entry - nearY) <= eps;
+        var zHit = MathF.Abs(entry - nearZ) <= eps;
+        var faceCount = (xHit ? 1 : 0) + (yHit ? 1 : 0) + (zHit ? 1 : 0);
+        ambiguous = faceCount != 1;
+
+        if (xHit)
+        {
+            expectedFace = new Vector3(direction.X > 0f ? -1f : 1f, 0f, 0f);
+            return true;
+        }
+
+        if (yHit)
+        {
+            expectedFace = new Vector3(0f, direction.Y > 0f ? -1f : 1f, 0f);
+            return true;
+        }
+
+        expectedFace = new Vector3(0f, 0f, direction.Z > 0f ? -1f : 1f);
+        return true;
+    }
+
+    private static bool TryAxis(float origin, float direction, float min, float max, out float near, out float far)
+    {
+        const float axisEps = 0.0000001f;
+        if (MathF.Abs(direction) <= axisEps)
+        {
+            if (origin < min || origin > max)
+            {
+                near = 0f;
+                far = 0f;
+                return false;
+            }
+
+            near = float.NegativeInfinity;
+            far = float.PositiveInfinity;
+            return true;
+        }
+
+        var t1 = (min - origin) / direction;
+        var t2 = (max - origin) / direction;
+        near = MathF.Min(t1, t2);
+        far = MathF.Max(t1, t2);
+        return true;
     }
 
     [Fact(DisplayName = "Ломание удаляет блок в точке попадания")]

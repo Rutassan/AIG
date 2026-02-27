@@ -133,6 +133,39 @@ public sealed class WorldAndPlayerTests
         Assert.Equal(1.8f, player.ColliderHeight);
     }
 
+    [Fact(DisplayName = "SetPose задает позицию и направление взгляда игрока")]
+    public void Player_SetPose_UpdatesPositionAndLook()
+    {
+        var player = new PlayerController(new GameConfig(), new Vector3(4f, 2f, 4f));
+        var newPosition = new Vector3(10f, 3f, 10f);
+        var lookDirection = new Vector3(1f, -0.2f, -1f);
+
+        player.SetPose(newPosition, lookDirection);
+
+        Assert.Equal(newPosition, player.Position);
+        var expected = Vector3.Normalize(lookDirection);
+        var actual = player.LookDirection;
+        Assert.True(MathF.Abs(actual.X - expected.X) < 0.001f);
+        Assert.True(MathF.Abs(actual.Y - expected.Y) < 0.001f);
+        Assert.True(MathF.Abs(actual.Z - expected.Z) < 0.001f);
+    }
+
+    [Fact(DisplayName = "SetPose с нулевым вектором взгляда меняет позицию без изменения ориентации")]
+    public void Player_SetPose_ZeroLookDirection_OnlyMovesPlayer()
+    {
+        var player = new PlayerController(new GameConfig(), new Vector3(4f, 2f, 4f));
+        var initialDirection = player.LookDirection;
+        var targetPosition = new Vector3(7f, 3f, 8f);
+
+        player.SetPose(targetPosition, Vector3.Zero);
+
+        Assert.Equal(targetPosition, player.Position);
+        var actualDirection = player.LookDirection;
+        Assert.True(MathF.Abs(actualDirection.X - initialDirection.X) < 0.001f);
+        Assert.True(MathF.Abs(actualDirection.Y - initialDirection.Y) < 0.001f);
+        Assert.True(MathF.Abs(actualDirection.Z - initialDirection.Z) < 0.001f);
+    }
+
     [Fact(DisplayName = "Прыжок под потолок останавливает вертикальную скорость без прохода сквозь блок")]
     public void Player_JumpIntoCeiling_DoesNotClipThrough()
     {

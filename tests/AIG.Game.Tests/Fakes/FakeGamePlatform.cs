@@ -6,6 +6,8 @@ namespace AIG.Game.Tests.Fakes;
 
 internal sealed class FakeGamePlatform : IGamePlatform
 {
+    internal sealed record CubeWireCall(Vector3 Position, float Width, float Height, float Length, Color Color);
+
     private sealed record FrameInput(
         Vector2 MousePosition,
         bool LeftMousePressed,
@@ -20,6 +22,8 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly HashSet<KeyboardKey> _downKeys = new();
     private readonly HashSet<KeyboardKey> _pressedKeys = new();
     private readonly List<string> _uiTexts = [];
+    private readonly List<CubeWireCall> _cubeWireCalls = [];
+    private readonly List<string> _screenshots = [];
 
     public int DrawCubeCalls { get; private set; }
     public int DrawCubeWiresCalls { get; private set; }
@@ -48,6 +52,8 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public int ScreenHeight { get; set; } = 720;
     public int Fps { get; set; } = 120;
     public IReadOnlyList<string> DrawnUiTexts => _uiTexts;
+    public IReadOnlyList<CubeWireCall> DrawnCubeWires => _cubeWireCalls;
+    public IReadOnlyList<string> SavedScreenshots => _screenshots;
 
     public void EnqueueWindowShouldClose(params bool[] values)
     {
@@ -230,6 +236,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color)
     {
         DrawCubeWiresCalls++;
+        _cubeWireCalls.Add(new CubeWireCall(position, width, height, length, color));
     }
 
     public int GetScreenWidth() => ScreenWidth;
@@ -257,6 +264,11 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void DrawText(string text, int posX, int posY, int fontSize, Color color)
     {
         DrawTextCalls++;
+    }
+
+    public void TakeScreenshot(string filePath)
+    {
+        _screenshots.Add(filePath);
     }
 
     public void EndDrawing()
