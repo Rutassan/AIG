@@ -2,6 +2,7 @@ using System.Numerics;
 using AIG.Game.Config;
 using AIG.Game.Player;
 using AIG.Game.World;
+using AIG.Game.World.Chunks;
 
 namespace AIG.Game.Tests;
 
@@ -37,6 +38,36 @@ public sealed class WorldAndPlayerTests
         world.SetBlock(2, 2, 4, BlockType.Stone);
 
         Assert.Equal(BlockType.Air, world.GetBlock(2, 2, 2));
+    }
+
+    [Fact(DisplayName = "Чанковый доступ корректно работает на границе чанка")]
+    public void World_ChunkBoundaryAccess_Works()
+    {
+        var world = new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 16, seed: 0);
+        world.SetBlock(15, 2, 15, BlockType.Stone);
+        world.SetBlock(16, 2, 16, BlockType.Dirt);
+
+        Assert.Equal(BlockType.Stone, world.GetBlock(15, 2, 15));
+        Assert.Equal(BlockType.Dirt, world.GetBlock(16, 2, 16));
+    }
+
+    [Fact(DisplayName = "Генерация по seed повторяема между экземплярами мира")]
+    public void World_SeedGeneration_IsDeterministic()
+    {
+        var worldA = new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 16, seed: 12345);
+        var worldB = new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 16, seed: 12345);
+
+        Assert.Equal(worldA.GetBlock(10, 2, 10), worldB.GetBlock(10, 2, 10));
+        Assert.Equal(worldA.GetBlock(22, 2, 31), worldB.GetBlock(22, 2, 31));
+        Assert.Equal(worldA.GetBlock(40, 2, 5), worldB.GetBlock(40, 2, 5));
+    }
+
+    [Fact(DisplayName = "Свойства чанка Size и Height доступны корректно")]
+    public void Chunk_SizeAndHeight_AreAccessible()
+    {
+        var chunk = new Chunk(size: 16, height: 24);
+        Assert.Equal(16, chunk.Size);
+        Assert.Equal(24, chunk.Height);
     }
 
     [Fact(DisplayName = "Игрок падает на землю и корректно становится на поверхность")]
@@ -98,6 +129,8 @@ public sealed class WorldAndPlayerTests
         var direction = player.LookDirection;
         Assert.InRange(direction.Length(), 0.999f, 1.001f);
         Assert.True(direction.Z < 0f);
+        Assert.Equal(0.3f, player.ColliderHalfWidth);
+        Assert.Equal(1.8f, player.ColliderHeight);
     }
 
     [Fact(DisplayName = "Прыжок под потолок останавливает вертикальную скорость без прохода сквозь блок")]

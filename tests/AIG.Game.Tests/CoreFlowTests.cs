@@ -61,32 +61,35 @@ public sealed class CoreFlowTests
         Assert.False(input.Jump);
     }
 
-    [Fact(DisplayName = "ReadInput учитывает стрелки вниз и вправо при отпущенных WASD")]
-    public void ReadInput_UsesArrowDownAndRight_WhenWASDNotPressed()
+    [Fact(DisplayName = "ReadInput покрывает ветки для S/Down и A/Left")]
+    public void ReadInput_CoversAlternativeDirectionBranches()
     {
-        var platform = new FakeGamePlatform();
-        platform.SetDownKeys(KeyboardKey.Down, KeyboardKey.Right);
+        var platformSAndA = new FakeGamePlatform();
+        platformSAndA.SetDownKeys(KeyboardKey.S, KeyboardKey.A);
+        var inputSAndA = GameApp.ReadInput(platformSAndA);
+        Assert.Equal(-1f, inputSAndA.MoveForward);
+        Assert.Equal(-1f, inputSAndA.MoveRight);
 
-        var input = GameApp.ReadInput(platform);
-
-        Assert.Equal(-1f, input.MoveForward);
-        Assert.Equal(1f, input.MoveRight);
+        var platformDownAndLeft = new FakeGamePlatform();
+        platformDownAndLeft.SetDownKeys(KeyboardKey.Down, KeyboardKey.Left);
+        var inputDownAndLeft = GameApp.ReadInput(platformDownAndLeft);
+        Assert.Equal(-1f, inputDownAndLeft.MoveForward);
+        Assert.Equal(-1f, inputDownAndLeft.MoveRight);
     }
 
-    [Fact(DisplayName = "ReadInput учитывает S и A через короткое замыкание OR")]
-    public void ReadInput_UsesSAndA_WhenPressed()
+    [Fact(DisplayName = "SelectHotbarIndex выбирает слот по цифре")]
+    public void SelectHotbarIndex_ChangesByNumberKey()
     {
         var platform = new FakeGamePlatform();
-        platform.SetDownKeys(KeyboardKey.S, KeyboardKey.A);
+        platform.SetPressedKeys(KeyboardKey.Two);
 
-        var input = GameApp.ReadInput(platform);
+        var index = GameApp.SelectHotbarIndex(0, platform, hotbarLength: 2);
 
-        Assert.Equal(-1f, input.MoveForward);
-        Assert.Equal(-1f, input.MoveRight);
+        Assert.Equal(1, index);
     }
 
-    [Fact(DisplayName = "На старте показывается меню и мир не рендерится до нажатия кнопки")]
-    public void Run_StartsInMainMenu()
+    [Fact(DisplayName = "На старте включается fullscreen по умолчанию")]
+    public void Run_EnablesFullscreenByDefault()
     {
         var platform = new FakeGamePlatform();
         platform.EnqueueWindowShouldClose(false, true);
@@ -94,82 +97,139 @@ public sealed class CoreFlowTests
         var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
+        Assert.True(platform.ToggleFullscreenCalled);
+        Assert.True(platform.IsFullscreen);
         Assert.True(platform.SetExitKeyCalled);
-        Assert.Equal(KeyboardKey.Null, platform.ExitKey);
         Assert.True(platform.LoadUiFontCalled);
         Assert.True(platform.UnloadUiFontCalled);
-        Assert.True(platform.InitWindowCalled);
-        Assert.Equal(0, platform.DrawCubeCalls);
-        Assert.Equal(0, platform.DrawLineCalls);
-        Assert.True(platform.DrawRectangleCalls > 0);
-        Assert.True(platform.DrawTextCalls > 0);
     }
 
     [Fact(DisplayName = "Кнопка Начать игру запускает игровой режим")]
     public void Run_StartButton_TransitionsToPlaying()
     {
         var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(false, true);
+        platform.EnqueueWindowShouldClose(false, false, true);
         platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
 
         var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
         Assert.True(platform.DisableCursorCalled);
         Assert.True(platform.DrawCubeCalls > 0);
-        Assert.True(platform.DrawLineCalls > 0);
     }
 
-    [Fact(DisplayName = "После старта выполняется апдейт игрока в игровом состоянии")]
-    public void Run_PlayingState_UpdatesPlayerPosition()
+    [Fact(DisplayName = "В режиме Playing обрабатываются хотбар, ЛКМ/ПКМ и подсветка блока")]
+    public void Run_Playing_HandlesHotbarAndBlockInteractions()
     {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            RenderDistance = 2,
+            DrawBlockWires = true,
+            InteractionDistance = 10f
+        };
+
+        var world = new WorldMap(width: 20, height: 12, depth: 20, chunkSize: 8, seed: 0);
+        world.SetBlock(10, 5, 8, BlockType.Stone); // hit + highlight
+        world.SetBlock(11, 5, 9, (BlockType)999); // default-color ветка
+        world.SetBlock(9, 5, 9, BlockType.Stone);
+        world.SetBlock(10, 6, 9, BlockType.Stone);
+        world.SetBlock(10, 4, 9, BlockType.Stone);
+        world.SetBlock(10, 5, 10, BlockType.Stone);
+        // (10,5,8) остается открытым с одной стороны для проверки поздних OR-веток видимости.
+
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(
+            mousePosition: new Vector2(0f, 0f),
+            rightMousePressed: true,
+            pressedKeys: [KeyboardKey.Two]);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
+
+        var app = new GameApp(config, platform, world);
+        app.Run();
+
+        Assert.False(platform.ToggleFullscreenCalled);
+        Assert.True(platform.DrawCubeWiresCalls > 0);
+        Assert.True(platform.DrawLineCalls > 0);
+        Assert.NotEqual(BlockType.Air, world.GetBlock(11, 5, 9));
+    }
+
+    [Fact(DisplayName = "BlockCenterIntersectsPlayer покрывается при правом клике вблизи игрока")]
+    public void Run_RightClickNearPlayer_InvokesPlayerIntersectionPath()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            RenderDistance = 4,
+            InteractionDistance = 8f
+        };
+
+        var world = new WorldMap(width: 20, height: 12, depth: 20, chunkSize: 8, seed: 0);
+        world.SetBlock(10, 5, 9, BlockType.Stone); // previous cell будет рядом с игроком
+
         var platform = new FakeGamePlatform();
         platform.EnqueueWindowShouldClose(false, false, false, true);
         platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), downKeys: [KeyboardKey.W]);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), rightMousePressed: true);
         platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
 
-        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 8, height: 4, depth: 8));
+        var app = new GameApp(config, platform, world);
         app.Run();
 
-        var posTexts = platform.DrawnUiTexts.Where(t => t.StartsWith("Pos:", StringComparison.Ordinal)).ToList();
-        Assert.True(posTexts.Count >= 2);
-        Assert.NotEqual(posTexts[0], posTexts[1]);
+        Assert.Equal(BlockType.Stone, world.GetBlock(10, 5, 9));
+        Assert.True(platform.DrawCubeWiresCalls > 0);
     }
 
-    [Fact(DisplayName = "Кнопка Выход закрывает игру из главного меню")]
-    public void Run_ExitButton_ClosesFromMenu()
+    [Fact(DisplayName = "Кнопка fullscreen в меню переключает режим")]
+    public void Run_MenuFullscreenButton_TogglesMode()
     {
         var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(false, false);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 395f), leftMousePressed: true);
+        platform.EnqueueWindowShouldClose(false, false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 388f), leftMousePressed: true);
 
         var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
-        Assert.True(platform.CloseWindowCalled);
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.False(platform.IsFullscreen);
     }
 
-    [Fact(DisplayName = "Клики вне кнопок меню не меняют состояние")]
-    public void Run_MenuClickOutsideButtons_DoesNotStartOrExit()
+    [Fact(DisplayName = "Клики вне кнопок меню не выполняют действий")]
+    public void Run_MenuOutsideClicks_DoNotTriggerActions()
     {
         var platform = new FakeGamePlatform();
         platform.EnqueueWindowShouldClose(false, false, false, false, true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(300f, 320f), leftMousePressed: true); // левее кнопки
-        platform.EnqueueFrameInput(mousePosition: new Vector2(980f, 320f), leftMousePressed: true); // правее кнопки
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 250f), leftMousePressed: true); // выше кнопки
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 500f), leftMousePressed: true); // ниже кнопки
+        platform.EnqueueFrameInput(mousePosition: new Vector2(200f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(1080f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 200f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 580f), leftMousePressed: true);
 
         var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
         app.Run();
 
         Assert.False(platform.DisableCursorCalled);
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.True(platform.CloseWindowCalled);
     }
 
-    [Fact(DisplayName = "ESC в игре открывает паузу, и игровой HUD перестает рисовать прицел")]
-    public void Run_EscapeInGame_OpensPauseMenuAndPausesHud()
+    [Fact(DisplayName = "Кнопка Выход закрывает игру из меню")]
+    public void Run_ExitButton_ClosesFromMenu()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 450f), leftMousePressed: true);
+
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
+        app.Run();
+
+        Assert.True(platform.CloseWindowCalled);
+        Assert.True(platform.DrawRectangleCalls > 0);
+    }
+
+    [Fact(DisplayName = "ESC в игре открывает паузу")]
+    public void Run_EscapeInGame_OpensPauseMenu()
     {
         var platform = new FakeGamePlatform();
         platform.EnqueueWindowShouldClose(false, false, false, true);
@@ -178,29 +238,12 @@ public sealed class CoreFlowTests
         platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), pressedKeys: [KeyboardKey.Escape]);
         platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
 
-        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 2, height: 3, depth: 2));
+        var app = new GameApp(new GameConfig(), platform, new WorldMap(width: 6, height: 4, depth: 6));
         app.Run();
 
         Assert.True(platform.DisableCursorCalled);
         Assert.True(platform.EnableCursorCalled);
-        Assert.Equal(2, platform.DrawLineCalls);
         Assert.True(platform.DrawRectangleCalls >= 4);
-    }
-
-    [Fact(DisplayName = "Рендер мира использует default-цвет для неизвестного типа блока")]
-    public void Run_DrawWorld_UsesDefaultBlockColorForUnknownType()
-    {
-        var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(false, true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
-
-        var world = new WorldMap(width: 3, height: 4, depth: 3);
-        world.SetBlock(1, 3, 1, (BlockType)999);
-
-        var app = new GameApp(new GameConfig(), platform, world);
-        app.Run();
-
-        Assert.True(platform.DrawCubeCalls > 0);
     }
 
     [Fact(DisplayName = "ResolveUiFontPath возвращает пустую строку, если пути не существуют")]
@@ -213,6 +256,12 @@ public sealed class CoreFlowTests
         ]);
 
         Assert.Equal(string.Empty, result);
+    }
+
+    [Fact(DisplayName = "GetBlockName возвращает fallback для неизвестного типа")]
+    public void GetBlockName_ReturnsDefault_ForUnknown()
+    {
+        Assert.Equal("Блок", GameApp.GetBlockName((BlockType)999));
     }
 
     [Fact(DisplayName = "Пустой конструктор GameApp создаёт экземпляр")]

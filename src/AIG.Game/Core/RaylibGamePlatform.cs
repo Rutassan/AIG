@@ -22,6 +22,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
 
     public void SetConfigFlags(ConfigFlags flags) => Raylib.SetConfigFlags(flags);
     public void SetExitKey(KeyboardKey key) => Raylib.SetExitKey(key);
+    public void ToggleFullscreen() => Raylib.ToggleFullscreen();
+    public bool IsWindowFullscreen() => Raylib.IsWindowFullscreen();
     public void InitWindow(int width, int height, string title) => Raylib.InitWindow(width, height, title);
     public void SetTargetFps(int fps) => Raylib.SetTargetFPS(fps);
     public void DisableCursor() => Raylib.DisableCursor();

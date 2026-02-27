@@ -7,6 +7,8 @@ public interface IGamePlatform
 {
     void SetConfigFlags(ConfigFlags flags);
     void SetExitKey(KeyboardKey key);
+    void ToggleFullscreen();
+    bool IsWindowFullscreen();
     void InitWindow(int width, int height, string title);
     void SetTargetFps(int fps);
     void DisableCursor();

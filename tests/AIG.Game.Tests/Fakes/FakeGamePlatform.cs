@@ -9,6 +9,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private sealed record FrameInput(
         Vector2 MousePosition,
         bool LeftMousePressed,
+        bool RightMousePressed,
         KeyboardKey[] DownKeys,
         KeyboardKey[] PressedKeys,
         Vector2 MouseDelta
@@ -32,6 +33,8 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public bool InitWindowCalled { get; private set; }
     public bool CloseWindowCalled { get; private set; }
     public bool SetExitKeyCalled { get; private set; }
+    public bool ToggleFullscreenCalled { get; private set; }
+    public bool IsFullscreen { get; private set; }
     public bool LoadUiFontCalled { get; private set; }
     public bool UnloadUiFontCalled { get; private set; }
     public int SetTargetFpsValue { get; private set; }
@@ -39,6 +42,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public Vector2 MouseDelta { get; set; }
     public Vector2 MousePosition { get; set; }
     public bool LeftMousePressed { get; set; }
+    public bool RightMousePressed { get; set; }
     public float FrameTime { get; set; } = 1f / 60f;
     public int ScreenWidth { get; set; } = 1280;
     public int ScreenHeight { get; set; } = 720;
@@ -74,6 +78,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void EnqueueFrameInput(
         Vector2 mousePosition,
         bool leftMousePressed = false,
+        bool rightMousePressed = false,
         KeyboardKey[]? downKeys = null,
         KeyboardKey[]? pressedKeys = null,
         Vector2? mouseDelta = null)
@@ -81,6 +86,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
         _frameInputs.Enqueue(new FrameInput(
             mousePosition,
             leftMousePressed,
+            rightMousePressed,
             downKeys ?? [],
             pressedKeys ?? [],
             mouseDelta ?? Vector2.Zero));
@@ -95,6 +101,14 @@ internal sealed class FakeGamePlatform : IGamePlatform
         SetExitKeyCalled = true;
         ExitKey = key;
     }
+
+    public void ToggleFullscreen()
+    {
+        ToggleFullscreenCalled = true;
+        IsFullscreen = !IsFullscreen;
+    }
+
+    public bool IsWindowFullscreen() => IsFullscreen;
 
     public void InitWindow(int width, int height, string title)
     {
@@ -129,6 +143,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
 
             MousePosition = nextInput.MousePosition;
             LeftMousePressed = nextInput.LeftMousePressed;
+            RightMousePressed = nextInput.RightMousePressed;
             MouseDelta = nextInput.MouseDelta;
 
             _downKeys.Clear();
@@ -142,6 +157,14 @@ internal sealed class FakeGamePlatform : IGamePlatform
             {
                 _pressedKeys.Add(key);
             }
+        }
+        else
+        {
+            LeftMousePressed = false;
+            RightMousePressed = false;
+            MouseDelta = Vector2.Zero;
+            _downKeys.Clear();
+            _pressedKeys.Clear();
         }
 
         if (_windowShouldCloseSequence.Count == 0)
@@ -164,7 +187,12 @@ internal sealed class FakeGamePlatform : IGamePlatform
 
     public bool IsMouseButtonPressed(MouseButton button)
     {
-        return button == MouseButton.Left && LeftMousePressed;
+        return button switch
+        {
+            MouseButton.Left => LeftMousePressed,
+            MouseButton.Right => RightMousePressed,
+            _ => false
+        };
     }
 
     public void BeginDrawing()

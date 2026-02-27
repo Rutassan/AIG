@@ -23,6 +23,8 @@ public sealed class PlayerController
     public float Yaw { get; private set; }
     public float Pitch { get; private set; }
     public bool IsGrounded { get; private set; }
+    public float ColliderHalfWidth => HalfWidth;
+    public float ColliderHeight => Height;
 
     public Vector3 EyePosition => Position + new Vector3(0f, Height * 0.92f, 0f);
 
