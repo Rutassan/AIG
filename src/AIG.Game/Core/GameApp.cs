@@ -14,11 +14,19 @@ public class GameApp : IGameRunner
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
+    private struct AutoBotState
+    {
+        public Vector3 LastPosition;
+        public float StuckTime;
+        public int TurnSign;
+        public float TurnLockTime;
+        public float WanderPhase;
+    }
 
     private readonly GameConfig _config;
     private readonly IGamePlatform _platform;
     private readonly WorldMap _world;
-    private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone];
+    private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone, BlockType.Wood, BlockType.Leaves];
     private readonly GraphicsSettings _graphics;
     private readonly PlayerVisualState _playerVisual = new();
 
@@ -28,6 +36,9 @@ public class GameApp : IGameRunner
     private int _selectedHotbarIndex;
     private float _lastFrameMs;
     private float _cameraBobPhase;
+    private int _lastStreamChunkX = int.MinValue;
+    private int _lastStreamChunkZ = int.MinValue;
+    private int _lastStreamRadius = -1;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -53,8 +64,9 @@ public class GameApp : IGameRunner
     {
         InitializePlatform(enableFullscreen: true);
 
-        _player = new PlayerController(_config, new Vector3(_world.Width / 2f, 4f, _world.Depth / 2f));
+        _player = new PlayerController(_config, CreateSpawnPosition());
         _playerVisual.Reset(_player.Position);
+        UpdateWorldStreaming(force: true);
 
         var shouldExit = false;
         var currentHit = (BlockRaycastHit?)null;
@@ -84,6 +96,7 @@ public class GameApp : IGameRunner
                 var input = ReadInput(_platform);
                 _player.Update(_world, input, delta);
                 _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
+                UpdateWorldStreaming(force: false);
 
                 var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
                 _cameraBobPhase += delta * (7f + walkBob * 6f);
@@ -110,6 +123,7 @@ public class GameApp : IGameRunner
                 {
                     case MenuAction.Start:
                         _state = AppState.Playing;
+                        UpdateWorldStreaming(force: true);
                         _platform.DisableCursor();
                         break;
                     case MenuAction.ToggleFullscreen:
@@ -175,6 +189,98 @@ public class GameApp : IGameRunner
         ShutdownPlatform();
     }
 
+    internal void RunAutoPerf(string outputDirectory, float durationSeconds = 12f, int minAllowedFps = 60)
+    {
+        Directory.CreateDirectory(outputDirectory);
+
+        InitializePlatform(enableFullscreen: false);
+        _state = AppState.Playing;
+        _cameraMode = CameraMode.FirstPerson;
+        _platform.DisableCursor();
+
+        _player = new PlayerController(_config, CreateSpawnPosition());
+        _playerVisual.Reset(_player.Position);
+        UpdateWorldStreaming(force: true);
+
+        var duration = Math.Clamp(durationSeconds, 1f, 300f);
+        var fpsThreshold = Math.Clamp(minAllowedFps, 1, 240);
+        var bot = new AutoBotState
+        {
+            LastPosition = _player.Position,
+            TurnSign = 1
+        };
+
+        var elapsed = 0f;
+        var frameCount = 0;
+        var minFps = int.MaxValue;
+        var maxFps = 0;
+        var sumFps = 0.0;
+        var belowThresholdFrames = 0;
+
+        while (elapsed < duration && !_platform.WindowShouldClose())
+        {
+            var rawDelta = _platform.GetFrameTime();
+            var delta = rawDelta > 0f ? rawDelta : 1f / 60f;
+            delta = Math.Clamp(delta, 1f / 240f, 0.05f);
+            elapsed += delta;
+            _lastFrameMs = delta * 1000f;
+
+            var botInput = ReadAutoBotInput(delta, ref bot);
+            _player.Update(_world, botInput, delta);
+            _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
+            UpdateWorldStreaming(force: false);
+
+            var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
+            _cameraBobPhase += delta * (7f + walkBob * 6f);
+            var cameraBob = MathF.Sin(_cameraBobPhase) * 0.06f * walkBob;
+
+            var view = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
+            var hit = VoxelRaycaster.Raycast(_world, view.RayOrigin, view.RayDirection, _config.InteractionDistance);
+            DrawFrame(hit, view);
+
+            var fps = Math.Max(1, _platform.GetFps());
+            minFps = Math.Min(minFps, fps);
+            maxFps = Math.Max(maxFps, fps);
+            sumFps += fps;
+            frameCount++;
+            if (fps < fpsThreshold)
+            {
+                belowThresholdFrames++;
+            }
+        }
+
+        if (frameCount == 0)
+        {
+            minFps = 0;
+        }
+
+        var avgFps = frameCount == 0 ? 0f : (float)(sumFps / frameCount);
+        var result = frameCount > 0 && belowThresholdFrames == 0 ? "PASS" : "FAIL";
+        var logName = $"autoperf-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.log";
+        var logPath = Path.Combine(outputDirectory, logName);
+        var lines = new[]
+        {
+            $"timestamp_utc={DateTime.UtcNow:O}",
+            $"duration_sec={elapsed:0.00}",
+            $"frames={frameCount}",
+            $"fps_min={minFps}",
+            $"fps_avg={avgFps:0.00}",
+            $"fps_max={maxFps}",
+            $"fps_threshold={fpsThreshold}",
+            $"below_threshold_frames={belowThresholdFrames}",
+            $"graphics_quality={GetQualityName(_graphics.Quality)}",
+            $"render_distance={_graphics.RenderDistance}",
+            $"result={result}",
+            result == "PASS"
+                ? "message=FPS держится не ниже порога."
+                : "message=Есть просадки ниже порога. Нужна оптимизация."
+        };
+        File.WriteAllLines(logPath, lines);
+        _platform.TakeScreenshot(Path.Combine(outputDirectory, "autoperf-last.png"));
+
+        ShutdownPlatform();
+    }
+
     internal static PlayerInput ReadInput(IGamePlatform platform)
     {
         float forward = 0f;
@@ -228,6 +334,70 @@ public class GameApp : IGameRunner
     private void HandleHotbarInput()
     {
         _selectedHotbarIndex = SelectHotbarIndex(_selectedHotbarIndex, _platform, _hotbar.Length);
+    }
+
+    private PlayerInput ReadAutoBotInput(float deltaTime, ref AutoBotState state)
+    {
+        var forward = ToHorizontalForward(_player.LookDirection);
+        var aheadEye = _player.EyePosition - new Vector3(0f, 0.7f, 0f);
+        var obstacleAhead = VoxelRaycaster.Raycast(_world, aheadEye, forward, 1.1f) is not null;
+        var aheadPoint = _player.Position + forward * 0.9f;
+        var hasGroundAhead = _world.IsSolidAt(new Vector3(aheadPoint.X, _player.Position.Y - 0.25f, aheadPoint.Z));
+
+        var movedXZ = new Vector2(_player.Position.X - state.LastPosition.X, _player.Position.Z - state.LastPosition.Z).Length();
+        if (movedXZ < 0.015f)
+        {
+            state.StuckTime += deltaTime;
+        }
+        else
+        {
+            state.StuckTime = 0f;
+        }
+        state.LastPosition = _player.Position;
+
+        var needTurn = obstacleAhead || !hasGroundAhead || state.StuckTime > 0.35f;
+        if (needTurn && state.TurnLockTime <= 0f)
+        {
+            state.TurnSign = -state.TurnSign;
+            state.TurnLockTime = 0.4f;
+        }
+        else
+        {
+            state.TurnLockTime = MathF.Max(0f, state.TurnLockTime - deltaTime);
+        }
+
+        state.WanderPhase += deltaTime * 1.15f;
+
+        var strafe = needTurn
+            ? state.TurnSign * 0.75f
+            : MathF.Sin(state.WanderPhase * 0.7f) * 0.28f;
+        var yawSpeed = needTurn
+            ? state.TurnSign * 2.8f
+            : MathF.Sin(state.WanderPhase) * 0.45f;
+
+        var sensitivity = MathF.Abs(_config.MouseSensitivity) < 0.00001f
+            ? 0.0025f
+            : _config.MouseSensitivity;
+        var lookDeltaX = -(yawSpeed * deltaTime) / sensitivity;
+        var jump = obstacleAhead && _player.IsGrounded;
+
+        return new PlayerInput(
+            MoveForward: 1f,
+            MoveRight: strafe,
+            Jump: jump,
+            LookDeltaX: lookDeltaX,
+            LookDeltaY: 0f);
+    }
+
+    private static Vector3 ToHorizontalForward(Vector3 direction)
+    {
+        var horizontal = new Vector3(direction.X, 0f, direction.Z);
+        if (horizontal.LengthSquared() < 0.00001f)
+        {
+            return Vector3.UnitZ;
+        }
+
+        return Vector3.Normalize(horizontal);
     }
 
     private MenuAction ReadMenuAction()
@@ -289,7 +459,7 @@ public class GameApp : IGameRunner
             _platform.BeginMode3D(view.Camera);
             DrawWorld();
             DrawPlayerAvatar();
-            DrawBlockHighlight(hit);
+            DrawBlockHighlight(hit, view.RayOrigin, view.RayDirection);
             DrawFirstPersonHand(view.Camera);
             _platform.EndMode3D();
 
@@ -316,35 +486,92 @@ public class GameApp : IGameRunner
         var maxX = Math.Min(_world.Width - 1, centerX + renderDistance);
         var minZ = Math.Max(0, centerZ - renderDistance);
         var maxZ = Math.Min(_world.Depth - 1, centerZ + renderDistance);
-        var minY = Math.Max(0, centerY - 20);
-        var maxY = Math.Min(_world.Height - 1, centerY + 24);
+        var belowY = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 8,
+            GraphicsQuality.Medium => 10,
+            _ => 12
+        };
+        var aboveY = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 12,
+            GraphicsQuality.Medium => 14,
+            _ => 16
+        };
+        var centerSurfaceY = _world.GetTerrainTopY(centerX, centerZ);
+        var minY = Math.Max(0, Math.Min(centerY - belowY, centerSurfaceY - 6));
+        var maxY = Math.Min(_world.Height - 1, Math.Max(centerY + aboveY, centerSurfaceY + 12));
 
         var maxDistSq = renderDistance * renderDistance;
+        var foliageDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 8,
+            GraphicsQuality.Medium => Math.Min(renderDistance, 12),
+            _ => renderDistance
+        };
+        var foliageDistSq = foliageDistance * foliageDistance;
+        var canopyBand = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 10,
+            GraphicsQuality.Medium => 12,
+            _ => 12
+        };
 
         for (var x = minX; x <= maxX; x++)
         {
-            for (var y = minY; y <= maxY; y++)
+            for (var z = minZ; z <= maxZ; z++)
             {
-                for (var z = minZ; z <= maxZ; z++)
+                var dx = x - _player.Position.X;
+                var dz = z - _player.Position.Z;
+                var distSq = dx * dx + dz * dz;
+                if (distSq > maxDistSq)
                 {
-                    var dx = x - _player.Position.X;
-                    var dz = z - _player.Position.Z;
-                    if (dx * dx + dz * dz > maxDistSq)
+                    continue;
+                }
+
+                var columnSurfaceY = _world.GetTerrainTopY(x, z);
+                var columnMinY = Math.Max(minY, columnSurfaceY - 6);
+                var columnMaxY = Math.Min(maxY, columnSurfaceY + canopyBand);
+
+                var hiddenStreak = 0;
+                for (var y = columnMaxY; y >= columnMinY; y--)
+                {
+                    var block = _world.GetBlock(x, y, z);
+                    if (block == BlockType.Air)
                     {
                         continue;
                     }
 
-                    var block = _world.GetBlock(x, y, z);
-                    if (block == BlockType.Air || !IsBlockVisible(x, y, z))
+                    if (block == BlockType.Leaves && distSq > foliageDistSq)
                     {
                         continue;
                     }
+
+                    if (!IsBlockVisible(x, y, z))
+                    {
+                        var isTerrainCore = block is BlockType.Grass or BlockType.Dirt or BlockType.Stone;
+                        if (isTerrainCore && y <= columnSurfaceY)
+                        {
+                            hiddenStreak++;
+                            if (hiddenStreak >= 3)
+                            {
+                                break;
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    hiddenStreak = 0;
 
                     var center = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f);
                     var color = block switch
                     {
+                        BlockType.Grass => new Color(100, 152, 78, 255),
                         BlockType.Dirt => new Color(136, 98, 63, 255),
                         BlockType.Stone => new Color(124, 120, 113, 255),
+                        BlockType.Wood => new Color(120, 88, 54, 255),
+                        BlockType.Leaves => new Color(86, 134, 66, 255),
                         _ => Color.White
                     };
                     var topVisible = IsTopFaceVisible(x, y, z);
@@ -388,13 +615,22 @@ public class GameApp : IGameRunner
         var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 15) - 7;
         var noiseScale = _graphics.TextureNoiseStrength;
 
+        if (block == BlockType.Leaves)
+        {
+            return ApplyLeafStyle(baseColor, x, z, centerX, centerZ, noise, noiseScale);
+        }
+
         var dr = (int)(noise * noiseScale);
-        var dg = block == BlockType.Stone
-            ? (int)(noise * 0.92f * noiseScale)
-            : (int)(noise * 0.88f * noiseScale);
-        var db = block == BlockType.Stone
-            ? (int)(noise * 0.56f * noiseScale)
-            : (int)(noise * 0.76f * noiseScale);
+        var dg = block switch
+        {
+            BlockType.Stone => (int)(noise * 0.92f * noiseScale),
+            _ => (int)(noise * 0.88f * noiseScale)
+        };
+        var db = block switch
+        {
+            BlockType.Stone => (int)(noise * 0.56f * noiseScale),
+            _ => (int)(noise * 0.76f * noiseScale)
+        };
         var textured = ChangeRgb(baseColor, dr, dg, db);
 
         var visibleFaces = CountVisibleFaces(x, y, z);
@@ -417,6 +653,25 @@ public class GameApp : IGameRunner
 
         var lit = MultiplyRgb(textured, brightness);
         var contrasted = ApplyContrast(lit, _graphics.Contrast);
+
+        if (!_graphics.FogEnabled)
+        {
+            return contrasted;
+        }
+
+        var dx = x - centerX;
+        var dz = z - centerZ;
+        var distance = MathF.Sqrt(dx * dx + dz * dz);
+        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+        return LerpColor(contrasted, _graphics.FogColor, fogT);
+    }
+
+    private Color ApplyLeafStyle(Color baseColor, int x, int z, int centerX, int centerZ, int noise, float noiseScale)
+    {
+        var variation = (int)(noise * 0.6f * noiseScale);
+        var textured = ChangeRgb(baseColor, variation / 4, variation, variation / 5);
+        var lit = MultiplyRgb(textured, 0.96f * _graphics.LightStrength);
+        var contrasted = ApplyContrast(lit, 1f + (_graphics.Contrast - 1f) * 0.45f);
 
         if (!_graphics.FogEnabled)
         {
@@ -554,13 +809,16 @@ public class GameApp : IGameRunner
     {
         return block switch
         {
+            BlockType.Grass => new Color(105, 162, 82, 255),
             BlockType.Dirt => new Color(146, 106, 72, 255),
             BlockType.Stone => new Color(128, 123, 116, 255),
+            BlockType.Wood => new Color(132, 96, 58, 255),
+            BlockType.Leaves => new Color(86, 138, 70, 255),
             _ => new Color(220, 220, 220, 255)
         };
     }
 
-    private void DrawBlockHighlight(BlockRaycastHit? hit)
+    private void DrawBlockHighlight(BlockRaycastHit? hit, Vector3 rayOrigin, Vector3 rayDirection)
     {
         if (hit is null || _state != AppState.Playing)
         {
@@ -568,7 +826,8 @@ public class GameApp : IGameRunner
         }
 
         var h = hit.Value;
-        if (!TryGetHitFaceNormal(h, out var faceNormal))
+        if (!TryGetHitFaceNormalFromRay(rayOrigin, rayDirection, h, out var faceNormal)
+            && !TryGetHitFaceNormal(h, out faceNormal))
         {
             var fallbackCenter = new Vector3(h.X + 0.5f, h.Y + 0.5f, h.Z + 0.5f);
             _platform.DrawCubeWires(fallbackCenter, 1.02f, 1.02f, 1.02f, Color.Yellow);
@@ -617,6 +876,108 @@ public class GameApp : IGameRunner
         return true;
     }
 
+    private static bool TryGetHitFaceNormalFromRay(Vector3 rayOrigin, Vector3 rayDirection, BlockRaycastHit hit, out Vector3 faceNormal)
+    {
+        const float axisEpsilon = 0.0000001f;
+        const float tieEpsilon = 0.0001f;
+
+        if (rayDirection.LengthSquared() <= axisEpsilon)
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        rayDirection = Vector3.Normalize(rayDirection);
+
+        var min = new Vector3(hit.X, hit.Y, hit.Z);
+        var max = min + Vector3.One;
+
+        var tMin = 0f;
+        var tMax = float.PositiveInfinity;
+
+        if (!TryAxis(rayOrigin.X, rayDirection.X, min.X, max.X, ref tMin, ref tMax, out var nearX, out var hasX)
+            || !TryAxis(rayOrigin.Y, rayDirection.Y, min.Y, max.Y, ref tMin, ref tMax, out var nearY, out var hasY)
+            || !TryAxis(rayOrigin.Z, rayDirection.Z, min.Z, max.Z, ref tMin, ref tMax, out var nearZ, out var hasZ))
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        if (tMax < tMin || tMax < 0f || tMin <= tieEpsilon)
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        var xHit = hasX && MathF.Abs(nearX - tMin) <= tieEpsilon;
+        var yHit = hasY && MathF.Abs(nearY - tMin) <= tieEpsilon;
+        var zHit = hasZ && MathF.Abs(nearZ - tMin) <= tieEpsilon;
+        if (!xHit && !yHit && !zHit)
+        {
+            faceNormal = Vector3.Zero;
+            return false;
+        }
+
+        var scoreX = xHit ? MathF.Abs(rayDirection.X) : float.NegativeInfinity;
+        var scoreY = yHit ? MathF.Abs(rayDirection.Y) : float.NegativeInfinity;
+        var scoreZ = zHit ? MathF.Abs(rayDirection.Z) : float.NegativeInfinity;
+
+        if (scoreX >= scoreY && scoreX >= scoreZ)
+        {
+            faceNormal = new Vector3(rayDirection.X > 0f ? -1f : 1f, 0f, 0f);
+            return true;
+        }
+
+        if (scoreY >= scoreZ)
+        {
+            faceNormal = new Vector3(0f, rayDirection.Y > 0f ? -1f : 1f, 0f);
+            return true;
+        }
+
+        faceNormal = new Vector3(0f, 0f, rayDirection.Z > 0f ? -1f : 1f);
+        return true;
+    }
+
+    private static bool TryAxis(
+        float origin,
+        float direction,
+        float min,
+        float max,
+        ref float tMin,
+        ref float tMax,
+        out float near,
+        out bool hasDirection)
+    {
+        const float axisEpsilon = 0.0000001f;
+        hasDirection = MathF.Abs(direction) > axisEpsilon;
+        if (!hasDirection)
+        {
+            near = float.NegativeInfinity;
+            return origin >= min && origin <= max;
+        }
+
+        var inv = 1f / direction;
+        var nearT = (min - origin) * inv;
+        var farT = (max - origin) * inv;
+        if (nearT > farT)
+        {
+            (nearT, farT) = (farT, nearT);
+        }
+
+        if (nearT > tMin)
+        {
+            tMin = nearT;
+        }
+
+        if (farT < tMax)
+        {
+            tMax = farT;
+        }
+
+        near = nearT;
+        return tMax >= tMin;
+    }
+
     private void DrawHud(bool drawCrosshair)
     {
         if (drawCrosshair)
@@ -657,7 +1018,7 @@ public class GameApp : IGameRunner
 
     private void DrawMenu()
     {
-        var title = _state == AppState.MainMenu ? "AIG 0.005" : "Пауза";
+        var title = _state == AppState.MainMenu ? _config.Title : "Пауза";
         var startLabel = _state == AppState.MainMenu ? "Начать игру" : "Продолжить";
         var fullscreenLabel = _platform.IsWindowFullscreen() ? "Оконный режим" : "Полный экран";
         var graphicsLabel = $"Графика: {GetQualityName(_graphics.Quality)}";
@@ -751,8 +1112,11 @@ public class GameApp : IGameRunner
     {
         return block switch
         {
+            BlockType.Grass => "Трава",
             BlockType.Dirt => "Земля",
             BlockType.Stone => "Камень",
+            BlockType.Wood => "Дерево",
+            BlockType.Leaves => "Листва",
             _ => "Блок"
         };
     }
@@ -837,20 +1201,22 @@ public class GameApp : IGameRunner
         [
             new AutoCaptureShot(
                 "autocap-1.png",
-                new Vector3(47.26f, 3.0f, 47.27f),
-                new Vector3(47.50f, 2.20f, 46.70f)),
+                new Vector3(320.72f, 35.0f, 305.52f),
+                new Vector3(324.00f, 34.80f, 302.30f)),
             new AutoCaptureShot(
                 "autocap-2.png",
-                new Vector3(47.26f, 3.0f, 47.27f),
-                new Vector3(47.50f, 2.10f, 47.20f))
+                new Vector3(320.72f, 35.0f, 305.52f),
+                new Vector3(318.10f, 34.90f, 303.60f))
         ];
     }
 
     private BlockRaycastHit? PrepareAutoCaptureShot(AutoCaptureShot shot)
     {
-        _player = new PlayerController(_config, shot.Position);
-        _playerVisual.Reset(shot.Position);
-        _player.SetPose(shot.Position, shot.LookTarget - _player.EyePosition);
+        var pose = LiftPoseAboveTerrain(shot.Position);
+        _player = new PlayerController(_config, pose);
+        _playerVisual.Reset(pose);
+        _player.SetPose(pose, shot.LookTarget - shot.Position);
+        UpdateWorldStreaming(force: true);
         return VoxelRaycaster.Raycast(_world, _player.EyePosition, _player.LookDirection, _config.InteractionDistance);
     }
 
@@ -861,6 +1227,53 @@ public class GameApp : IGameRunner
 
     private static WorldMap CreateDefaultWorld(GameConfig config)
     {
-        return new WorldMap(width: 96, height: 32, depth: 96, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        return new WorldMap(width: 600, height: 72, depth: 600, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+    }
+
+    private Vector3 CreateSpawnPosition()
+    {
+        var centerX = Math.Clamp(_world.Width / 2, 0, _world.Width - 1);
+        var centerZ = Math.Clamp(_world.Depth / 2, 0, _world.Depth - 1);
+        var topY = _world.GetTerrainTopY(centerX, centerZ);
+        var preferredY = topY + 3f;
+        var minY = 1.2f;
+        var maxY = Math.Max(minY, _world.Height - 1.2f);
+        var spawnY = Math.Clamp(preferredY, minY, maxY);
+        return new Vector3(centerX + 0.5f, spawnY, centerZ + 0.5f);
+    }
+
+    private Vector3 LiftPoseAboveTerrain(Vector3 position)
+    {
+        var x = Math.Clamp((int)MathF.Floor(position.X), 0, _world.Width - 1);
+        var z = Math.Clamp((int)MathF.Floor(position.Z), 0, _world.Depth - 1);
+        var topY = _world.GetTerrainTopY(x, z);
+        var minY = topY + 3f;
+        var maxY = Math.Max(minY, _world.Height - 1.2f);
+        var y = Math.Clamp(position.Y, minY, maxY);
+        return new Vector3(position.X, y, position.Z);
+    }
+
+    private void UpdateWorldStreaming(bool force)
+    {
+        var center = _player.Position;
+        var chunkX = Math.Clamp((int)MathF.Floor(center.X), 0, _world.Width - 1) / _world.ChunkSize;
+        var chunkZ = Math.Clamp((int)MathF.Floor(center.Z), 0, _world.Depth - 1) / _world.ChunkSize;
+
+        var visibleChunkRadius = (_graphics.RenderDistance + _world.ChunkSize - 1) / _world.ChunkSize;
+        var chunkRadius = Math.Max(2, visibleChunkRadius + 1);
+
+        if (!force
+            && chunkX == _lastStreamChunkX
+            && chunkZ == _lastStreamChunkZ
+            && chunkRadius == _lastStreamRadius)
+        {
+            return;
+        }
+
+        _world.EnsureChunksAround(center, chunkRadius);
+        _world.UnloadFarChunks(center, chunkRadius + 1);
+        _lastStreamChunkX = chunkX;
+        _lastStreamChunkZ = chunkZ;
+        _lastStreamRadius = chunkRadius;
     }
 }

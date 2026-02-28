@@ -15,12 +15,12 @@ public sealed class GraphicsSettingsTests
         });
 
         Assert.Equal(GraphicsQuality.Low, settings.Quality);
-        Assert.Equal(20, settings.RenderDistance);
+        Assert.Equal(12, settings.RenderDistance);
         Assert.False(settings.DrawBlockWires);
-        Assert.Equal(24f, settings.FogNear);
-        Assert.Equal(60f, settings.FogFar);
+        Assert.Equal(14f, settings.FogNear);
+        Assert.Equal(34f, settings.FogFar);
         Assert.Equal(new Color(166, 174, 179, 255).R, settings.FogColor.R);
-        Assert.Equal(0.55f, settings.TextureNoiseStrength);
+        Assert.Equal(0.35f, settings.TextureNoiseStrength);
         Assert.Equal(0.75f, settings.ViewBobScale);
     }
 
@@ -34,13 +34,13 @@ public sealed class GraphicsSettingsTests
 
         settings.CycleQuality();
         Assert.Equal(GraphicsQuality.Medium, settings.Quality);
-        Assert.Equal(28, settings.RenderDistance);
-        Assert.Equal(0.8f, settings.TextureNoiseStrength);
+        Assert.Equal(14, settings.RenderDistance);
+        Assert.Equal(0.5f, settings.TextureNoiseStrength);
 
         settings.CycleQuality();
         Assert.Equal(GraphicsQuality.High, settings.Quality);
         Assert.False(settings.DrawBlockWires);
-        Assert.Equal(32, settings.RenderDistance);
+        Assert.Equal(14, settings.RenderDistance);
         Assert.Equal(new Color(156, 166, 171, 255).G, settings.FogColor.G);
         Assert.Equal(1.15f, settings.ViewBobScale);
 

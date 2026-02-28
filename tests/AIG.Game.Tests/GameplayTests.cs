@@ -254,7 +254,8 @@ public sealed class GameplayTests
     public void Raycast_UserScreenshotPose_MatchesAabbFaceAcrossDirections()
     {
         var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: 16, seed: 777);
-        var player = new PlayerController(new GameConfig(), new Vector3(47.73f, 3.00f, 45.37f));
+        var terrainY = world.GetTerrainTopY(47, 45);
+        var player = new PlayerController(new GameConfig(), new Vector3(47.73f, terrainY + 3f, 45.37f));
         var origin = player.EyePosition;
         const float maxDistance = 6.5f;
 

@@ -1,4 +1,5 @@
 using System.Numerics;
+using System.Reflection;
 using AIG.Game.Config;
 using AIG.Game.Player;
 using AIG.Game.World;
@@ -60,6 +61,124 @@ public sealed class WorldAndPlayerTests
         Assert.Equal(worldA.GetBlock(10, 2, 10), worldB.GetBlock(10, 2, 10));
         Assert.Equal(worldA.GetBlock(22, 2, 31), worldB.GetBlock(22, 2, 31));
         Assert.Equal(worldA.GetBlock(40, 2, 5), worldB.GetBlock(40, 2, 5));
+    }
+
+    [Fact(DisplayName = "Лесной мир имеет травяной верхний слой на поверхности")]
+    public void World_SeededGeneration_UsesGrassOnTopLayer()
+    {
+        var world = new WorldMap(width: 64, height: 32, depth: 64, chunkSize: 16, seed: 777);
+        var x = 20;
+        var z = 20;
+        var topY = world.GetTerrainTopY(x, z);
+
+        Assert.Equal(BlockType.Grass, world.GetBlock(x, topY, z));
+        Assert.NotEqual(BlockType.Air, world.GetBlock(x, Math.Max(0, topY - 1), z));
+    }
+
+    [Fact(DisplayName = "Стриминг чанков загружает, помечает и выгружает дальние чанки")]
+    public void World_ChunkStreaming_LoadAndUnload_Works()
+    {
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: 16, seed: 777);
+
+        Assert.Equal(0, world.LoadedChunkCount);
+        Assert.False(world.IsChunkLoaded(1, 1));
+
+        world.UnloadFarChunks(new Vector3(0f, 0f, 0f), keepRadiusInChunks: 0);
+        Assert.Equal(0, world.LoadedChunkCount);
+
+        world.EnsureChunksAround(new Vector3(24f, 0f, 24f), radiusInChunks: 1);
+
+        Assert.True(world.LoadedChunkCount >= 4);
+        Assert.True(world.IsChunkLoaded(1, 1));
+
+        var loadedBeforeUnload = world.LoadedChunkCount;
+        world.UnloadFarChunks(new Vector3(8f, 0f, 8f), keepRadiusInChunks: 0);
+        Assert.True(world.LoadedChunkCount < loadedBeforeUnload);
+
+        world.UnloadFarChunks(new Vector3(8f, 0f, 8f), keepRadiusInChunks: -1);
+        Assert.Equal(0, world.LoadedChunkCount);
+    }
+
+    [Fact(DisplayName = "GetTerrainTopY обрабатывает границы, а пустой мир не загружает чанки")]
+    public void World_TerrainTopAndEmptyWorldBranches_AreCovered()
+    {
+        var world = new WorldMap(width: 48, height: 24, depth: 48, chunkSize: 16, seed: 777);
+
+        Assert.Equal(0, world.GetTerrainTopY(-1, 10));
+        Assert.Equal(0, world.GetTerrainTopY(10, 48));
+        Assert.InRange(world.GetTerrainTopY(10, 10), 2, 22);
+
+        var emptyWorld = new WorldMap(width: 0, height: 8, depth: 0, chunkSize: 16, seed: 777);
+        emptyWorld.EnsureChunksAround(0, 0, 2);
+        Assert.Equal(0, emptyWorld.LoadedChunkCount);
+    }
+
+    [Fact(DisplayName = "Изменения блоков сохраняются после выгрузки и повторной генерации чанка")]
+    public void World_BlockOverride_PersistsAfterChunkReload()
+    {
+        var world = new WorldMap(width: 96, height: 40, depth: 96, chunkSize: 16, seed: 777);
+        world.SetBlock(20, 9, 20, BlockType.Wood);
+
+        world.UnloadFarChunks(new Vector3(0f, 0f, 0f), keepRadiusInChunks: -1);
+        Assert.Equal(0, world.LoadedChunkCount);
+
+        world.EnsureChunksAround(20, 20, 0);
+        Assert.Equal(BlockType.Wood, world.GetBlock(20, 9, 20));
+    }
+
+    [Fact(DisplayName = "Лесная генерация создаёт дерево и листву в зоне загрузки")]
+    public void World_ForestGeneration_CreatesWoodAndLeaves()
+    {
+        var world = new WorldMap(width: 600, height: 72, depth: 600, chunkSize: 16, seed: 777);
+        world.EnsureChunksAround(new Vector3(300f, 0f, 300f), radiusInChunks: 2);
+
+        var woodCount = 0;
+        var leavesCount = 0;
+        for (var x = 260; x <= 340; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 260; z <= 340; z++)
+                {
+                    var block = world.GetBlock(x, y, z);
+                    if (block == BlockType.Wood)
+                    {
+                        woodCount++;
+                    }
+                    else if (block == BlockType.Leaves)
+                    {
+                        leavesCount++;
+                    }
+                }
+            }
+        }
+
+        Assert.True(woodCount > 0, "Ожидали хотя бы одно дерево (ствол).");
+        Assert.True(leavesCount > 0, "Ожидали хотя бы одну листву.");
+    }
+
+    [Fact(DisplayName = "SetBlockInChunk игнорирует блоки вне мира по высоте")]
+    public void World_SetBlockInChunk_IgnoresOutOfBoundsHeight()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 777);
+        var method = typeof(WorldMap).GetMethod("SetBlockInChunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var chunk = new Chunk(size: 16, height: 16);
+        method!.Invoke(world, [chunk, 0, 0, 2, -1, 2, BlockType.Leaves, true]);
+
+        Assert.Equal(BlockType.Air, chunk.Get(2, 0, 2));
+    }
+
+    [Fact(DisplayName = "FractalNoise возвращает 0 при нулевом числе октав")]
+    public void World_FractalNoise_ZeroOctaves_ReturnsZero()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 777);
+        var method = typeof(WorldMap).GetMethod("FractalNoise", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var value = (float)method!.Invoke(world, [0.5f, 0.75f, 0, 2f, 0.5f])!;
+        Assert.Equal(0f, value);
     }
 
     [Fact(DisplayName = "Свойства чанка Size и Height доступны корректно")]

@@ -227,6 +227,52 @@ public sealed class CameraAndVisualTests
         Assert.Equal((byte)220, color.B);
     }
 
+    [Fact(DisplayName = "GetHeldBlockColor возвращает цвета дерева и листвы")]
+    public void GetHeldBlockColor_ReturnsWoodAndLeavesColors()
+    {
+        var method = typeof(GameApp).GetMethod("GetHeldBlockColor", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var grass = (Color)method!.Invoke(null, [BlockType.Grass])!;
+        Assert.Equal((byte)105, grass.R);
+        Assert.Equal((byte)162, grass.G);
+        Assert.Equal((byte)82, grass.B);
+
+        var wood = (Color)method!.Invoke(null, [BlockType.Wood])!;
+        Assert.Equal((byte)132, wood.R);
+        Assert.Equal((byte)96, wood.G);
+        Assert.Equal((byte)58, wood.B);
+
+        var leaves = (Color)method!.Invoke(null, [BlockType.Leaves])!;
+        Assert.Equal((byte)86, leaves.R);
+        Assert.Equal((byte)138, leaves.G);
+        Assert.Equal((byte)70, leaves.B);
+    }
+
+    [Fact(DisplayName = "ApplyLeafStyle без тумана не зависит от дистанции")]
+    public void ApplyLeafStyle_WithoutFog_IsDistanceIndependent()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("ApplyLeafStyle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var near = (Color)method!.Invoke(app, [new Color(86, 134, 66, 255), 4, 4, 4, 4, 3, 0.6f])!;
+        var far = (Color)method.Invoke(app, [new Color(86, 134, 66, 255), 40, 40, 4, 4, 3, 0.6f])!;
+
+        Assert.Equal(near.R, far.R);
+        Assert.Equal(near.G, far.G);
+        Assert.Equal(near.B, far.B);
+    }
+
     private static object GetPrivateAppStateValue(string stateName)
     {
         var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);

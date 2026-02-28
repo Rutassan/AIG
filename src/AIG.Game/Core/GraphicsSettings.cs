@@ -51,36 +51,36 @@ internal sealed class GraphicsSettings
         switch (preset)
         {
             case GraphicsQuality.Low:
-                RenderDistance = 20;
+                RenderDistance = 12;
                 DrawBlockWires = _forceBlockWires;
-                FogNear = 24f;
-                FogFar = 60f;
+                FogNear = 14f;
+                FogFar = 34f;
                 LightStrength = 0.7f;
                 Contrast = 0.95f;
                 FogColor = new Color(166, 174, 179, 255);
-                TextureNoiseStrength = 0.55f;
+                TextureNoiseStrength = 0.35f;
                 ViewBobScale = 0.75f;
                 break;
             case GraphicsQuality.Medium:
-                RenderDistance = 28;
+                RenderDistance = 14;
                 DrawBlockWires = _forceBlockWires;
-                FogNear = 28f;
-                FogFar = 78f;
+                FogNear = 16f;
+                FogFar = 46f;
                 LightStrength = 0.9f;
                 Contrast = 1.03f;
                 FogColor = new Color(162, 171, 176, 255);
-                TextureNoiseStrength = 0.8f;
+                TextureNoiseStrength = 0.5f;
                 ViewBobScale = 1f;
                 break;
             default:
-                RenderDistance = 32;
+                RenderDistance = 14;
                 DrawBlockWires = _forceBlockWires;
-                FogNear = 34f;
-                FogFar = 95f;
+                FogNear = 16f;
+                FogFar = 48f;
                 LightStrength = 1f;
                 Contrast = 1.1f;
                 FogColor = new Color(156, 166, 171, 255);
-                TextureNoiseStrength = 1f;
+                TextureNoiseStrength = 0.6f;
                 ViewBobScale = 1.15f;
                 break;
         }
