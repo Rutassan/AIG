@@ -265,12 +265,85 @@ public sealed class CameraAndVisualTests
         var method = typeof(GameApp).GetMethod("ApplyLeafStyle", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
 
-        var near = (Color)method!.Invoke(app, [new Color(86, 134, 66, 255), 4, 4, 4, 4, 3, 0.6f])!;
-        var far = (Color)method.Invoke(app, [new Color(86, 134, 66, 255), 40, 40, 4, 4, 3, 0.6f])!;
+        var near = (Color)method!.Invoke(app, [new Color(86, 134, 66, 255), 3, 0.6f, 4f])!;
+        var far = (Color)method.Invoke(app, [new Color(86, 134, 66, 255), 3, 0.6f, 40f])!;
 
         Assert.Equal(near.R, far.R);
         Assert.Equal(near.G, far.G);
         Assert.Equal(near.B, far.B);
+    }
+
+    [Fact(DisplayName = "ApplyFarVisualStyle без тумана возвращает цвет без fog-смешивания")]
+    public void ApplyFarVisualStyle_WithoutFog_ReturnsContrastedColor()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("ApplyFarVisualStyle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var color = (Color)method!.Invoke(app, [new Color(120, 88, 54, 255), BlockType.Wood, 4, 2, 5, true, 24f])!;
+        Assert.NotEqual((byte)255, color.R);
+        Assert.NotEqual((byte)255, color.G);
+        Assert.NotEqual((byte)255, color.B);
+    }
+
+    [Fact(DisplayName = "DrawSkyGradient завершает работу при невалидном размере экрана")]
+    public void DrawSkyGradient_ReturnsForInvalidViewport()
+    {
+        var platform = new FakeGamePlatform
+        {
+            ScreenWidth = 0,
+            ScreenHeight = 720
+        };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4f, 3f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.UnitZ);
+
+        method!.Invoke(app, [view]);
+
+        Assert.Equal(0, platform.DrawRectangleCalls);
+    }
+
+    [Fact(DisplayName = "DrawHorizonBand покрывает guard-ветки и нормальный рендер")]
+    public void DrawHorizonBand_CoversGuardsAndVisibleDraw()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawHorizonBand", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method!.Invoke(app, [1280, 720, 100, 0, new Color(0, 0, 0, 255)]);
+        method.Invoke(app, [1280, 720, -100, 1, new Color(0, 0, 0, 255)]);
+        method.Invoke(app, [1280, 720, 100, 12, new Color(0, 0, 0, 255)]);
+
+        Assert.Equal(1, platform.DrawRectangleCalls);
     }
 
     private static object GetPrivateAppStateValue(string stateName)

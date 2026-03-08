@@ -28,6 +28,88 @@ internal sealed class GraphicsSettings
     public Color FogColor { get; private set; }
     public float TextureNoiseStrength { get; private set; }
     public float ViewBobScale { get; private set; }
+    public int DistantViewDistance { get; private set; }
+
+    public int ResolveRenderDistance(int measuredFps)
+    {
+        if (measuredFps <= 0)
+        {
+            return RenderDistance;
+        }
+
+        if (Quality == GraphicsQuality.High)
+        {
+            var highAdaptiveDistance = measuredFps switch
+            {
+                < 45 => 24,
+                < 50 => 24,
+                < 55 => 24,
+                < 60 => 24,
+                < 65 => 28,
+                < 70 => 34,
+                < 75 => 40,
+                < 80 => 46,
+                < 90 => 56,
+                < 100 => 68,
+                _ => RenderDistance
+            };
+
+            return Math.Clamp(highAdaptiveDistance, 24, RenderDistance);
+        }
+
+        var minAdaptiveDistance = Quality == GraphicsQuality.Low ? 12 : 13;
+        var reduction = measuredFps switch
+        {
+            < 55 => 4,
+            < 60 => 3,
+            < 75 => 2,
+            < 90 => 1,
+            _ => 0
+        };
+
+        return Math.Max(minAdaptiveDistance, RenderDistance - reduction);
+    }
+
+    public int ResolveDistantViewDistance(int measuredFps)
+    {
+        if (measuredFps <= 0)
+        {
+            return DistantViewDistance;
+        }
+
+        if (Quality == GraphicsQuality.High)
+        {
+            return measuredFps switch
+            {
+                < 45 => 260,
+                < 50 => 320,
+                < 55 => 420,
+                < 60 => 520,
+                < 65 => 620,
+                < 70 => 700,
+                < 80 => 820,
+                < 90 => 920,
+                _ => DistantViewDistance
+            };
+        }
+
+        if (Quality == GraphicsQuality.Medium)
+        {
+            return measuredFps switch
+            {
+                < 55 => 240,
+                < 60 => 280,
+                _ => DistantViewDistance
+            };
+        }
+
+        return measuredFps switch
+        {
+            < 55 => 180,
+            < 60 => 210,
+            _ => DistantViewDistance
+        };
+    }
 
     public void CycleQuality()
     {
@@ -51,7 +133,8 @@ internal sealed class GraphicsSettings
         switch (preset)
         {
             case GraphicsQuality.Low:
-                RenderDistance = 12;
+                RenderDistance = 13;
+                DistantViewDistance = 220;
                 DrawBlockWires = _forceBlockWires;
                 FogNear = 14f;
                 FogFar = 34f;
@@ -62,7 +145,8 @@ internal sealed class GraphicsSettings
                 ViewBobScale = 0.75f;
                 break;
             case GraphicsQuality.Medium:
-                RenderDistance = 14;
+                RenderDistance = 15;
+                DistantViewDistance = 420;
                 DrawBlockWires = _forceBlockWires;
                 FogNear = 16f;
                 FogFar = 46f;
@@ -73,10 +157,11 @@ internal sealed class GraphicsSettings
                 ViewBobScale = 1f;
                 break;
             default:
-                RenderDistance = 14;
+                RenderDistance = 100;
+                DistantViewDistance = 1000;
                 DrawBlockWires = _forceBlockWires;
-                FogNear = 16f;
-                FogFar = 48f;
+                FogNear = 58f;
+                FogFar = 108f;
                 LightStrength = 1f;
                 Contrast = 1.1f;
                 FogColor = new Color(156, 166, 171, 255);

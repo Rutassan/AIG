@@ -19,6 +19,9 @@ public sealed class RaylibGamePlatform : IGamePlatform
 
     private Font _uiFont;
     private bool _hasUiFont;
+    private Mesh _instancedCubeMesh;
+    private Material _instancedCubeMaterial;
+    private bool _hasInstancedCubeResources;
 
     public void SetConfigFlags(ConfigFlags flags) => Raylib.SetConfigFlags(flags);
     public void SetExitKey(KeyboardKey key) => Raylib.SetExitKey(key);
@@ -28,7 +31,11 @@ public sealed class RaylibGamePlatform : IGamePlatform
     public void SetTargetFps(int fps) => Raylib.SetTargetFPS(fps);
     public void DisableCursor() => Raylib.DisableCursor();
     public void EnableCursor() => Raylib.EnableCursor();
-    public void CloseWindow() => Raylib.CloseWindow();
+    public void CloseWindow()
+    {
+        ReleaseInstancedCubeResources();
+        Raylib.CloseWindow();
+    }
     public bool WindowShouldClose() => Raylib.WindowShouldClose();
     public float GetFrameTime() => Raylib.GetFrameTime();
     public bool IsKeyDown(KeyboardKey key) => Raylib.IsKeyDown(key);
@@ -66,6 +73,22 @@ public sealed class RaylibGamePlatform : IGamePlatform
     public void BeginMode3D(Camera3D camera) => Raylib.BeginMode3D(camera);
     public void EndMode3D() => Raylib.EndMode3D();
     public void DrawCube(Vector3 position, float width, float height, float length, Color color) => Raylib.DrawCube(position, width, height, length, color);
+    public void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color)
+    {
+        if (transforms.Count == 0)
+        {
+            return;
+        }
+
+        // Fallback path: explicit cubes are visually stable across drivers and matrix layouts.
+        for (var i = 0; i < transforms.Count; i++)
+        {
+            var t = transforms[i];
+            var center = new Vector3(t.M41, t.M42, t.M43);
+            Raylib.DrawCube(center, 1f, 1f, 1f, color);
+        }
+    }
+
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color) => Raylib.DrawCubeWires(position, width, height, length, color);
     public int GetScreenWidth() => Raylib.GetScreenWidth();
     public int GetScreenHeight() => Raylib.GetScreenHeight();
@@ -91,6 +114,30 @@ public sealed class RaylibGamePlatform : IGamePlatform
         Raylib.UnloadImage(image);
     }
     public void EndDrawing() => Raylib.EndDrawing();
+
+    private void EnsureInstancedCubeResources()
+    {
+        if (_hasInstancedCubeResources)
+        {
+            return;
+        }
+
+        _instancedCubeMesh = Raylib.GenMeshCube(1f, 1f, 1f);
+        _instancedCubeMaterial = Raylib.LoadMaterialDefault();
+        _hasInstancedCubeResources = true;
+    }
+
+    private void ReleaseInstancedCubeResources()
+    {
+        if (!_hasInstancedCubeResources)
+        {
+            return;
+        }
+
+        Raylib.UnloadMaterial(_instancedCubeMaterial);
+        Raylib.UnloadMesh(_instancedCubeMesh);
+        _hasInstancedCubeResources = false;
+    }
 
     private static int[] BuildCodepoints(string value)
     {

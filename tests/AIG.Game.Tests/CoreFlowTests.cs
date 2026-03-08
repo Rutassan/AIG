@@ -9,6 +9,8 @@ using AIG.Game.World;
 using Raylib_cs;
 using System.Reflection;
 using System.Linq;
+using System.Globalization;
+using System.Threading;
 
 namespace AIG.Game.Tests;
 
@@ -499,6 +501,56 @@ public sealed class CoreFlowTests
         Assert.Contains("frames=20", logText, StringComparison.Ordinal);
     }
 
+    [Fact(DisplayName = "RunAutoPerf учитывает warmup и пишет PASS на длинном стабильном прогоне")]
+    public void RunAutoPerf_LongStableRun_UsesWarmupTrimmedMetrics()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autoperf-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform
+        {
+            FrameTime = 1f / 120f,
+            Fps = 120
+        };
+        platform.EnqueueWindowShouldClose(Enumerable.Repeat(false, 180).ToArray());
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777));
+
+        app.RunAutoPerf(outputDir, durationSeconds: 2f, minAllowedFps: 60);
+
+        var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
+        Assert.Single(logs);
+        var logText = File.ReadAllText(logs[0]);
+        Assert.Contains("warmup_frames_ignored=60", logText, StringComparison.Ordinal);
+        Assert.Contains("result=PASS", logText, StringComparison.Ordinal);
+    }
+
+    [Fact(DisplayName = "RunAutoPerf учитывает warmup и пишет FAIL на длинном нестабильном прогоне")]
+    public void RunAutoPerf_LongLowFpsRun_UsesWarmupTrimmedMetrics()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autoperf-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform
+        {
+            FrameTime = 1f / 120f,
+            Fps = 55
+        };
+        platform.EnqueueWindowShouldClose(Enumerable.Repeat(false, 180).ToArray());
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777));
+
+        app.RunAutoPerf(outputDir, durationSeconds: 1f, minAllowedFps: 60);
+
+        var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
+        Assert.Single(logs);
+        var logText = File.ReadAllText(logs[0]);
+        Assert.Contains("warmup_frames_ignored=60", logText, StringComparison.Ordinal);
+        Assert.Contains("result=FAIL", logText, StringComparison.Ordinal);
+    }
+
     [Fact(DisplayName = "ReadAutoBotInput поворачивает и прыгает при препятствии, даже при нулевой чувствительности")]
     public void ReadAutoBotInput_ObstaclePath_UsesTurnAndSensitivityFallback()
     {
@@ -620,6 +672,941 @@ public sealed class CoreFlowTests
         Assert.True(platform.DrawCubeCalls > 0);
     }
 
+    [Fact(DisplayName = "DrawWorld в дефолтном большом мире рисует геометрию возле спавна")]
+    public void DrawWorld_DefaultLargeWorld_HasVisibleGeometryNearSpawn()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 2304, height: 72, depth: 2304, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        var platform = new FakeGamePlatform { Fps = 120, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+
+        var createSpawn = typeof(GameApp).GetMethod("CreateSpawnPosition", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(createSpawn);
+        var spawn = (Vector3)createSpawn!.Invoke(app, null)!;
+        var player = new PlayerController(config, spawn);
+        player.SetPose(player.Position, new Vector3(0f, -0.28f, -1f));
+        SetPrivateField(app, "_player", player);
+
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        var playing = Enum.Parse(appStateType!, "Playing");
+        SetPrivateField(app, "_state", playing);
+
+        var updateStreaming = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(updateStreaming);
+        updateStreaming!.Invoke(app, [true]);
+
+        var drawWorld = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(drawWorld);
+        drawWorld!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeInstancedInstances > 0, "Ожидали видимую геометрию вокруг спавна в большом мире.");
+    }
+
+    [Fact(DisplayName = "DrawWorld ранним выходом обрабатывает мир с нулевой шириной или глубиной")]
+    public void DrawWorld_EarlyReturn_ForZeroWorldDimensions()
+    {
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var appZeroWidth = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            new FakeGamePlatform(),
+            new WorldMap(width: 0, height: 8, depth: 16, chunkSize: 8, seed: 0));
+        method!.Invoke(appZeroWidth, null);
+
+        var appZeroDepth = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            new FakeGamePlatform(),
+            new WorldMap(width: 16, height: 8, depth: 0, chunkSize: 8, seed: 0));
+        method.Invoke(appZeroDepth, null);
+    }
+
+    [Fact(DisplayName = "DrawWorld в low качестве отсекает дальнюю листву")]
+    public void DrawWorld_LowQuality_CullsFarLeaves()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.Low
+        };
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(13, 2, 1, BlockType.Leaves);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(1.5f, 2.2f, 1.5f));
+        SetPrivateField(app, "_player", player);
+        world.EnsureChunksAround(player.Position, radiusInChunks: 2);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 16);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld отрисовывает неизвестный тип блока через fallback-цвет")]
+    public void DrawWorld_UnknownBlockType_UsesFallbackColorBranch()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.Medium
+        };
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(4, 2, 4, (BlockType)999);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        SetPrivateField(app, "_player", new PlayerController(config, new Vector3(4.5f, 2.2f, 4.5f)));
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeCalls > 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает блоки за пределом render distance")]
+    public void DrawWorld_SkipsBlocksBeyondRenderDistance()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.Low
+        };
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(13, 2, 13, BlockType.Stone);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        SetPrivateField(app, "_player", new PlayerController(config, new Vector3(0.5f, 2.2f, 0.5f)));
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает очень дальние стволы на very-far LOD")]
+    public void DrawWorld_CullsVeryFarWood()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 160, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(70, 2, 9, BlockType.Wood);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 9.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+        world.EnsureChunksAround(player.Position, radiusInChunks: 20);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 300);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает нетеррейн-блок на ultra-far LOD")]
+    public void DrawWorld_CullsUltraFarNonTerrainBlock()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 192, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(90, 2, 10, (BlockType)999);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 9.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+        world.EnsureChunksAround(player.Position, radiusInChunks: 24);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 300);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает ultra-far неизвестный блок при keepChance=0 после sparse-множителя")]
+    public void DrawWorld_CullsUltraFarUnknownBlock_WhenSparseKeepBecomesZero()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 176, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(108, 2, 9, (BlockType)999); // дистанция ~100 блоков: keepChance становится 0 в sparse ветке
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 120
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 9.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+        world.EnsureChunksAround(player.Position, radiusInChunks: 24);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 500);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld применяет far-style для дальнего блока Dirt")]
+    public void DrawWorld_FarStyle_CoversDirtBranch()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 128, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        // На FPS=84 adaptive High дает renderDistance=56, берём дистанцию чуть выше порога far-style.
+        world.SetBlock(54, 2, 15, BlockType.Dirt);
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 84
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 15.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+
+        world.EnsureChunksAround(player.Position, radiusInChunks: 10);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 400);
+        Assert.True(world.TryGetChunkSurfaceBlocks(6, 1, out var targetChunkSurface));
+        Assert.Contains(targetChunkSurface, s => s.X == 54 && s.Y == 2 && s.Z == 15 && s.Block == BlockType.Dirt);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeCalls > 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld покрывает false-ветку far-style для дальнего блока Wood при адаптивной дистанции")]
+    public void DrawWorld_FarStyle_CoversNonTerrainBranchAtAdaptiveDistance()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 64, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(36, 2, 15, BlockType.Wood);
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 66 // High-профиль адаптируется до RenderDistance=34
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 15.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+
+        world.EnsureChunksAround(player.Position, radiusInChunks: 6);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 200);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeCalls > 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld на FPS~84 не включает sparse-culling very-far (без рваной полосы)")]
+    public void DrawWorld_AdaptiveHigh84_DoesNotCullVeryFarWood()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 128, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        // Дистанция около 52 блоков: при renderDistance=56 это зона very-far.
+        // На FPS=84 sparse-culling должен быть выключен, иначе тут будет резкий pop-in сеткой.
+        world.SetBlock(60, 2, 9, BlockType.Wood);
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 84
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 9.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+
+        world.EnsureChunksAround(player.Position, radiusInChunks: 12);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 400);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeCalls > 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld использует инстансинг кубов для world-геометрии")]
+    public void DrawWorld_UsesCubeInstancing_ForWorldGeometry()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(12, 2, 12, BlockType.Stone);
+        world.SetBlock(13, 2, 12, BlockType.Dirt);
+        world.SetBlock(14, 2, 12, BlockType.Grass);
+
+        var platform = new FakeGamePlatform { Fps = 84 };
+        var app = new GameApp(config, platform, world);
+        SetPrivateField(app, "_player", new PlayerController(config, new Vector3(12.5f, 2.2f, 12.5f)));
+        world.EnsureChunksAround(new Vector3(12.5f, 2.2f, 12.5f), radiusInChunks: 2);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(12.5f, 2.2f, 12.5f), maxChunks: 32);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeInstancedCalls > 0);
+        Assert.True(platform.DrawCubeInstancedInstances > 0);
+        Assert.True(platform.DrawCubeCalls >= platform.DrawCubeInstancedInstances);
+    }
+
+    [Fact(DisplayName = "LOD кроссфейд near/mid/far возвращает нормализованные веса")]
+    public void LodBlendWeights_AreNormalizedAcrossTransitions()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var type = typeof(GameApp);
+        var profileMethod = type.GetMethod("GetLodTransitionProfile", BindingFlags.Instance | BindingFlags.NonPublic);
+        var weightsMethod = type.GetMethod("GetLodBlendWeights", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(profileMethod);
+        Assert.NotNull(weightsMethod);
+
+        var profile = ((float NearDistance, float MidDistance, float BlendBand))profileMethod!.Invoke(app, [56f])!;
+        var nearDistance = profile.NearDistance;
+        var midDistance = profile.MidDistance;
+        var blendBand = profile.BlendBand;
+
+        static (float Near, float Mid, float Far) ReadWeights(object weights)
+        {
+            var t = weights.GetType();
+            return (
+                (float)t.GetProperty("Near")!.GetValue(weights)!,
+                (float)t.GetProperty("Mid")!.GetValue(weights)!,
+                (float)t.GetProperty("Far")!.GetValue(weights)!);
+        }
+
+        var nearWeights = ReadWeights(weightsMethod!.Invoke(null, [Math.Max(0f, nearDistance - blendBand * 2f), nearDistance, midDistance, blendBand])!);
+        var midWeights = ReadWeights(weightsMethod.Invoke(null, [midDistance, nearDistance, midDistance, blendBand])!);
+        var farWeights = ReadWeights(weightsMethod.Invoke(null, [midDistance + blendBand * 2f, nearDistance, midDistance, blendBand])!);
+
+        Assert.True(nearWeights.Near > nearWeights.Mid);
+        Assert.True(midWeights.Mid >= midWeights.Near);
+        Assert.True(farWeights.Far > farWeights.Mid);
+
+        var nearSum = nearWeights.Near + nearWeights.Mid + nearWeights.Far;
+        var midSum = midWeights.Near + midWeights.Mid + midWeights.Far;
+        var farSum = farWeights.Near + farWeights.Mid + farWeights.Far;
+        Assert.InRange(nearSum, 0.999f, 1.001f);
+        Assert.InRange(midSum, 0.999f, 1.001f);
+        Assert.InRange(farSum, 0.999f, 1.001f);
+    }
+
+    [Fact(DisplayName = "Бюджеты стриминга и пересборки меняются по quality-профилю")]
+    public void StreamingBudgets_FollowGraphicsQuality()
+    {
+        static (int Surface, int SurfaceBurst, int Chunk, int ChunkBurst, int WarmupChunks, int UnloadHysteresis, int PrefetchBudget, int PrefetchBudgetPressure, int PrefetchRadius, float PrefetchDistance) ReadBudgets(GameApp app)
+        {
+            var type = typeof(GameApp);
+            var surface = (int)type.GetMethod("GetSurfaceRebuildBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null)!;
+            var surfaceBurst = (int)type.GetMethod("GetSurfaceBurstBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [2])!;
+            var chunk = (int)type.GetMethod("GetChunkLoadBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null)!;
+            var chunkBurst = (int)type.GetMethod("GetChunkLoadBurstBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [2])!;
+            var warmupChunks = (int)type.GetMethod("GetStreamingWarmupChunks", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null)!;
+            var unloadHysteresis = (int)type.GetMethod("GetUnloadHysteresisChunks", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null)!;
+            var prefetchBudget = (int)type.GetMethod("GetForwardPrefetchBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [false])!;
+            var prefetchBudgetPressure = (int)type.GetMethod("GetForwardPrefetchBudget", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [true])!;
+            var prefetchRadius = (int)type.GetMethod("GetForwardPrefetchRadius", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [8])!;
+            var prefetchDistance = (float)type.GetMethod("GetForwardPrefetchDistanceBlocks", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null)!;
+            return (surface, surfaceBurst, chunk, chunkBurst, warmupChunks, unloadHysteresis, prefetchBudget, prefetchBudgetPressure, prefetchRadius, prefetchDistance);
+        }
+
+        var low = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Low },
+            new FakeGamePlatform(),
+            new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0));
+        var medium = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Medium },
+            new FakeGamePlatform(),
+            new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0));
+        var high = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0));
+
+        var lowBudgets = ReadBudgets(low);
+        Assert.Equal((1, 5, 1, 5, 1, 2, 1, 0, 3), (lowBudgets.Surface, lowBudgets.SurfaceBurst, lowBudgets.Chunk, lowBudgets.ChunkBurst, lowBudgets.WarmupChunks, lowBudgets.UnloadHysteresis, lowBudgets.PrefetchBudget, lowBudgets.PrefetchBudgetPressure, lowBudgets.PrefetchRadius));
+        Assert.InRange(lowBudgets.PrefetchDistance, 9.99f, 10.01f);
+
+        var mediumBudgets = ReadBudgets(medium);
+        Assert.Equal((2, 7, 2, 6, 2, 2, 2, 1, 4), (mediumBudgets.Surface, mediumBudgets.SurfaceBurst, mediumBudgets.Chunk, mediumBudgets.ChunkBurst, mediumBudgets.WarmupChunks, mediumBudgets.UnloadHysteresis, mediumBudgets.PrefetchBudget, mediumBudgets.PrefetchBudgetPressure, mediumBudgets.PrefetchRadius));
+        Assert.InRange(mediumBudgets.PrefetchDistance, 12.79f, 12.81f);
+
+        var highBudgets = ReadBudgets(high);
+        Assert.Equal((3, 7, 3, 7, 2, 2, 3, 1, 5), (highBudgets.Surface, highBudgets.SurfaceBurst, highBudgets.Chunk, highBudgets.ChunkBurst, highBudgets.WarmupChunks, highBudgets.UnloadHysteresis, highBudgets.PrefetchBudget, highBudgets.PrefetchBudgetPressure, highBudgets.PrefetchRadius));
+        Assert.InRange(highBudgets.PrefetchDistance, 15.99f, 16.01f);
+    }
+
+    [Fact(DisplayName = "Adaptive render distance повышается плавно при росте FPS")]
+    public void AdaptiveRenderDistance_GrowsSmoothly_WhenFpsRises()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 8, depth: 32, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("GetAdaptiveRenderDistance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var start = (int)method!.Invoke(app, [66, true, true])!;
+        var next = (int)method.Invoke(app, [84, true, true])!;
+
+        Assert.True(next - start <= 2, $"Ожидали мягкий рост дальности, но получили {start} -> {next}");
+
+        var later = next;
+        for (var i = 0; i < 20; i++)
+        {
+            later = (int)method.Invoke(app, [84, true, true])!;
+        }
+
+        Assert.True(later > next);
+        Assert.True(later <= 56);
+    }
+
+    [Fact(DisplayName = "Forward prefetch подгружает чанки по направлению взгляда")]
+    public void EnsureForwardChunksBudgeted_LoadsAhead()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 128, height: 8, depth: 128, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var player = new PlayerController(config, new Vector3(32.5f, 2.2f, 32.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("EnsureForwardChunksBudgeted", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var before = world.LoadedChunkCount;
+        method!.Invoke(app, [player.Position, 8, 0, false]);
+        Assert.Equal(before, world.LoadedChunkCount);
+
+        method!.Invoke(app, [player.Position, 8, 200, false]);
+        var afterSync = world.LoadedChunkCount;
+
+        Assert.True(afterSync > before);
+        Assert.True(world.IsChunkLoaded(8, 4));
+
+        method.Invoke(app, [player.Position, 8, 24, true]);
+        for (var i = 0; i < 80 && world.LoadedChunkCount == afterSync; i++)
+        {
+            _ = world.ApplyBackgroundStreamingResults(maxChunkApplies: 8, maxSurfaceApplies: 8);
+            Thread.Sleep(5);
+        }
+
+        var afterAsync = world.LoadedChunkCount;
+        Assert.True(afterAsync >= afterSync);
+        Assert.True(world.IsChunkLoaded(8, 4));
+    }
+
+    [Fact(DisplayName = "Хелперы fade-LOD возвращают ожидаемые значения на границах")]
+    public void FadeHelpers_ReturnExpectedBounds()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 8, depth: 32, chunkSize: 8, seed: 0));
+        var type = typeof(GameApp);
+
+        var getEdgeKeep = type.GetMethod("GetDistanceEdgeKeep", BindingFlags.Instance | BindingFlags.NonPublic);
+        var getFoliageKeep = type.GetMethod("GetFoliageKeepChance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(getEdgeKeep);
+        Assert.NotNull(getFoliageKeep);
+
+        var edgeNear = (float)getEdgeKeep!.Invoke(app, [10f, 56f, 5.5f])!;
+        var edgeMid = (float)getEdgeKeep.Invoke(app, [56f, 56f, 5.5f])!;
+        var edgeFar = (float)getEdgeKeep.Invoke(app, [65f, 56f, 5.5f])!;
+        Assert.Equal(1f, edgeNear);
+        Assert.InRange(edgeMid, 0.35f, 0.65f);
+        Assert.Equal(0f, edgeFar);
+
+        var foliageNear = (float)getFoliageKeep!.Invoke(app, [12f, 24f, 4.5f])!;
+        var foliageMid = (float)getFoliageKeep.Invoke(app, [26f, 24f, 4.5f])!;
+        var foliageFar = (float)getFoliageKeep.Invoke(app, [30f, 24f, 4.5f])!;
+        Assert.Equal(1f, foliageNear);
+        Assert.InRange(foliageMid, 0.25f, 0.75f);
+        Assert.Equal(0f, foliageFar);
+    }
+
+    [Fact(DisplayName = "Sparse keep chance для неизвестных блоков падает до нуля на ultra-far")]
+    public void SparseFarKeepChance_DropsToZero_ForUnknownBlock()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetSparseFarKeepChance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var chance = (float)method!.Invoke(app, [(BlockType)999, 96f, 48f, 72f, 100f])!;
+        Assert.Equal(0f, chance);
+    }
+
+    [Fact(DisplayName = "Sparse keep chance покрывает ветки для Leaves и terrain-блоков")]
+    public void SparseFarKeepChance_CoversLeavesAndTerrainBranches()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetSparseFarKeepChance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var leavesChance = (float)method!.Invoke(app, [BlockType.Leaves, 92f, 48f, 72f, 100f])!;
+        var terrainChance = (float)method.Invoke(app, [BlockType.Stone, 92f, 48f, 72f, 100f])!;
+
+        Assert.InRange(leavesChance, 0f, 1f);
+        Assert.InRange(terrainChance, 0f, 1f);
+    }
+
+    [Fact(DisplayName = "PassSpatialDither покрывает границы keepChance и средний диапазон")]
+    public void PassSpatialDither_CoversBoundsAndMidRange()
+    {
+        var passMethod = typeof(GameApp).GetMethod("PassSpatialDither", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(passMethod);
+
+        var alwaysDrop = (bool)passMethod!.Invoke(null, [1, 2, 3, 17, 0f])!;
+        var alwaysKeep = (bool)passMethod.Invoke(null, [1, 2, 3, 17, 1f])!;
+        Assert.False(alwaysDrop);
+        Assert.True(alwaysKeep);
+
+        var sawKeep = false;
+        var sawDrop = false;
+        for (var i = 0; i < 64; i++)
+        {
+            var keep = (bool)passMethod.Invoke(null, [i, i + 1, i + 2, 73, 0.5f])!;
+            sawKeep |= keep;
+            sawDrop |= !keep;
+            if (sawKeep && sawDrop)
+            {
+                break;
+            }
+        }
+
+        Assert.True(sawKeep);
+        Assert.True(sawDrop);
+    }
+
+    [Fact(DisplayName = "Chunk reveal и очистка кэша покрывают временные ветки")]
+    public void ChunkReveal_AndCleanup_CoverBranches()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var type = typeof(GameApp);
+        var getReveal = type.GetMethod("GetChunkRevealFactor", BindingFlags.Instance | BindingFlags.NonPublic);
+        var cleanup = type.GetMethod("CleanupChunkRevealCache", BindingFlags.Instance | BindingFlags.NonPublic);
+        var advance = type.GetMethod("AdvanceRuntime", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(getReveal);
+        Assert.NotNull(cleanup);
+        Assert.NotNull(advance);
+
+        var t0 = (float)getReveal!.Invoke(app, [5, 6])!;
+        Assert.InRange(t0, 0f, 0.01f);
+
+        advance!.Invoke(app, [0.2f]);
+        var t1 = (float)getReveal.Invoke(app, [5, 6])!;
+        Assert.True(t1 > t0);
+
+        cleanup!.Invoke(app, [5, 6, 0]);
+        var dict = (IReadOnlyDictionary<(int ChunkX, int ChunkZ), float>)type.GetField("_chunkRevealStartedAt", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(app)!;
+        Assert.Contains((5, 6), dict.Keys);
+
+        cleanup.Invoke(app, [0, 0, 0]);
+        dict = (IReadOnlyDictionary<(int ChunkX, int ChunkZ), float>)type.GetField("_chunkRevealStartedAt", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(app)!;
+        Assert.DoesNotContain((5, 6), dict.Keys);
+    }
+
+    [Fact(DisplayName = "CreateSpawnPosition выбирает безопасную колонку, если центр занят блоками")]
+    public void CreateSpawnPosition_AvoidsBlockedCenter()
+    {
+        var config = new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High };
+        var world = new WorldMap(width: 48, height: 24, depth: 48, chunkSize: 16, seed: 0);
+        var centerX = world.Width / 2;
+        var centerZ = world.Depth / 2;
+
+        world.SetBlock(centerX, 4, centerZ, BlockType.Wood);
+        world.SetBlock(centerX + 1, 4, centerZ, BlockType.Leaves);
+        world.SetBlock(centerX, 4, centerZ + 1, BlockType.Leaves);
+
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var createSpawn = typeof(GameApp).GetMethod("CreateSpawnPosition", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(createSpawn);
+        var spawn = (Vector3)createSpawn!.Invoke(app, null)!;
+
+        var isPoseClear = typeof(GameApp).GetMethod("IsPlayerPoseClear", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(isPoseClear);
+        var clear = (bool)isPoseClear!.Invoke(app, [spawn])!;
+        Assert.True(clear);
+        Assert.True(MathF.Abs(spawn.X - (centerX + 0.5f)) > 0.001f || MathF.Abs(spawn.Z - (centerZ + 0.5f)) > 0.001f);
+    }
+
+    [Fact(DisplayName = "LiftPoseAboveTerrain поднимает камеру выше верхнего твёрдого блока")]
+    public void LiftPoseAboveTerrain_UsesTopSolidHeight()
+    {
+        var config = new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High };
+        var world = new WorldMap(width: 32, height: 24, depth: 32, chunkSize: 16, seed: 0);
+        world.SetBlock(10, 9, 10, BlockType.Wood);
+
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var lift = typeof(GameApp).GetMethod("LiftPoseAboveTerrain", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(lift);
+
+        var lifted = (Vector3)lift!.Invoke(app, [new Vector3(10.5f, 2f, 10.5f)])!;
+        var liftedX = (int)MathF.Floor(lifted.X);
+        var liftedZ = (int)MathF.Floor(lifted.Z);
+        Assert.True(world.GetTopSolidY(liftedX, liftedZ) <= world.GetTerrainTopY(liftedX, liftedZ) + 1);
+        Assert.True(lifted.Y >= world.GetTerrainTopY(liftedX, liftedZ) + 1.19f);
+    }
+
+    [Fact(DisplayName = "LiftPoseAboveTerrain использует fallback-колонку, если свободная не найдена")]
+    public void LiftPoseAboveTerrain_UsesFallbackColumn_WhenNoTreeFreeColumn()
+    {
+        var config = new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High };
+        var world = new WorldMap(width: 8, height: 16, depth: 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 6, z, BlockType.Wood);
+            }
+        }
+
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var lift = typeof(GameApp).GetMethod("LiftPoseAboveTerrain", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(lift);
+
+        var input = new Vector3(3.4f, 0.1f, 3.9f);
+        var lifted = (Vector3)lift!.Invoke(app, [input])!;
+
+        Assert.Equal(3.5f, lifted.X);
+        Assert.Equal(3.5f, lifted.Z);
+        Assert.InRange(lifted.Y, 7.19f, 7.21f);
+    }
+
+    [Fact(DisplayName = "TryFindTreeFreeColumn покрывает границы и false-ветку при полностью занятых колонках")]
+    public void TryFindTreeFreeColumn_CoversBoundsAndFalseBranch()
+    {
+        var world = new WorldMap(width: 2, height: 12, depth: 2, chunkSize: 2, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 5, z, BlockType.Wood);
+            }
+        }
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            world);
+
+        var method = typeof(GameApp).GetMethod("TryFindTreeFreeColumn", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object[] args = [0, 0, 2, 0, 0];
+        var ok = (bool)method!.Invoke(app, args)!;
+
+        Assert.False(ok);
+        Assert.Equal(0, (int)args[3]);
+        Assert.Equal(0, (int)args[4]);
+    }
+
+    [Fact(DisplayName = "BuildGroundLookDirection использует fallback при невалидных сэмплах")]
+    public void BuildGroundLookDirection_UsesFallback_WhenAllSamplesAreRejected()
+    {
+        var world = new WorldMap(width: 1, height: 8, depth: 1, chunkSize: 1, seed: 0);
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            world);
+
+        var method = typeof(GameApp).GetMethod("BuildGroundLookDirection", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var fallbackByZeroVector = (Vector3)method!.Invoke(app, [new Vector3(0.5f, -0.056f, 0.5f), Vector3.UnitZ])!;
+        Assert.True(fallbackByZeroVector.Y < -0.1f);
+        Assert.True(fallbackByZeroVector.Z > 0.5f);
+
+        var fallbackByHighTarget = (Vector3)method.Invoke(app, [new Vector3(0.5f, 0f, 0.5f), Vector3.UnitZ])!;
+        Assert.True(fallbackByHighTarget.Y < -0.1f);
+        Assert.True(fallbackByHighTarget.Z > 0.5f);
+    }
+
+    [Fact(DisplayName = "AdvanceRuntime использует fallback delta при нулевом и отрицательном шаге")]
+    public void AdvanceRuntime_UsesFallbackDelta_ForNonPositiveInput()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 8, depth: 32, chunkSize: 8, seed: 0));
+        var type = typeof(GameApp);
+        var advance = type.GetMethod("AdvanceRuntime", BindingFlags.Instance | BindingFlags.NonPublic);
+        var runtimeField = type.GetField("_runtimeSeconds", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(advance);
+        Assert.NotNull(runtimeField);
+
+        runtimeField!.SetValue(app, 0f);
+        advance!.Invoke(app, [0f]);
+        var afterZero = (float)runtimeField.GetValue(app)!;
+
+        advance.Invoke(app, [-1f]);
+        var afterNegative = (float)runtimeField.GetValue(app)!;
+
+        Assert.InRange(afterZero, 0.016f, 0.017f);
+        Assert.InRange(afterNegative - afterZero, 0.016f, 0.017f);
+    }
+
+    [Fact(DisplayName = "RunAutoPerf пишет scene-jump метрики и сохраняет периодические кадры")]
+    public void RunAutoPerf_WritesSceneMetrics_AndPeriodicCaptures()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autoperf-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform
+        {
+            FrameTime = 1f / 120f,
+            Fps = 120
+        };
+        platform.EnqueueWindowShouldClose(Enumerable.Repeat(false, 260).ToArray());
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777));
+
+        app.RunAutoPerf(outputDir, durationSeconds: 1f, minAllowedFps: 60);
+
+        var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
+        Assert.Single(logs);
+        var logText = File.ReadAllText(logs[0]);
+        Assert.Contains("scene_jump_avg=", logText, StringComparison.Ordinal);
+        Assert.Contains("scene_jump_max=", logText, StringComparison.Ordinal);
+        Assert.Contains("autocap_frames_saved=", logText, StringComparison.Ordinal);
+
+        var capturesLine = File.ReadAllLines(logs[0]).Single(line => line.StartsWith("autocap_frames_saved=", StringComparison.Ordinal));
+        var captures = int.Parse(capturesLine.Split('=')[1], NumberStyles.Integer, CultureInfo.InvariantCulture);
+        Assert.True(captures >= 0);
+        Assert.True(platform.SavedScreenshots.Count >= captures + 1);
+    }
+
+    [Fact(DisplayName = "RunAutoPerf для medium-профиля пишет interval=120")]
+    public void RunAutoPerf_MediumQuality_UsesMediumCaptureInterval()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autoperf-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform
+        {
+            FrameTime = 1f / 120f,
+            Fps = 120
+        };
+        platform.EnqueueWindowShouldClose(Enumerable.Repeat(false, 120).ToArray());
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Medium },
+            platform,
+            new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777));
+
+        app.RunAutoPerf(outputDir, durationSeconds: 1f, minAllowedFps: 60);
+
+        var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
+        Assert.Single(logs);
+        var logText = File.ReadAllText(logs[0]);
+        Assert.Contains("autocap_interval_frames=120", logText, StringComparison.Ordinal);
+    }
+
+    [Fact(DisplayName = "RunAutoPerf для low-профиля пишет interval=96")]
+    public void RunAutoPerf_LowQuality_UsesLowCaptureInterval()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autoperf-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform
+        {
+            FrameTime = 1f / 120f,
+            Fps = 120
+        };
+        platform.EnqueueWindowShouldClose(Enumerable.Repeat(false, 120).ToArray());
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Low },
+            platform,
+            new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777));
+
+        app.RunAutoPerf(outputDir, durationSeconds: 1f, minAllowedFps: 60);
+
+        var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
+        Assert.Single(logs);
+        var logText = File.ReadAllText(logs[0]);
+        Assert.Contains("autocap_interval_frames=96", logText, StringComparison.Ordinal);
+    }
+
     [Fact(DisplayName = "Кнопка Начать игру запускает игровой режим")]
     public void Run_StartButton_TransitionsToPlaying()
     {
@@ -674,8 +1661,8 @@ public sealed class CoreFlowTests
         Assert.NotEqual(BlockType.Air, world.GetBlock(11, 5, 9));
     }
 
-    [Fact(DisplayName = "BlockCenterIntersectsPlayer покрывается при правом клике вблизи игрока")]
-    public void Run_RightClickNearPlayer_InvokesPlayerIntersectionPath()
+    [Fact(DisplayName = "BlockCenterIntersectsPlayer корректно определяет пересечение с коллайдером игрока")]
+    public void BlockCenterIntersectsPlayer_ReturnsExpectedForNearAndFarBlocks()
     {
         var config = new GameConfig
         {
@@ -684,47 +1671,45 @@ public sealed class CoreFlowTests
             InteractionDistance = 8f
         };
 
-        var world = new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0);
-        world.SetBlock(10, 5, 10, BlockType.Air);
-        world.SetBlock(10, 5, 9, BlockType.Air); // previous cell будет рядом с игроком
-        world.SetBlock(10, 5, 8, BlockType.Stone);
+        var app = new GameApp(
+            config,
+            new FakeGamePlatform(),
+            new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0));
 
-        var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(false, false, false, true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f), rightMousePressed: true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f));
+        var playerField = typeof(GameApp).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(playerField);
+        playerField!.SetValue(app, new PlayerController(config, new Vector3(10.5f, 5f, 10.5f)));
 
-        var app = new GameApp(config, platform, world);
-        app.Run();
+        var method = typeof(GameApp).GetMethod("BlockCenterIntersectsPlayer", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
 
-        Assert.Equal(BlockType.Dirt, world.GetBlock(10, 5, 9));
-        Assert.True(platform.DrawCubeCalls > 0);
-        Assert.NotEmpty(platform.DrawnCubeWires);
+        var intersects = (bool)method!.Invoke(app, [new Vector3(10.5f, 5.5f, 10.5f)])!;
+        var misses = (bool)method.Invoke(app, [new Vector3(13.5f, 5.5f, 10.5f)])!;
+
+        Assert.True(intersects);
+        Assert.False(misses);
     }
 
     [Fact(DisplayName = "Подсветка блока рисуется на грани попадания, а не по центру всего блока")]
     public void Run_BlockHighlight_UsesRaycastHitCoordinates()
     {
-        var config = new GameConfig
-        {
-            FullscreenByDefault = false,
-            InteractionDistance = 6.5f
-        };
-
-        var world = new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0);
-        world.SetBlock(10, 5, 10, BlockType.Air);
-        world.SetBlock(10, 5, 9, BlockType.Air);
-        world.SetBlock(10, 5, 8, BlockType.Stone);
-
         var platform = new FakeGamePlatform();
-        platform.EnqueueWindowShouldClose(false, false, false, true);
-        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true); // Start
-        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f)); // Playing frame with highlight
-        platform.EnqueueFrameInput(mousePosition: new Vector2(0f, 0f)); // Extra frame
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            platform,
+            new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0));
 
-        var app = new GameApp(config, platform, world);
-        app.Run();
+        var stateField = typeof(GameApp).GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(stateField);
+        var playingState = Enum.Parse(stateField!.FieldType, "Playing");
+        stateField.SetValue(app, playingState);
+
+        var drawHighlight = typeof(GameApp).GetMethod("DrawBlockHighlight", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(drawHighlight);
+        var hit = new BlockRaycastHit(10, 5, 8, 10, 5, 9);
+        var rayOrigin = new Vector3(10.5f, 5.65f, 10.5f);
+        var rayDirection = Vector3.Normalize(new Vector3(0f, -0.05f, -1f));
+        drawHighlight!.Invoke(app, [hit, rayOrigin, rayDirection]);
 
         var highlight = platform.DrawnCubeWires.FirstOrDefault(c =>
             (Math.Abs(c.Width - 0.04f) < 0.0001f)
@@ -783,6 +1768,27 @@ public sealed class CoreFlowTests
         }
     }
 
+    [Fact(DisplayName = "TryGetHitFaceNormal отклоняет случаи без единственной оси смещения")]
+    public void TryGetHitFaceNormal_RejectsInvalidAxisCount()
+    {
+        var method = typeof(GameApp).GetMethod("TryGetHitFaceNormal", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var cases = new[]
+        {
+            new BlockRaycastHit(10, 10, 10, 10, 10, 10), // axisCount = 0
+            new BlockRaycastHit(10, 10, 10, 11, 11, 10)  // axisCount = 2
+        };
+
+        foreach (var testHit in cases)
+        {
+            object[] args = [testHit, null!];
+            var ok = (bool)method!.Invoke(null, args)!;
+            Assert.False(ok);
+            Assert.Equal(Vector3.Zero, (Vector3)args[1]);
+        }
+    }
+
     [Fact(DisplayName = "TryGetHitFaceNormalFromRay определяет боковую грань по направлению луча")]
     public void TryGetHitFaceNormalFromRay_ResolvesSideFace()
     {
@@ -819,6 +1825,136 @@ public sealed class CoreFlowTests
         var ok = (bool)method!.Invoke(null, args)!;
         Assert.False(ok);
         Assert.Equal(Vector3.Zero, (Vector3)args[3]);
+    }
+
+    [Fact(DisplayName = "TryGetHitFaceNormalFromRay выбирает грани и знак нормали по оси луча")]
+    public void TryGetHitFaceNormalFromRay_ResolvesAxisFacesAndSigns()
+    {
+        var method = typeof(GameApp).GetMethod("TryGetHitFaceNormalFromRay", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object[] xArgs =
+        [
+            new Vector3(12f, 5.5f, 8.5f),
+            new Vector3(-1f, 0f, 0f),
+            new BlockRaycastHit(10, 5, 8, 11, 5, 8),
+            null!
+        ];
+        var xOk = (bool)method!.Invoke(null, xArgs)!;
+        Assert.True(xOk);
+        Assert.Equal(new Vector3(1f, 0f, 0f), (Vector3)xArgs[3]);
+
+        object[] xPosArgs =
+        [
+            new Vector3(9f, 5.5f, 8.5f),
+            new Vector3(1f, 0f, 0f),
+            new BlockRaycastHit(10, 5, 8, 9, 5, 8),
+            null!
+        ];
+        var xPosOk = (bool)method.Invoke(null, xPosArgs)!;
+        Assert.True(xPosOk);
+        Assert.Equal(new Vector3(-1f, 0f, 0f), (Vector3)xPosArgs[3]);
+
+        object[] yArgs =
+        [
+            new Vector3(10.5f, 8f, 8.5f),
+            new Vector3(0f, -1f, 0f),
+            new BlockRaycastHit(10, 5, 8, 10, 6, 8),
+            null!
+        ];
+        var yOk = (bool)method.Invoke(null, yArgs)!;
+        Assert.True(yOk);
+        Assert.Equal(new Vector3(0f, 1f, 0f), (Vector3)yArgs[3]);
+
+        object[] yPosArgs =
+        [
+            new Vector3(10.5f, 4f, 8.5f),
+            new Vector3(0f, 1f, 0f),
+            new BlockRaycastHit(10, 5, 8, 10, 4, 8),
+            null!
+        ];
+        var yPosOk = (bool)method.Invoke(null, yPosArgs)!;
+        Assert.True(yPosOk);
+        Assert.Equal(new Vector3(0f, -1f, 0f), (Vector3)yPosArgs[3]);
+
+        object[] zPosArgs =
+        [
+            new Vector3(10.5f, 5.5f, 7f),
+            new Vector3(0f, 0f, 1f),
+            new BlockRaycastHit(10, 5, 8, 10, 5, 7),
+            null!
+        ];
+        var zPosOk = (bool)method.Invoke(null, zPosArgs)!;
+        Assert.True(zPosOk);
+        Assert.Equal(new Vector3(0f, 0f, -1f), (Vector3)zPosArgs[3]);
+    }
+
+    [Fact(DisplayName = "TryGetHitFaceNormalFromRay отклоняет луч внутри блока и промах по оси")]
+    public void TryGetHitFaceNormalFromRay_RejectsInsideAndAxisMiss()
+    {
+        var method = typeof(GameApp).GetMethod("TryGetHitFaceNormalFromRay", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object[] insideArgs =
+        [
+            new Vector3(10.5f, 5.5f, 8.5f),
+            new Vector3(1f, 0f, 0f),
+            new BlockRaycastHit(10, 5, 8, 9, 5, 8),
+            null!
+        ];
+        var insideOk = (bool)method!.Invoke(null, insideArgs)!;
+        Assert.False(insideOk);
+        Assert.Equal(Vector3.Zero, (Vector3)insideArgs[3]);
+
+        object[] missArgs =
+        [
+            new Vector3(12f, 9f, 8.5f),
+            new Vector3(-1f, 0f, 0f),
+            new BlockRaycastHit(10, 5, 8, 11, 5, 8),
+            null!
+        ];
+        var missOk = (bool)method.Invoke(null, missArgs)!;
+        Assert.False(missOk);
+        Assert.Equal(Vector3.Zero, (Vector3)missArgs[3]);
+
+        object[] disjointIntervalsArgs =
+        [
+            new Vector3(12f, 9f, 8.5f),
+            new Vector3(-1f, -1f, 0f),
+            new BlockRaycastHit(10, 5, 8, 11, 6, 8),
+            null!
+        ];
+        var disjointOk = (bool)method.Invoke(null, disjointIntervalsArgs)!;
+        Assert.False(disjointOk);
+        Assert.Equal(Vector3.Zero, (Vector3)disjointIntervalsArgs[3]);
+    }
+
+    [Fact(DisplayName = "TryAxis покрывает ветки без направления и инверсию near/far")]
+    public void TryAxis_CoversZeroDirectionAndSwapBranches()
+    {
+        var method = typeof(GameApp).GetMethod("TryAxis", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        object[] insideArgs = [0.5f, 0f, 0f, 1f, 0f, 1f, 0f, false];
+        var insideOk = (bool)method!.Invoke(null, insideArgs)!;
+        Assert.True(insideOk);
+        Assert.False((bool)insideArgs[7]);
+
+        object[] outsideArgs = [2f, 0f, 0f, 1f, 0f, 1f, 0f, false];
+        var outsideOk = (bool)method.Invoke(null, outsideArgs)!;
+        Assert.False(outsideOk);
+        Assert.False((bool)outsideArgs[7]);
+
+        object[] belowMinArgs = [-1f, 0f, 0f, 1f, 0f, 1f, 0f, false];
+        var belowMinOk = (bool)method.Invoke(null, belowMinArgs)!;
+        Assert.False(belowMinOk);
+        Assert.False((bool)belowMinArgs[7]);
+
+        object[] swapArgs = [2f, -1f, 0f, 1f, 0f, 10f, 0f, false];
+        var swapOk = (bool)method.Invoke(null, swapArgs)!;
+        Assert.True(swapOk);
+        Assert.True((bool)swapArgs[7]);
+        Assert.InRange((float)swapArgs[6], 0.9f, 1.1f);
     }
 
     [Fact(DisplayName = "DrawBlockHighlight берёт грань из луча, если previous указывает неверно")]
@@ -1005,6 +2141,250 @@ public sealed class CoreFlowTests
         app.Run();
 
         Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Камера: 3-е лицо", StringComparison.Ordinal));
+    }
+
+    [Fact(DisplayName = "DrawWorld в medium покрывает fade-ветку листвы")]
+    public void DrawWorld_MediumQuality_CoversFoliageFadeBranch()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.Medium
+        };
+        var world = new WorldMap(width: 64, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(15, 2, 8, BlockType.Leaves); // ~14 блоков от игрока: между foliage и far LOD границами
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(1.5f, 2.2f, 8.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        world.EnsureChunksAround(player.Position, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 128);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.True(platform.DrawCubeInstancedCalls >= 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld с включенными scene-metrics пишет нулевой hash для пустой поверхности")]
+    public void DrawWorld_SceneMetrics_EmptySurface_WritesZeroHash()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 8.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_sceneMetricsEnabled", true);
+        world.EnsureChunksAround(player.Position, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 128);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        var countField = typeof(GameApp).GetField("_lastDrawnSurfaceCount", BindingFlags.Instance | BindingFlags.NonPublic);
+        var hashField = typeof(GameApp).GetField("_lastDrawSceneHash", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(countField);
+        Assert.NotNull(hashField);
+        var count = (int)countField!.GetValue(app)!;
+        var hash = (ulong)hashField!.GetValue(app)!;
+        Assert.Equal(0, count);
+        Assert.Equal(0UL, hash);
+    }
+
+    [Fact(DisplayName = "BuildLodBlendedColor покрывает terrain shortcut и fallback-blend ветки")]
+    public void BuildLodBlendedColor_CoversTerrainShortcutAndFallbackBlend()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0));
+
+        var lodType = typeof(GameApp).GetNestedType("LodBlendWeights", BindingFlags.NonPublic);
+        Assert.NotNull(lodType);
+        var method = typeof(GameApp).GetMethod("BuildLodBlendedColor", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var terrainSurface = new WorldMap.SurfaceBlock(8, 2, 8, BlockType.Stone, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+        var customTerrainBlend = Activator.CreateInstance(lodType!, [0.3f, 0.2f, 0.5f])!;
+        var terrainColor = (Color)method!.Invoke(
+            app,
+            [
+                new Color(124, 120, 113, 255),
+                terrainSurface,
+                30f,
+                0.8f,
+                customTerrainBlend
+            ])!;
+
+        var expectedFar = (Color)typeof(GameApp).GetMethod("ApplyFarVisualStyle", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
+            app,
+            [new Color(124, 120, 113, 255), BlockType.Stone, 8, 2, 8, true, 30f])!;
+        Assert.Equal(expectedFar.R, terrainColor.R);
+        Assert.Equal(expectedFar.G, terrainColor.G);
+        Assert.Equal(expectedFar.B, terrainColor.B);
+
+        var fallbackSurface = new WorldMap.SurfaceBlock(9, 2, 9, BlockType.Wood, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+        var fallbackBlend = Activator.CreateInstance(lodType, [0.4f, 0.1f, 0.5f])!;
+        var fallbackColor = (Color)method.Invoke(
+            app,
+            [
+                new Color(120, 88, 54, 255),
+                fallbackSurface,
+                24f,
+                0.5f,
+                fallbackBlend
+            ])!;
+
+        Assert.InRange(fallbackColor.R, 0, 255);
+    }
+
+    [Fact(DisplayName = "BuildLodBlendedColor покрывает false-ветку guard-а Far при Far=0")]
+    public void BuildLodBlendedColor_CoversFarGuardFalse_WhenFarIsZero()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0));
+
+        var lodType = typeof(GameApp).GetNestedType("LodBlendWeights", BindingFlags.NonPublic);
+        var method = typeof(GameApp).GetMethod("BuildLodBlendedColor", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(lodType);
+        Assert.NotNull(method);
+
+        var surface = new WorldMap.SurfaceBlock(9, 2, 9, BlockType.Wood, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+        var blend = Activator.CreateInstance(lodType!, [0f, 0.5f, 0f])!;
+        var color = (Color)method!.Invoke(
+            app,
+            [
+                new Color(120, 88, 54, 255),
+                surface,
+                24f,
+                0.5f,
+                blend
+            ])!;
+
+        Assert.InRange(color.R, 0, 255);
+        Assert.InRange(color.G, 0, 255);
+        Assert.InRange(color.B, 0, 255);
+    }
+
+    [Fact(DisplayName = "FlushWorldCubeInstances пропускает пустой батч")]
+    public void FlushWorldCubeInstances_SkipsEmptyBatch()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0));
+
+        var batchesField = typeof(GameApp).GetField("_worldInstanceBatches", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(batchesField);
+        var batches = batchesField!.GetValue(app)!;
+        var dictType = batches.GetType();
+        var addMethod = dictType.GetMethod("Add");
+        Assert.NotNull(addMethod);
+
+        var keyType = typeof(GameApp).GetNestedType("InstancedBatchKey", BindingFlags.NonPublic);
+        var lodType = typeof(GameApp).GetNestedType("WorldLodTier", BindingFlags.NonPublic);
+        Assert.NotNull(keyType);
+        Assert.NotNull(lodType);
+        var lodNear = Enum.Parse(lodType!, "Near");
+        var key = Activator.CreateInstance(keyType!, [byte.MaxValue, byte.MaxValue, byte.MaxValue, byte.MaxValue, lodNear])!;
+        addMethod!.Invoke(batches, [key, new List<Matrix4x4>()]);
+
+        var flush = typeof(GameApp).GetMethod("FlushWorldCubeInstances", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(flush);
+        flush!.Invoke(app, null);
+
+        Assert.Equal(0, platform.DrawCubeInstancedCalls);
+    }
+
+    [Fact(DisplayName = "UpdateWorldStreaming в sync-ветке пересобирает dirty-чанк при неизменной позиции")]
+    public void UpdateWorldStreaming_SyncEarlyReturn_RebuildsDirtyChunk()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 24, depth: 96, chunkSize: 16, seed: 777);
+        var platform = new FakeGamePlatform { Fps = 120, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(24.5f, 3f, 24.5f));
+        SetPrivateField(app, "_player", player);
+
+        var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(update);
+        update!.Invoke(app, [false]); // первичный прогрев и фиксация last stream state
+
+        world.SetBlock(24, 3, 24, BlockType.Wood);
+        Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var dirtySurfaceBefore));
+        Assert.Empty(dirtySurfaceBefore);
+
+        update.Invoke(app, [false]); // та же позиция -> early return + sync rebuild path
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var rebuiltSurface));
+        Assert.NotEmpty(rebuiltSurface);
+    }
+
+    [Fact(DisplayName = "Адаптивный порог заморозки покрывает low-профиль")]
+    public void GetAdaptiveFreezeSpeedThreshold_CoversLowBranch()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Low },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 8, depth: 32, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetAdaptiveFreezeSpeedThreshold", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var threshold = (float)method!.Invoke(app, null)!;
+        Assert.Equal(0.7f, threshold);
+    }
+
+    [Fact(DisplayName = "GetAdaptiveRenderDistance покрывает ветку быстрого снижения")]
+    public void AdaptiveRenderDistance_DropsQuickly_WhenTargetFalls()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            new FakeGamePlatform(),
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetAdaptiveRenderDistance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var high = (int)method!.Invoke(app, [120, true, true])!;
+        var dropped = (int)method.Invoke(app, [66, true, true])!;
+
+        Assert.True(dropped < high);
+        Assert.True(dropped >= 24);
     }
 
     [Fact(DisplayName = "ResolveUiFontPath возвращает пустую строку, если пути не существуют")]

@@ -26,6 +26,8 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly List<string> _screenshots = [];
 
     public int DrawCubeCalls { get; private set; }
+    public int DrawCubeInstancedCalls { get; private set; }
+    public int DrawCubeInstancedInstances { get; private set; }
     public int DrawCubeWiresCalls { get; private set; }
     public int DrawTextCalls { get; private set; }
     public int DrawLineCalls { get; private set; }
@@ -231,6 +233,13 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void DrawCube(Vector3 position, float width, float height, float length, Color color)
     {
         DrawCubeCalls++;
+    }
+
+    public void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color)
+    {
+        DrawCubeInstancedCalls++;
+        DrawCubeInstancedInstances += transforms.Count;
+        DrawCubeCalls += transforms.Count;
     }
 
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color)

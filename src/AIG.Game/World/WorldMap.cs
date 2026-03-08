@@ -1,12 +1,39 @@
 using System.Numerics;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
 using AIG.Game.World.Chunks;
 
 namespace AIG.Game.World;
 
 public sealed class WorldMap
 {
+    private const int MaxChunkGenerationsInFlight = 2;
+    private const int MaxSurfaceRebuildsInFlight = 2;
+
+    public readonly record struct SurfaceBlock(
+        int X,
+        int Y,
+        int Z,
+        BlockType Block,
+        int VisibleFaces,
+        bool TopVisible,
+        int SkyExposure);
+
+    private static readonly IReadOnlyList<SurfaceBlock> EmptySurfaceBlocks = Array.Empty<SurfaceBlock>();
+    private readonly record struct GeneratedChunkResult(int ChunkX, int ChunkZ, Chunk Chunk);
+    private readonly record struct SurfaceRebuildResult(int ChunkX, int ChunkZ, int Revision, IReadOnlyList<SurfaceBlock> Blocks);
     private readonly Dictionary<(int ChunkX, int ChunkZ), Chunk> _chunks = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), IReadOnlyList<SurfaceBlock>> _chunkSurfaceCache = new();
+    private readonly HashSet<(int ChunkX, int ChunkZ)> _dirtySurfaceChunks = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), int> _surfaceRevisions = new();
     private readonly Dictionary<(int X, int Y, int Z), BlockType> _overrides = new();
+    private readonly object _backgroundSync = new();
+    private readonly HashSet<(int ChunkX, int ChunkZ)> _pendingChunkGenerations = new();
+    private readonly HashSet<(int ChunkX, int ChunkZ)> _pendingSurfaceRebuilds = new();
+    private readonly ConcurrentQueue<GeneratedChunkResult> _completedChunkGenerations = new();
+    private readonly ConcurrentQueue<SurfaceRebuildResult> _completedSurfaceRebuilds = new();
+    private int _chunkGenerationsInFlight;
+    private int _surfaceRebuildsInFlight;
     private readonly int _chunkCountX;
     private readonly int _chunkCountZ;
 
@@ -27,6 +54,8 @@ public sealed class WorldMap
     public int ChunkSize { get; }
     public int Seed { get; }
     public int LoadedChunkCount => _chunks.Count;
+    public int ChunkCountX => _chunkCountX;
+    public int ChunkCountZ => _chunkCountZ;
 
     public BlockType GetBlock(int x, int y, int z)
     {
@@ -49,6 +78,10 @@ public sealed class WorldMap
         var (chunk, localX, localZ) = ResolveChunkCoords(x, z);
         chunk.Set(localX, y, localZ, blockType);
         _overrides[(x, y, z)] = blockType;
+
+        var chunkX = x / ChunkSize;
+        var chunkZ = z / ChunkSize;
+        MarkChunkAndNeighborsDirty(chunkX, chunkZ);
     }
 
     public bool IsSolid(int x, int y, int z)
@@ -84,11 +117,37 @@ public sealed class WorldMap
         return CalculateTerrainTopY(x, z);
     }
 
+    public int GetTopSolidY(int x, int z)
+    {
+        if (!IsInsideXZ(x, z))
+        {
+            return 0;
+        }
+
+        var (chunk, localX, localZ) = ResolveChunkCoords(x, z);
+        for (var y = Height - 1; y >= 0; y--)
+        {
+            if (chunk.Get(localX, y, localZ) != BlockType.Air)
+            {
+                return y;
+            }
+        }
+
+        return 0;
+    }
+
     public void EnsureChunksAround(Vector3 position, int radiusInChunks)
     {
         var worldX = (int)MathF.Floor(position.X);
         var worldZ = (int)MathF.Floor(position.Z);
         EnsureChunksAround(worldX, worldZ, radiusInChunks);
+    }
+
+    public int EnsureChunksAroundBudgeted(Vector3 position, int radiusInChunks, int maxNewChunks)
+    {
+        var worldX = (int)MathF.Floor(position.X);
+        var worldZ = (int)MathF.Floor(position.Z);
+        return EnsureChunksAroundBudgeted(worldX, worldZ, radiusInChunks, maxNewChunks);
     }
 
     public void EnsureChunksAround(int worldX, int worldZ, int radiusInChunks)
@@ -118,6 +177,190 @@ public sealed class WorldMap
         }
     }
 
+    public int EnsureChunksAroundBudgeted(int worldX, int worldZ, int radiusInChunks, int maxNewChunks)
+    {
+        if (_chunkCountX == 0 || _chunkCountZ == 0 || maxNewChunks <= 0)
+        {
+            return 0;
+        }
+
+        var clampedX = Math.Clamp(worldX, 0, Width - 1);
+        var clampedZ = Math.Clamp(worldZ, 0, Depth - 1);
+        var centerChunkX = clampedX / ChunkSize;
+        var centerChunkZ = clampedZ / ChunkSize;
+        var radius = Math.Max(0, radiusInChunks);
+        var created = 0;
+
+        for (var ring = 0; ring <= radius && created < maxNewChunks; ring++)
+        {
+            var minChunkX = Math.Max(0, centerChunkX - ring);
+            var maxChunkX = Math.Min(_chunkCountX - 1, centerChunkX + ring);
+            var minChunkZ = Math.Max(0, centerChunkZ - ring);
+            var maxChunkZ = Math.Min(_chunkCountZ - 1, centerChunkZ + ring);
+
+            for (var chunkX = minChunkX; chunkX <= maxChunkX && created < maxNewChunks; chunkX++)
+            {
+                for (var chunkZ = minChunkZ; chunkZ <= maxChunkZ && created < maxNewChunks; chunkZ++)
+                {
+                    if (ring > 0
+                        && chunkX > minChunkX && chunkX < maxChunkX
+                        && chunkZ > minChunkZ && chunkZ < maxChunkZ)
+                    {
+                        continue;
+                    }
+
+                    var key = (chunkX, chunkZ);
+                    if (_chunks.ContainsKey(key))
+                    {
+                        continue;
+                    }
+
+                    _ = GetOrCreateChunk(chunkX, chunkZ);
+                    created++;
+                }
+            }
+        }
+
+        return created;
+    }
+
+    public int EnsureChunksAroundBudgetedAsync(Vector3 position, int radiusInChunks, int maxNewChunks)
+    {
+        var worldX = (int)MathF.Floor(position.X);
+        var worldZ = (int)MathF.Floor(position.Z);
+        return EnsureChunksAroundBudgetedAsync(worldX, worldZ, radiusInChunks, maxNewChunks);
+    }
+
+    public int EnsureChunksAroundBudgetedAsync(int worldX, int worldZ, int radiusInChunks, int maxNewChunks)
+    {
+        if (_chunkCountX == 0 || _chunkCountZ == 0 || maxNewChunks <= 0)
+        {
+            return 0;
+        }
+
+        var clampedX = Math.Clamp(worldX, 0, Width - 1);
+        var clampedZ = Math.Clamp(worldZ, 0, Depth - 1);
+        var centerChunkX = clampedX / ChunkSize;
+        var centerChunkZ = clampedZ / ChunkSize;
+        var radius = Math.Max(0, radiusInChunks);
+        var queued = 0;
+
+        for (var ring = 0; ring <= radius && queued < maxNewChunks; ring++)
+        {
+            var minChunkX = Math.Max(0, centerChunkX - ring);
+            var maxChunkX = Math.Min(_chunkCountX - 1, centerChunkX + ring);
+            var minChunkZ = Math.Max(0, centerChunkZ - ring);
+            var maxChunkZ = Math.Min(_chunkCountZ - 1, centerChunkZ + ring);
+
+            for (var chunkX = minChunkX; chunkX <= maxChunkX && queued < maxNewChunks; chunkX++)
+            {
+                for (var chunkZ = minChunkZ; chunkZ <= maxChunkZ && queued < maxNewChunks; chunkZ++)
+                {
+                    if (ring > 0
+                        && chunkX > minChunkX && chunkX < maxChunkX
+                        && chunkZ > minChunkZ && chunkZ < maxChunkZ)
+                    {
+                        continue;
+                    }
+
+                    if (!TryQueueChunkGeneration(chunkX, chunkZ))
+                    {
+                        continue;
+                    }
+
+                    queued++;
+                }
+            }
+        }
+
+        return queued;
+    }
+
+    public int QueueDirtyChunkSurfacesAsync(Vector3 position, int maxChunks)
+    {
+        if (_chunkCountX == 0 || _chunkCountZ == 0 || maxChunks <= 0)
+        {
+            return 0;
+        }
+
+        var clampedX = Math.Clamp((int)MathF.Floor(position.X), 0, Width - 1);
+        var clampedZ = Math.Clamp((int)MathF.Floor(position.Z), 0, Depth - 1);
+        var centerChunkX = clampedX / ChunkSize;
+        var centerChunkZ = clampedZ / ChunkSize;
+        return QueueDirtyChunkSurfacesAsync(centerChunkX, centerChunkZ, maxChunks);
+    }
+
+    public int QueueDirtyChunkSurfacesAsync(int centerChunkX, int centerChunkZ, int maxChunks)
+    {
+        if (maxChunks <= 0 || _dirtySurfaceChunks.Count == 0)
+        {
+            return 0;
+        }
+
+        var queued = 0;
+        var attempts = 0;
+        var maxAttempts = Math.Max(maxChunks * 4, 8);
+        while (queued < maxChunks && attempts < maxAttempts)
+        {
+            attempts++;
+            if (!TryGetClosestDirtyLoadedChunkForBackground(centerChunkX, centerChunkZ, out var key))
+            {
+                break;
+            }
+
+            if (!TryQueueSurfaceRebuild(key.ChunkX, key.ChunkZ))
+            {
+                continue;
+            }
+
+            queued++;
+        }
+
+        return queued;
+    }
+
+    public int ApplyBackgroundStreamingResults(int maxChunkApplies, int maxSurfaceApplies)
+    {
+        var applied = 0;
+        var chunkBudget = Math.Max(0, maxChunkApplies);
+        var surfaceBudget = Math.Max(0, maxSurfaceApplies);
+
+        while (chunkBudget > 0 && _completedChunkGenerations.TryDequeue(out var chunkResult))
+        {
+            chunkBudget--;
+            var key = (chunkResult.ChunkX, chunkResult.ChunkZ);
+            if (_chunks.ContainsKey(key))
+            {
+                continue;
+            }
+
+            _chunks[key] = chunkResult.Chunk;
+            MarkChunkAndNeighborsDirty(chunkResult.ChunkX, chunkResult.ChunkZ);
+            applied++;
+        }
+
+        while (surfaceBudget > 0 && _completedSurfaceRebuilds.TryDequeue(out var surfaceResult))
+        {
+            surfaceBudget--;
+            var key = (surfaceResult.ChunkX, surfaceResult.ChunkZ);
+            if (!_chunks.ContainsKey(key))
+            {
+                continue;
+            }
+
+            if (GetSurfaceRevision(key) != surfaceResult.Revision)
+            {
+                continue;
+            }
+
+            _chunkSurfaceCache[key] = surfaceResult.Blocks;
+            _dirtySurfaceChunks.Remove(key);
+            applied++;
+        }
+
+        return applied;
+    }
+
     public void UnloadFarChunks(Vector3 position, int keepRadiusInChunks)
     {
         if (_chunks.Count == 0)
@@ -128,6 +371,9 @@ public sealed class WorldMap
         if (keepRadiusInChunks < 0)
         {
             _chunks.Clear();
+            _chunkSurfaceCache.Clear();
+            _dirtySurfaceChunks.Clear();
+            _surfaceRevisions.Clear();
             return;
         }
 
@@ -138,6 +384,7 @@ public sealed class WorldMap
         var centerChunkX = clampedX / ChunkSize;
         var centerChunkZ = clampedZ / ChunkSize;
 
+        var removedChunks = new List<(int ChunkX, int ChunkZ)>();
         var loadedChunks = new List<(int ChunkX, int ChunkZ)>(_chunks.Keys);
         foreach (var key in loadedChunks)
         {
@@ -145,13 +392,77 @@ public sealed class WorldMap
                 || Math.Abs(key.ChunkZ - centerChunkZ) > keepRadiusInChunks)
             {
                 _chunks.Remove(key);
+                _chunkSurfaceCache.Remove(key);
+                _dirtySurfaceChunks.Remove(key);
+                _surfaceRevisions.Remove(key);
+                removedChunks.Add(key);
             }
+        }
+
+        foreach (var removed in removedChunks)
+        {
+            MarkChunkAndNeighborsDirty(removed.ChunkX, removed.ChunkZ);
         }
     }
 
     public bool IsChunkLoaded(int chunkX, int chunkZ)
     {
         return _chunks.ContainsKey((chunkX, chunkZ));
+    }
+
+    public bool TryGetChunkSurfaceBlocks(int chunkX, int chunkZ, out IReadOnlyList<SurfaceBlock> blocks)
+    {
+        var key = (chunkX, chunkZ);
+        if (!_chunks.ContainsKey(key))
+        {
+            blocks = EmptySurfaceBlocks;
+            return false;
+        }
+
+        if (_dirtySurfaceChunks.Contains(key) || !_chunkSurfaceCache.TryGetValue(key, out var cached))
+        {
+            blocks = EmptySurfaceBlocks;
+            return true;
+        }
+
+        blocks = cached;
+        return true;
+    }
+
+    public int RebuildDirtyChunkSurfaces(Vector3 position, int maxChunks)
+    {
+        if (_chunkCountX == 0 || _chunkCountZ == 0)
+        {
+            return 0;
+        }
+
+        var clampedX = Math.Clamp((int)MathF.Floor(position.X), 0, Width - 1);
+        var clampedZ = Math.Clamp((int)MathF.Floor(position.Z), 0, Depth - 1);
+        var centerChunkX = clampedX / ChunkSize;
+        var centerChunkZ = clampedZ / ChunkSize;
+        return RebuildDirtyChunkSurfaces(centerChunkX, centerChunkZ, maxChunks);
+    }
+
+    public int RebuildDirtyChunkSurfaces(int centerChunkX, int centerChunkZ, int maxChunks)
+    {
+        if (maxChunks <= 0 || _dirtySurfaceChunks.Count == 0)
+        {
+            return 0;
+        }
+
+        var rebuilt = 0;
+        while (rebuilt < maxChunks)
+        {
+            if (!TryGetClosestDirtyLoadedChunk(centerChunkX, centerChunkZ, out var key))
+            {
+                break;
+            }
+
+            _ = RebuildChunkSurfaceBlocks(key.ChunkX, key.ChunkZ);
+            rebuilt++;
+        }
+
+        return rebuilt;
     }
 
     private bool IsInsideXZ(int x, int z)
@@ -168,7 +479,135 @@ public sealed class WorldMap
 
         var chunk = GenerateChunk(chunkX, chunkZ);
         _chunks[(chunkX, chunkZ)] = chunk;
+        MarkChunkAndNeighborsDirty(chunkX, chunkZ);
         return chunk;
+    }
+
+    private IReadOnlyList<SurfaceBlock> RebuildChunkSurfaceBlocks(int chunkX, int chunkZ)
+    {
+        var key = (chunkX, chunkZ);
+        if (!_chunks.TryGetValue(key, out var chunk))
+        {
+            _chunkSurfaceCache.Remove(key);
+            _dirtySurfaceChunks.Remove(key);
+            return EmptySurfaceBlocks;
+        }
+
+        var chunkMinX = chunkX * ChunkSize;
+        var chunkMinZ = chunkZ * ChunkSize;
+        var blocks = new List<SurfaceBlock>(chunk.Size * chunk.Size * 3);
+
+        for (var localX = 0; localX < chunk.Size; localX++)
+        {
+            var worldX = chunkMinX + localX;
+            if (worldX >= Width)
+            {
+                continue;
+            }
+
+            for (var localZ = 0; localZ < chunk.Size; localZ++)
+            {
+                var worldZ = chunkMinZ + localZ;
+                if (worldZ >= Depth)
+                {
+                    continue;
+                }
+
+                for (var y = 0; y < Height; y++)
+                {
+                    var block = chunk.Get(localX, y, localZ);
+                    if (block == BlockType.Air)
+                    {
+                        continue;
+                    }
+
+                    var visibleFaces = CountVisibleFacesNoLoad(worldX, y, worldZ, out var topVisible);
+                    if (visibleFaces == 0)
+                    {
+                        continue;
+                    }
+
+                    var skyExposure = CountSkyExposureNoLoad(worldX, y, worldZ);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure));
+                }
+            }
+        }
+
+        _chunkSurfaceCache[key] = blocks;
+        _dirtySurfaceChunks.Remove(key);
+        return blocks;
+    }
+
+    private bool IsSolidNoLoad(int x, int y, int z)
+    {
+        if (!IsInside(x, y, z))
+        {
+            return false;
+        }
+
+        var chunkX = x / ChunkSize;
+        var chunkZ = z / ChunkSize;
+        if (!_chunks.TryGetValue((chunkX, chunkZ), out var chunk))
+        {
+            return false;
+        }
+
+        var localX = x - chunkX * ChunkSize;
+        var localZ = z - chunkZ * ChunkSize;
+        return chunk.Get(localX, y, localZ) != BlockType.Air;
+    }
+
+    private int CountVisibleFacesNoLoad(int x, int y, int z, out bool topVisible)
+    {
+        var count = 0;
+        if (!IsSolidNoLoad(x + 1, y, z)) count++;
+        if (!IsSolidNoLoad(x - 1, y, z)) count++;
+        topVisible = !IsSolidNoLoad(x, y + 1, z);
+        if (topVisible) count++;
+        if (!IsSolidNoLoad(x, y - 1, z)) count++;
+        if (!IsSolidNoLoad(x, y, z + 1)) count++;
+        if (!IsSolidNoLoad(x, y, z - 1)) count++;
+        return count;
+    }
+
+    private int CountSkyExposureNoLoad(int x, int y, int z)
+    {
+        var count = 0;
+        if (!IsSolidNoLoad(x, y + 1, z)) count++;
+        if (!IsSolidNoLoad(x + 1, y + 1, z)) count++;
+        if (!IsSolidNoLoad(x - 1, y + 1, z)) count++;
+        if (!IsSolidNoLoad(x, y + 1, z + 1)) count++;
+        if (!IsSolidNoLoad(x, y + 1, z - 1)) count++;
+        return count;
+    }
+
+    private int GetSurfaceRevision((int ChunkX, int ChunkZ) key)
+    {
+        return _surfaceRevisions.TryGetValue(key, out var revision) ? revision : 0;
+    }
+
+    private void MarkChunkAndNeighborsDirty(int chunkX, int chunkZ)
+    {
+        MarkChunkDirtyIfLoaded(chunkX, chunkZ);
+        MarkChunkDirtyIfLoaded(chunkX - 1, chunkZ);
+        MarkChunkDirtyIfLoaded(chunkX + 1, chunkZ);
+        MarkChunkDirtyIfLoaded(chunkX, chunkZ - 1);
+        MarkChunkDirtyIfLoaded(chunkX, chunkZ + 1);
+    }
+
+    private void MarkChunkDirtyIfLoaded(int chunkX, int chunkZ)
+    {
+        if (chunkX < 0 || chunkZ < 0 || chunkX >= _chunkCountX || chunkZ >= _chunkCountZ)
+        {
+            return;
+        }
+
+        var key = (chunkX, chunkZ);
+        if (_chunks.ContainsKey(key))
+        {
+            _dirtySurfaceChunks.Add(key);
+            _surfaceRevisions[key] = GetSurfaceRevision(key) + 1;
+        }
     }
 
     private Chunk GenerateChunk(int chunkX, int chunkZ)
@@ -223,17 +662,45 @@ public sealed class WorldMap
         var scanMaxX = Math.Min(Width - 1, chunkMaxX + treeReach);
         var scanMinZ = Math.Max(0, chunkMinZ - treeReach);
         var scanMaxZ = Math.Min(Depth - 1, chunkMaxZ + treeReach);
+        var signalCache = new Dictionary<(int X, int Z), float>();
+        var terrainCache = new Dictionary<(int X, int Z), int>();
+
+        float GetSignal(int x, int z)
+        {
+            var key = (x, z);
+            if (signalCache.TryGetValue(key, out var signal))
+            {
+                return signal;
+            }
+
+            signal = EvaluateTreeSignal(x, z);
+            signalCache[key] = signal;
+            return signal;
+        }
+
+        int GetTerrain(int x, int z)
+        {
+            var key = (x, z);
+            if (terrainCache.TryGetValue(key, out var topY))
+            {
+                return topY;
+            }
+
+            topY = GetTerrainTopY(x, z);
+            terrainCache[key] = topY;
+            return topY;
+        }
 
         for (var rootX = scanMinX; rootX <= scanMaxX; rootX++)
         {
             for (var rootZ = scanMinZ; rootZ <= scanMaxZ; rootZ++)
             {
-                if (!ShouldPlaceTree(rootX, rootZ))
+                if (!ShouldPlaceTree(rootX, rootZ, GetSignal, GetTerrain))
                 {
                     continue;
                 }
 
-                var terrainTop = GetTerrainTopY(rootX, rootZ);
+                var terrainTop = GetTerrain(rootX, rootZ);
                 if (terrainTop + 8 >= Height)
                 {
                     continue;
@@ -244,14 +711,14 @@ public sealed class WorldMap
         }
     }
 
-    private bool ShouldPlaceTree(int x, int z)
+    private bool ShouldPlaceTree(int x, int z, Func<int, int, float> signalAt, Func<int, int, int> topAt)
     {
         if (x < 2 || z < 2 || x >= Width - 2 || z >= Depth - 2)
         {
             return false;
         }
 
-        var signal = EvaluateTreeSignal(x, z);
+        var signal = signalAt(x, z);
         if (signal < 0.58f)
         {
             return false;
@@ -259,14 +726,14 @@ public sealed class WorldMap
 
         // Keep forest dense but avoid merged mega-canopies:
         // place one trunk per small neighborhood based on local max signal.
-        if (!IsLocalTreePeak(x, z, signal))
+        if (!IsLocalTreePeak(x, z, signal, signalAt))
         {
             return false;
         }
 
-        var h = GetTerrainTopY(x, z);
-        var hX = GetTerrainTopY(Math.Min(Width - 1, x + 1), z);
-        var hZ = GetTerrainTopY(x, Math.Min(Depth - 1, z + 1));
+        var h = topAt(x, z);
+        var hX = topAt(Math.Min(Width - 1, x + 1), z);
+        var hZ = topAt(x, Math.Min(Depth - 1, z + 1));
         var slope = Math.Abs(h - hX) + Math.Abs(h - hZ);
         return slope <= 3;
     }
@@ -278,7 +745,7 @@ public sealed class WorldMap
         return biome * 0.62f + localChance * 0.38f;
     }
 
-    private bool IsLocalTreePeak(int x, int z, float signal)
+    private bool IsLocalTreePeak(int x, int z, float signal, Func<int, int, float> signalAt)
     {
         const int radius = 2;
         for (var nx = x - radius; nx <= x + radius; nx++)
@@ -295,7 +762,7 @@ public sealed class WorldMap
                     continue;
                 }
 
-                var other = EvaluateTreeSignal(nx, nz);
+                var other = signalAt(nx, nz);
                 if (other > signal + 0.005f)
                 {
                     return false;
@@ -453,6 +920,412 @@ public sealed class WorldMap
         }
 
         chunk.Set(localX, worldY, localZ, block);
+    }
+
+    private bool TryGetClosestDirtyLoadedChunk(int centerChunkX, int centerChunkZ, out (int ChunkX, int ChunkZ) key)
+    {
+        key = default;
+        var found = false;
+        var bestDistSq = int.MaxValue;
+        List<(int ChunkX, int ChunkZ)>? staleKeys = null;
+
+        foreach (var dirty in _dirtySurfaceChunks)
+        {
+            if (!_chunks.ContainsKey(dirty))
+            {
+                staleKeys ??= [];
+                staleKeys.Add(dirty);
+                continue;
+            }
+
+            var dx = dirty.ChunkX - centerChunkX;
+            var dz = dirty.ChunkZ - centerChunkZ;
+            var distSq = dx * dx + dz * dz;
+            if (distSq >= bestDistSq)
+            {
+                continue;
+            }
+
+            bestDistSq = distSq;
+            key = dirty;
+            found = true;
+        }
+
+        if (staleKeys is not null)
+        {
+            for (var i = 0; i < staleKeys.Count; i++)
+            {
+                _dirtySurfaceChunks.Remove(staleKeys[i]);
+                _chunkSurfaceCache.Remove(staleKeys[i]);
+            }
+        }
+
+        return found;
+    }
+
+    private bool TryGetClosestDirtyLoadedChunkForBackground(int centerChunkX, int centerChunkZ, out (int ChunkX, int ChunkZ) key)
+    {
+        key = default;
+        var found = false;
+        var bestDistSq = int.MaxValue;
+        List<(int ChunkX, int ChunkZ)>? staleKeys = null;
+        HashSet<(int ChunkX, int ChunkZ)> pendingSnapshot;
+        lock (_backgroundSync)
+        {
+            pendingSnapshot = [.. _pendingSurfaceRebuilds];
+        }
+
+        foreach (var dirty in _dirtySurfaceChunks)
+        {
+            if (pendingSnapshot.Contains(dirty))
+            {
+                continue;
+            }
+
+            if (!_chunks.ContainsKey(dirty))
+            {
+                staleKeys ??= [];
+                staleKeys.Add(dirty);
+                continue;
+            }
+
+            var dx = dirty.ChunkX - centerChunkX;
+            var dz = dirty.ChunkZ - centerChunkZ;
+            var distSq = dx * dx + dz * dz;
+            if (distSq >= bestDistSq)
+            {
+                continue;
+            }
+
+            bestDistSq = distSq;
+            key = dirty;
+            found = true;
+        }
+
+        if (staleKeys is not null)
+        {
+            for (var i = 0; i < staleKeys.Count; i++)
+            {
+                _dirtySurfaceChunks.Remove(staleKeys[i]);
+                _chunkSurfaceCache.Remove(staleKeys[i]);
+                _surfaceRevisions.Remove(staleKeys[i]);
+            }
+        }
+
+        return found;
+    }
+
+    private bool TryQueueChunkGeneration(int chunkX, int chunkZ)
+    {
+        if (chunkX < 0 || chunkZ < 0 || chunkX >= _chunkCountX || chunkZ >= _chunkCountZ)
+        {
+            return false;
+        }
+
+        var key = (chunkX, chunkZ);
+        Dictionary<(int X, int Y, int Z), BlockType> overridesSnapshot;
+        lock (_backgroundSync)
+        {
+            if (_chunks.ContainsKey(key) || _pendingChunkGenerations.Contains(key))
+            {
+                return false;
+            }
+
+            if (_chunkGenerationsInFlight >= MaxChunkGenerationsInFlight)
+            {
+                return false;
+            }
+
+            _pendingChunkGenerations.Add(key);
+            _chunkGenerationsInFlight++;
+            overridesSnapshot = SnapshotOverridesForChunk(chunkX, chunkZ);
+        }
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var generated = GenerateChunkFromOverrides(chunkX, chunkZ, overridesSnapshot);
+                _completedChunkGenerations.Enqueue(new GeneratedChunkResult(chunkX, chunkZ, generated));
+            }
+            finally
+            {
+                lock (_backgroundSync)
+                {
+                    _pendingChunkGenerations.Remove(key);
+                    _chunkGenerationsInFlight = Math.Max(0, _chunkGenerationsInFlight - 1);
+                }
+            }
+        });
+
+        return true;
+    }
+
+    private bool TryQueueSurfaceRebuild(int chunkX, int chunkZ)
+    {
+        var key = (chunkX, chunkZ);
+        lock (_backgroundSync)
+        {
+            if (_pendingSurfaceRebuilds.Contains(key))
+            {
+                return false;
+            }
+
+            if (_surfaceRebuildsInFlight >= MaxSurfaceRebuildsInFlight)
+            {
+                return false;
+            }
+
+            _pendingSurfaceRebuilds.Add(key);
+            _surfaceRebuildsInFlight++;
+        }
+
+        if (!TryCreateSurfaceSnapshot(chunkX, chunkZ, out var snapshot))
+        {
+            lock (_backgroundSync)
+            {
+                _pendingSurfaceRebuilds.Remove(key);
+                _surfaceRebuildsInFlight = Math.Max(0, _surfaceRebuildsInFlight - 1);
+            }
+
+            _dirtySurfaceChunks.Remove(key);
+            _chunkSurfaceCache.Remove(key);
+            _surfaceRevisions.Remove(key);
+            return false;
+        }
+
+        var revision = GetSurfaceRevision(key);
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var rebuilt = RebuildChunkSurfaceBlocksFromSnapshot(chunkX, chunkZ, snapshot);
+                _completedSurfaceRebuilds.Enqueue(new SurfaceRebuildResult(chunkX, chunkZ, revision, rebuilt));
+            }
+            finally
+            {
+                lock (_backgroundSync)
+                {
+                    _pendingSurfaceRebuilds.Remove(key);
+                    _surfaceRebuildsInFlight = Math.Max(0, _surfaceRebuildsInFlight - 1);
+                }
+            }
+        });
+
+        return true;
+    }
+
+    private bool TryCreateSurfaceSnapshot(int chunkX, int chunkZ, out Dictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot)
+    {
+        snapshot = [];
+        var key = (chunkX, chunkZ);
+        if (!_chunks.TryGetValue(key, out var rootChunk))
+        {
+            return false;
+        }
+
+        snapshot[key] = rootChunk.SnapshotBlocks();
+        for (var nx = chunkX - 1; nx <= chunkX + 1; nx++)
+        {
+            for (var nz = chunkZ - 1; nz <= chunkZ + 1; nz++)
+            {
+                if (nx == chunkX && nz == chunkZ)
+                {
+                    continue;
+                }
+
+                var neighborKey = (nx, nz);
+                if (!_chunks.TryGetValue(neighborKey, out var neighbor))
+                {
+                    continue;
+                }
+
+                snapshot[neighborKey] = neighbor.SnapshotBlocks();
+            }
+        }
+
+        return true;
+    }
+
+    private IReadOnlyList<SurfaceBlock> RebuildChunkSurfaceBlocksFromSnapshot(
+        int chunkX,
+        int chunkZ,
+        IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot)
+    {
+        if (!snapshot.TryGetValue((chunkX, chunkZ), out var chunk))
+        {
+            return EmptySurfaceBlocks;
+        }
+
+        var chunkMinX = chunkX * ChunkSize;
+        var chunkMinZ = chunkZ * ChunkSize;
+        var blocks = new List<SurfaceBlock>(ChunkSize * ChunkSize * 3);
+
+        for (var localX = 0; localX < ChunkSize; localX++)
+        {
+            var worldX = chunkMinX + localX;
+            if (worldX >= Width)
+            {
+                continue;
+            }
+
+            for (var localZ = 0; localZ < ChunkSize; localZ++)
+            {
+                var worldZ = chunkMinZ + localZ;
+                if (worldZ >= Depth)
+                {
+                    continue;
+                }
+
+                for (var y = 0; y < Height; y++)
+                {
+                    var block = chunk[localX, y, localZ];
+                    if (block == BlockType.Air)
+                    {
+                        continue;
+                    }
+
+                    var visibleFaces = CountVisibleFacesSnapshot(worldX, y, worldZ, snapshot, out var topVisible);
+                    if (visibleFaces == 0)
+                    {
+                        continue;
+                    }
+
+                    var skyExposure = CountSkyExposureSnapshot(worldX, y, worldZ, snapshot);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure));
+                }
+            }
+        }
+
+        return blocks;
+    }
+
+    private int CountVisibleFacesSnapshot(
+        int x,
+        int y,
+        int z,
+        IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot,
+        out bool topVisible)
+    {
+        var count = 0;
+        if (!IsSolidInSnapshot(x + 1, y, z, snapshot)) count++;
+        if (!IsSolidInSnapshot(x - 1, y, z, snapshot)) count++;
+        topVisible = !IsSolidInSnapshot(x, y + 1, z, snapshot);
+        if (topVisible) count++;
+        if (!IsSolidInSnapshot(x, y - 1, z, snapshot)) count++;
+        if (!IsSolidInSnapshot(x, y, z + 1, snapshot)) count++;
+        if (!IsSolidInSnapshot(x, y, z - 1, snapshot)) count++;
+        return count;
+    }
+
+    private int CountSkyExposureSnapshot(
+        int x,
+        int y,
+        int z,
+        IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot)
+    {
+        var count = 0;
+        if (!IsSolidInSnapshot(x, y + 1, z, snapshot)) count++;
+        if (!IsSolidInSnapshot(x + 1, y + 1, z, snapshot)) count++;
+        if (!IsSolidInSnapshot(x - 1, y + 1, z, snapshot)) count++;
+        if (!IsSolidInSnapshot(x, y + 1, z + 1, snapshot)) count++;
+        if (!IsSolidInSnapshot(x, y + 1, z - 1, snapshot)) count++;
+        return count;
+    }
+
+    private bool IsSolidInSnapshot(
+        int x,
+        int y,
+        int z,
+        IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot)
+    {
+        if (!IsInside(x, y, z))
+        {
+            return false;
+        }
+
+        var chunkX = x / ChunkSize;
+        var chunkZ = z / ChunkSize;
+        if (!snapshot.TryGetValue((chunkX, chunkZ), out var chunk))
+        {
+            return false;
+        }
+
+        var localX = x - chunkX * ChunkSize;
+        var localZ = z - chunkZ * ChunkSize;
+        return chunk[localX, y, localZ] != BlockType.Air;
+    }
+
+    private Dictionary<(int X, int Y, int Z), BlockType> SnapshotOverridesForChunk(int chunkX, int chunkZ)
+    {
+        if (_overrides.Count == 0)
+        {
+            return [];
+        }
+
+        var snapshot = new Dictionary<(int X, int Y, int Z), BlockType>();
+        var chunkMinX = chunkX * ChunkSize;
+        var chunkMaxX = Math.Min(Width - 1, chunkMinX + ChunkSize - 1);
+        var chunkMinZ = chunkZ * ChunkSize;
+        var chunkMaxZ = Math.Min(Depth - 1, chunkMinZ + ChunkSize - 1);
+
+        foreach (var entry in _overrides)
+        {
+            var x = entry.Key.X;
+            var y = entry.Key.Y;
+            var z = entry.Key.Z;
+            if (x < chunkMinX || x > chunkMaxX || z < chunkMinZ || z > chunkMaxZ || y < 0 || y >= Height)
+            {
+                continue;
+            }
+
+            snapshot[entry.Key] = entry.Value;
+        }
+
+        return snapshot;
+    }
+
+    private Chunk GenerateChunkFromOverrides(int chunkX, int chunkZ, IReadOnlyDictionary<(int X, int Y, int Z), BlockType> overridesSnapshot)
+    {
+        var chunk = new Chunk(ChunkSize, Height);
+        GenerateTerrainColumns(chunk, chunkX, chunkZ);
+        GenerateTrees(chunk, chunkX, chunkZ);
+        ApplyChunkOverridesSnapshot(chunk, chunkX, chunkZ, overridesSnapshot);
+        return chunk;
+    }
+
+    private void ApplyChunkOverridesSnapshot(
+        Chunk chunk,
+        int chunkX,
+        int chunkZ,
+        IReadOnlyDictionary<(int X, int Y, int Z), BlockType> overridesSnapshot)
+    {
+        if (overridesSnapshot.Count == 0)
+        {
+            return;
+        }
+
+        var chunkMinX = chunkX * ChunkSize;
+        var chunkMinZ = chunkZ * ChunkSize;
+        foreach (var entry in overridesSnapshot)
+        {
+            var x = entry.Key.X;
+            var y = entry.Key.Y;
+            var z = entry.Key.Z;
+            if (y < 0 || y >= Height)
+            {
+                continue;
+            }
+
+            var localX = x - chunkMinX;
+            var localZ = z - chunkMinZ;
+            if (localX < 0 || localX >= ChunkSize || localZ < 0 || localZ >= ChunkSize)
+            {
+                continue;
+            }
+
+            chunk.Set(localX, y, localZ, entry.Value);
+        }
     }
 
     private void ApplyChunkOverrides(Chunk chunk, int chunkX, int chunkZ)

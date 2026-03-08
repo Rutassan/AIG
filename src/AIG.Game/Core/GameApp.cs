@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.IO;
+using System.Collections.Generic;
 using AIG.Game.Config;
 using AIG.Game.Gameplay;
 using AIG.Game.Player;
@@ -14,6 +15,16 @@ public class GameApp : IGameRunner
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
+    private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
+    private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
+
+    private enum WorldLodTier : byte
+    {
+        Near = 0,
+        Mid = 1,
+        Far = 2
+    }
+
     private struct AutoBotState
     {
         public Vector3 LastPosition;
@@ -39,6 +50,16 @@ public class GameApp : IGameRunner
     private int _lastStreamChunkX = int.MinValue;
     private int _lastStreamChunkZ = int.MinValue;
     private int _lastStreamRadius = -1;
+    private float _adaptiveRenderDistance = -1f;
+    private Vector2 _lastAdaptiveProbePosition;
+    private bool _hasAdaptiveProbe;
+    private float _adaptiveMovementFreezeTimer;
+    private float _runtimeSeconds;
+    private int _lastDrawnSurfaceCount;
+    private ulong _lastDrawSceneHash;
+    private bool _sceneMetricsEnabled;
+    private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
+    private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -63,9 +84,17 @@ public class GameApp : IGameRunner
     public void Run()
     {
         InitializePlatform(enableFullscreen: true);
+        _sceneMetricsEnabled = false;
 
         _player = new PlayerController(_config, CreateSpawnPosition());
+        if (_world.Seed != 0)
+        {
+            ClearSpawnCanopy(_player.Position, horizontalRadius: 10, verticalSpan: 14);
+            var startLook = BuildGroundLookDirection(_player.Position, new Vector3(0f, 0f, -1f));
+            _player.SetPose(_player.Position, startLook);
+        }
         _playerVisual.Reset(_player.Position);
+        ResetAdaptiveTracking(_player.Position);
         UpdateWorldStreaming(force: true);
 
         var shouldExit = false;
@@ -82,6 +111,7 @@ public class GameApp : IGameRunner
 
             var delta = _platform.GetFrameTime();
             _lastFrameMs = delta * 1000f;
+            AdvanceRuntime(delta);
             var cameraBob = 0f;
 
             if (_state == AppState.Playing)
@@ -131,6 +161,10 @@ public class GameApp : IGameRunner
                         break;
                     case MenuAction.CycleGraphicsQuality:
                         _graphics.CycleQuality();
+                        _adaptiveRenderDistance = -1f;
+                        _adaptiveMovementFreezeTimer = 0f;
+                        _hasAdaptiveProbe = false;
+                        _chunkRevealStartedAt.Clear();
                         break;
                     case MenuAction.ToggleFog:
                         _graphics.ToggleFog();
@@ -158,8 +192,10 @@ public class GameApp : IGameRunner
     internal void RunAutoCapture(string outputDirectory)
     {
         Directory.CreateDirectory(outputDirectory);
+        _runtimeSeconds = 0f;
 
         InitializePlatform(enableFullscreen: false);
+        _sceneMetricsEnabled = false;
         _state = AppState.Playing;
         _cameraMode = CameraMode.FirstPerson;
         _platform.DisableCursor();
@@ -167,21 +203,24 @@ public class GameApp : IGameRunner
         var shots = GetAutoCaptureShots();
         if (shots.Length > 0)
         {
-            var warmupHit = PrepareAutoCaptureShot(shots[0]);
+            _ = PrepareAutoCaptureShot(shots[0]);
             var warmupView = CameraViewBuilder.Build(_player, _world, CameraMode.FirstPerson, 0f);
             for (var i = 0; i < 8; i++)
             {
-                DrawFrame(warmupHit, warmupView);
+                AdvanceRuntime(1f / 60f);
+                DrawFrame(null, warmupView);
             }
             _platform.TakeScreenshot(Path.Combine(outputDirectory, "autocap-warmup.png"));
         }
 
         foreach (var shot in shots)
         {
-            var hit = PrepareAutoCaptureShot(shot);
+            _ = PrepareAutoCaptureShot(shot);
             var view = CameraViewBuilder.Build(_player, _world, CameraMode.FirstPerson, 0f);
-            DrawFrame(hit, view);
-            DrawFrame(hit, view);
+            AdvanceRuntime(1f / 60f);
+            DrawFrame(null, view);
+            AdvanceRuntime(1f / 60f);
+            DrawFrame(null, view);
 
             _platform.TakeScreenshot(Path.Combine(outputDirectory, shot.FileName));
         }
@@ -192,18 +231,28 @@ public class GameApp : IGameRunner
     internal void RunAutoPerf(string outputDirectory, float durationSeconds = 12f, int minAllowedFps = 60)
     {
         Directory.CreateDirectory(outputDirectory);
+        _runtimeSeconds = 0f;
 
         InitializePlatform(enableFullscreen: false);
+        _sceneMetricsEnabled = true;
         _state = AppState.Playing;
         _cameraMode = CameraMode.FirstPerson;
         _platform.DisableCursor();
 
         _player = new PlayerController(_config, CreateSpawnPosition());
+        if (_world.Seed != 0)
+        {
+            ClearSpawnCanopy(_player.Position, horizontalRadius: 10, verticalSpan: 14);
+            var startLook = BuildGroundLookDirection(_player.Position, new Vector3(0f, 0f, -1f));
+            _player.SetPose(_player.Position, startLook);
+        }
         _playerVisual.Reset(_player.Position);
+        ResetAdaptiveTracking(_player.Position);
         UpdateWorldStreaming(force: true);
 
         var duration = Math.Clamp(durationSeconds, 1f, 300f);
         var fpsThreshold = Math.Clamp(minAllowedFps, 1, 240);
+        const int warmupFrameCount = 60;
         var bot = new AutoBotState
         {
             LastPosition = _player.Position,
@@ -212,16 +261,36 @@ public class GameApp : IGameRunner
 
         var elapsed = 0f;
         var frameCount = 0;
-        var minFps = int.MaxValue;
-        var maxFps = 0;
-        var sumFps = 0.0;
-        var belowThresholdFrames = 0;
+        var minFpsAll = int.MaxValue;
+        var maxFpsAll = 0;
+        var sumFpsAll = 0.0;
+        var belowThresholdAll = 0;
+        var measuredFrameCount = 0;
+        var minFpsMeasured = int.MaxValue;
+        var maxFpsMeasured = 0;
+        var sumFpsMeasured = 0.0;
+        var belowThresholdMeasured = 0;
+        var autoCaptureEveryFrames = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 96,
+            GraphicsQuality.Medium => 120,
+            _ => 144
+        };
+        var autoCaptureFramesSaved = 0;
+        var hasPreviousScene = false;
+        var previousSceneHash = 0UL;
+        var previousSurfaceCount = 0;
+        var sceneJumpSamples = 0;
+        var sceneJumpSum = 0.0;
+        var sceneJumpMax = 0.0;
+        var sceneJumpSpikes = 0;
 
         while (elapsed < duration && !_platform.WindowShouldClose())
         {
             var rawDelta = _platform.GetFrameTime();
             var delta = rawDelta > 0f ? rawDelta : 1f / 60f;
             delta = Math.Clamp(delta, 1f / 240f, 0.05f);
+            AdvanceRuntime(delta);
             elapsed += delta;
             _lastFrameMs = delta * 1000f;
 
@@ -238,24 +307,76 @@ public class GameApp : IGameRunner
             var hit = VoxelRaycaster.Raycast(_world, view.RayOrigin, view.RayDirection, _config.InteractionDistance);
             DrawFrame(hit, view);
 
+            var currentSurfaceCount = _lastDrawnSurfaceCount;
+            var currentSceneHash = _lastDrawSceneHash;
+            if (hasPreviousScene)
+            {
+                var blockJump = Math.Abs(currentSurfaceCount - previousSurfaceCount) / Math.Max(1f, previousSurfaceCount);
+                var hashJump = BitOperations.PopCount(currentSceneHash ^ previousSceneHash) / 64f;
+                var jumpScore = blockJump * 0.62f + hashJump * 0.38f;
+                sceneJumpSamples++;
+                sceneJumpSum += jumpScore;
+                sceneJumpMax = Math.Max(sceneJumpMax, jumpScore);
+                if (jumpScore > 0.28f)
+                {
+                    sceneJumpSpikes++;
+                }
+            }
+
+            hasPreviousScene = true;
+            previousSurfaceCount = currentSurfaceCount;
+            previousSceneHash = currentSceneHash;
+
             var fps = Math.Max(1, _platform.GetFps());
-            minFps = Math.Min(minFps, fps);
-            maxFps = Math.Max(maxFps, fps);
-            sumFps += fps;
             frameCount++;
+            minFpsAll = Math.Min(minFpsAll, fps);
+            maxFpsAll = Math.Max(maxFpsAll, fps);
+            sumFpsAll += fps;
             if (fps < fpsThreshold)
             {
-                belowThresholdFrames++;
+                belowThresholdAll++;
+            }
+
+            if (frameCount > warmupFrameCount)
+            {
+                measuredFrameCount++;
+                minFpsMeasured = Math.Min(minFpsMeasured, fps);
+                maxFpsMeasured = Math.Max(maxFpsMeasured, fps);
+                sumFpsMeasured += fps;
+                if (fps < fpsThreshold)
+                {
+                    belowThresholdMeasured++;
+                }
+            }
+
+            if (frameCount % autoCaptureEveryFrames == 0 && fps >= fpsThreshold + 10)
+            {
+                var captureName = $"autoperf-cap-{frameCount:D4}.png";
+                _platform.TakeScreenshot(Path.Combine(outputDirectory, captureName));
+                autoCaptureFramesSaved++;
             }
         }
 
         if (frameCount == 0)
         {
+            minFpsAll = 0;
+        }
+
+        var useWarmupTrimmed = measuredFrameCount > 0;
+        var effectiveFrameCount = useWarmupTrimmed ? measuredFrameCount : frameCount;
+        var minFps = useWarmupTrimmed ? minFpsMeasured : minFpsAll;
+        var maxFps = useWarmupTrimmed ? maxFpsMeasured : maxFpsAll;
+        var sumFps = useWarmupTrimmed ? sumFpsMeasured : sumFpsAll;
+        var belowThresholdFrames = useWarmupTrimmed ? belowThresholdMeasured : belowThresholdAll;
+
+        if (effectiveFrameCount == 0)
+        {
             minFps = 0;
         }
 
-        var avgFps = frameCount == 0 ? 0f : (float)(sumFps / frameCount);
-        var result = frameCount > 0 && belowThresholdFrames == 0 ? "PASS" : "FAIL";
+        var avgFps = effectiveFrameCount == 0 ? 0f : (float)(sumFps / effectiveFrameCount);
+        var avgSceneJump = sceneJumpSamples == 0 ? 0f : (float)(sceneJumpSum / sceneJumpSamples);
+        var result = effectiveFrameCount > 0 && belowThresholdFrames == 0 ? "PASS" : "FAIL";
         var logName = $"autoperf-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.log";
         var logPath = Path.Combine(outputDirectory, logName);
         var lines = new[]
@@ -268,6 +389,13 @@ public class GameApp : IGameRunner
             $"fps_max={maxFps}",
             $"fps_threshold={fpsThreshold}",
             $"below_threshold_frames={belowThresholdFrames}",
+            $"warmup_frames_ignored={(useWarmupTrimmed ? warmupFrameCount : 0)}",
+            $"scene_jump_avg={avgSceneJump:0.000}",
+            $"scene_jump_max={sceneJumpMax:0.000}",
+            $"scene_jump_spikes={sceneJumpSpikes}",
+            $"scene_jump_samples={sceneJumpSamples}",
+            $"autocap_interval_frames={autoCaptureEveryFrames}",
+            $"autocap_frames_saved={autoCaptureFramesSaved}",
             $"graphics_quality={GetQualityName(_graphics.Quality)}",
             $"render_distance={_graphics.RenderDistance}",
             $"result={result}",
@@ -279,6 +407,7 @@ public class GameApp : IGameRunner
         _platform.TakeScreenshot(Path.Combine(outputDirectory, "autoperf-last.png"));
 
         ShutdownPlatform();
+        _sceneMetricsEnabled = false;
     }
 
     internal static PlayerInput ReadInput(IGamePlatform platform)
@@ -452,7 +581,8 @@ public class GameApp : IGameRunner
     private void DrawFrame(BlockRaycastHit? hit, CameraViewBuilder.CameraView view)
     {
         _platform.BeginDrawing();
-        _platform.ClearBackground(GetSkyColor());
+        _platform.ClearBackground(GetSkyTopColor());
+        DrawSkyGradient(view);
 
         if (_state != AppState.MainMenu)
         {
@@ -462,6 +592,7 @@ public class GameApp : IGameRunner
             DrawBlockHighlight(hit, view.RayOrigin, view.RayDirection);
             DrawFirstPersonHand(view.Camera);
             _platform.EndMode3D();
+            DrawScreenFogOverlay(view);
 
             DrawHud(_state == AppState.Playing);
             DrawHotbar();
@@ -475,97 +606,315 @@ public class GameApp : IGameRunner
         _platform.EndDrawing();
     }
 
+    private void DrawSkyGradient(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var top = GetSkyTopColor();
+        var horizon = GetSkyHorizonColor();
+        const int bands = 20;
+        for (var i = 0; i < bands; i++)
+        {
+            var y0 = i * height / bands;
+            var y1 = (i + 1) * height / bands;
+            var bandHeight = Math.Max(1, y1 - y0);
+            var t = i / (float)(bands - 1);
+            t = MathF.Pow(t, 1.35f);
+            var color = LerpColor(top, horizon, t);
+            _platform.DrawRectangle(0, y0, width, bandHeight, color);
+        }
+
+        var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
+        var horizonY = (int)MathF.Round(height * (0.56f + viewY * 0.2f));
+        horizonY = Math.Clamp(horizonY, 0, height - 1);
+        var fog = _graphics.FogColor;
+        DrawHorizonBand(width, height, horizonY - 34, 26, new Color(fog.R, fog.G, fog.B, (byte)42));
+        DrawHorizonBand(width, height, horizonY - 8, 16, new Color(fog.R, fog.G, fog.B, (byte)62));
+        DrawHorizonBand(width, height, horizonY + 10, 18, new Color(fog.R, fog.G, fog.B, (byte)35));
+    }
+
+    private void DrawScreenFogOverlay(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
+        var horizonY = (int)MathF.Round(height * (0.60f + viewY * 0.16f));
+        var fog = _graphics.FogColor;
+
+        DrawHorizonBand(width, height, horizonY, 48, new Color(fog.R, fog.G, fog.B, (byte)34));
+        DrawHorizonBand(width, height, horizonY + 26, 52, new Color(fog.R, fog.G, fog.B, (byte)26));
+        DrawHorizonBand(width, height, horizonY + 58, 62, new Color(fog.R, fog.G, fog.B, (byte)18));
+    }
+
+    private void DrawHorizonBand(int width, int height, int y, int bandHeight, Color color)
+    {
+        if (bandHeight <= 0 || width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var top = Math.Clamp(y, 0, height - 1);
+        var bottom = Math.Clamp(y + bandHeight, 0, height);
+        var drawHeight = bottom - top;
+        if (drawHeight <= 0)
+        {
+            return;
+        }
+
+        _platform.DrawRectangle(0, top, width, drawHeight, color);
+    }
+
     private void DrawWorld()
     {
-        var renderDistance = _graphics.RenderDistance;
+        _lastDrawnSurfaceCount = 0;
+        _lastDrawSceneHash = 0UL;
+        _worldInstanceBatches.Clear();
+
+        if (_world.ChunkCountX == 0 || _world.ChunkCountZ == 0)
+        {
+            return;
+        }
+
+        var measuredFps = _platform.GetFps();
+        var renderDistance = GetAdaptiveRenderDistance(measuredFps, advanceSmoothing: false);
+        var distanceFadeBand = GetDistanceFadeBand();
+        var softRenderDistance = renderDistance + distanceFadeBand;
+        var edgeKeepStartDistance = Math.Max(1f, renderDistance - distanceFadeBand);
+        var edgeKeepStartSq = edgeKeepStartDistance * edgeKeepStartDistance;
+        var (lodNearDistance, lodMidDistance, lodBlendBand) = GetLodTransitionProfile(renderDistance);
         var centerX = (int)MathF.Floor(_player.Position.X);
         var centerY = (int)MathF.Floor(_player.Position.Y);
         var centerZ = (int)MathF.Floor(_player.Position.Z);
-
-        var minX = Math.Max(0, centerX - renderDistance);
-        var maxX = Math.Min(_world.Width - 1, centerX + renderDistance);
-        var minZ = Math.Max(0, centerZ - renderDistance);
-        var maxZ = Math.Min(_world.Depth - 1, centerZ + renderDistance);
         var belowY = _graphics.Quality switch
         {
-            GraphicsQuality.Low => 8,
-            GraphicsQuality.Medium => 10,
-            _ => 12
+            GraphicsQuality.Low => 12,
+            GraphicsQuality.Medium => 16,
+            _ => 20
         };
         var aboveY = _graphics.Quality switch
         {
-            GraphicsQuality.Low => 12,
-            GraphicsQuality.Medium => 14,
-            _ => 16
+            GraphicsQuality.Low => 16,
+            GraphicsQuality.Medium => 20,
+            _ => 24
         };
         var centerSurfaceY = _world.GetTerrainTopY(centerX, centerZ);
-        var minY = Math.Max(0, Math.Min(centerY - belowY, centerSurfaceY - 6));
-        var maxY = Math.Min(_world.Height - 1, Math.Max(centerY + aboveY, centerSurfaceY + 12));
+        var minY = Math.Max(0, Math.Min(centerY - belowY, centerSurfaceY - 16));
+        var maxY = Math.Min(_world.Height - 1, Math.Max(centerY + aboveY, centerSurfaceY + 20));
 
-        var maxDistSq = renderDistance * renderDistance;
+        var maxDistSq = softRenderDistance * softRenderDistance;
+        var baseRenderDistSq = renderDistance * renderDistance;
+        var farLodDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 8),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 14),
+            _ => Math.Min(renderDistance, 24)
+        };
+        var veryFarLodDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 10),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 18),
+            _ => Math.Min(renderDistance, 48)
+        };
+        var ultraFarLodDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 12),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 22),
+            _ => Math.Min(renderDistance, 72)
+        };
+        var farLodSq = farLodDistance * farLodDistance;
+        var veryFarLodSq = veryFarLodDistance * veryFarLodDistance;
+        var sparseFarSamplingEnabled = renderDistance >= 72;
+        var forwardXZ = ToHorizontalForward(_player.LookDirection);
+        var directionalCullDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 8),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 14),
+            _ => Math.Min(renderDistance, 20)
+        };
+        var directionalCullSq = directionalCullDistance * directionalCullDistance;
         var foliageDistance = _graphics.Quality switch
         {
             GraphicsQuality.Low => 8,
             GraphicsQuality.Medium => Math.Min(renderDistance, 12),
-            _ => renderDistance
+            _ => Math.Min(renderDistance, 24)
         };
         var foliageDistSq = foliageDistance * foliageDistance;
+        var foliageFadeBand = GetFoliageFadeBand();
         var canopyBand = _graphics.Quality switch
         {
             GraphicsQuality.Low => 10,
             GraphicsQuality.Medium => 12,
             _ => 12
         };
-
-        for (var x = minX; x <= maxX; x++)
+        var chunkRadius = Math.Max(1, ((int)MathF.Ceiling(softRenderDistance) + _world.ChunkSize - 1) / _world.ChunkSize);
+        if (_state != AppState.Playing)
         {
-            for (var z = minZ; z <= maxZ; z++)
+            _world.EnsureChunksAround(_player.Position, chunkRadius);
+        }
+
+        var clampedCenterX = Math.Clamp(centerX, 0, _world.Width - 1);
+        var clampedCenterZ = Math.Clamp(centerZ, 0, _world.Depth - 1);
+        var centerChunkX = clampedCenterX / _world.ChunkSize;
+        var centerChunkZ = clampedCenterZ / _world.ChunkSize;
+        var minChunkX = Math.Max(0, centerChunkX - chunkRadius);
+        var maxChunkX = Math.Min(_world.ChunkCountX - 1, centerChunkX + chunkRadius);
+        var minChunkZ = Math.Max(0, centerChunkZ - chunkRadius);
+        var maxChunkZ = Math.Min(_world.ChunkCountZ - 1, centerChunkZ + chunkRadius);
+
+        if (_state != AppState.Playing)
+        {
+            _world.RebuildDirtyChunkSurfaces(centerChunkX, centerChunkZ, GetSurfaceDrawFallbackBudget());
+        }
+
+        var collectSceneMetrics = _sceneMetricsEnabled;
+        var progressiveChunkReveal = _state == AppState.Playing && _runtimeSeconds > 0.05f;
+        var drawnSurfaceCount = 0;
+        var sceneHash = 1469598103934665603UL;
+
+        for (var chunkX = minChunkX; chunkX <= maxChunkX; chunkX++)
+        {
+            for (var chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++)
             {
-                var dx = x - _player.Position.X;
-                var dz = z - _player.Position.Z;
-                var distSq = dx * dx + dz * dz;
-                if (distSq > maxDistSq)
+                var chunkMinX = chunkX * _world.ChunkSize;
+                var chunkMinZ = chunkZ * _world.ChunkSize;
+                var chunkMaxX = Math.Min(_world.Width, chunkMinX + _world.ChunkSize);
+                var chunkMaxZ = Math.Min(_world.Depth, chunkMinZ + _world.ChunkSize);
+                var nearestX = Math.Clamp(_player.Position.X, chunkMinX, chunkMaxX);
+                var nearestZ = Math.Clamp(_player.Position.Z, chunkMinZ, chunkMaxZ);
+                var chunkDx = nearestX - _player.Position.X;
+                var chunkDz = nearestZ - _player.Position.Z;
+                var chunkDistSq = chunkDx * chunkDx + chunkDz * chunkDz;
+                if (chunkDistSq > maxDistSq)
                 {
                     continue;
                 }
 
-                var columnSurfaceY = _world.GetTerrainTopY(x, z);
-                var columnMinY = Math.Max(minY, columnSurfaceY - 6);
-                var columnMaxY = Math.Min(maxY, columnSurfaceY + canopyBand);
-
-                var hiddenStreak = 0;
-                for (var y = columnMaxY; y >= columnMinY; y--)
+                if (chunkDistSq > directionalCullSq)
                 {
-                    var block = _world.GetBlock(x, y, z);
-                    if (block == BlockType.Air)
+                    var chunkCenterX = chunkMinX + _world.ChunkSize * 0.5f;
+                    var chunkCenterZ = chunkMinZ + _world.ChunkSize * 0.5f;
+                    var toChunkX = chunkCenterX - _player.Position.X;
+                    var toChunkZ = chunkCenterZ - _player.Position.Z;
+                    var toChunkLenSq = toChunkX * toChunkX + toChunkZ * toChunkZ;
+                    if (toChunkLenSq > 0.0001f)
                     {
-                        continue;
-                    }
-
-                    if (block == BlockType.Leaves && distSq > foliageDistSq)
-                    {
-                        continue;
-                    }
-
-                    if (!IsBlockVisible(x, y, z))
-                    {
-                        var isTerrainCore = block is BlockType.Grass or BlockType.Dirt or BlockType.Stone;
-                        if (isTerrainCore && y <= columnSurfaceY)
+                        var dot = (toChunkX * forwardXZ.X + toChunkZ * forwardXZ.Z) / MathF.Sqrt(toChunkLenSq);
+                        if (dot < 0.15f)
                         {
-                            hiddenStreak++;
-                            if (hiddenStreak >= 3)
-                            {
-                                break;
-                            }
+                            continue;
+                        }
+                    }
+                }
+
+                _world.TryGetChunkSurfaceBlocks(chunkX, chunkZ, out var surfaceBlocks);
+                var chunkReveal = GetChunkRevealFactor(chunkX, chunkZ);
+
+                for (var i = 0; i < surfaceBlocks.Count; i++)
+                {
+                    var surface = surfaceBlocks[i];
+                    if (surface.Y < minY || surface.Y > maxY + canopyBand)
+                    {
+                        continue;
+                    }
+
+                    var dx = surface.X + 0.5f - _player.Position.X;
+                    var dz = surface.Z + 0.5f - _player.Position.Z;
+                    var distSq = dx * dx + dz * dz;
+                    if (distSq > maxDistSq)
+                    {
+                        continue;
+                    }
+
+                    var distance = 0f;
+
+                    if (distSq > directionalCullSq)
+                    {
+                        distance = MathF.Sqrt(distSq);
+                        var dot = (dx * forwardXZ.X + dz * forwardXZ.Z) / distance;
+                        if (dot < 0.15f)
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (distSq > farLodSq)
+                    {
+                        if (!surface.TopVisible)
+                        {
+                            continue;
                         }
 
+                        if (surface.Block == BlockType.Leaves)
+                        {
+                            continue;
+                        }
+                    }
+
+                    float keepChance;
+                    if (distSq <= edgeKeepStartSq)
+                    {
+                        keepChance = 1f;
+                    }
+                    else
+                    {
+                        if (distance <= 0f)
+                        {
+                            distance = MathF.Sqrt(distSq);
+                        }
+
+                        keepChance = GetDistanceEdgeKeep(distance, renderDistance, distanceFadeBand);
+                    }
+
+                    if (keepChance <= 0f)
+                    {
                         continue;
                     }
 
-                    hiddenStreak = 0;
+                    if (surface.Block == BlockType.Leaves && distSq > foliageDistSq)
+                    {
+                        keepChance *= GetFoliageKeepChance(distance, foliageDistance, foliageFadeBand);
+                    }
 
-                    var center = new Vector3(x + 0.5f, y + 0.5f, z + 0.5f);
-                    var color = block switch
+                    if (sparseFarSamplingEnabled && distSq > veryFarLodSq)
+                    {
+                        keepChance *= GetSparseFarKeepChance(surface.Block, distance, veryFarLodDistance, ultraFarLodDistance, renderDistance);
+                    }
+
+                    if (keepChance <= 0f)
+                    {
+                        continue;
+                    }
+
+                    if (keepChance < 0.999f && !PassSpatialDither(surface.X, surface.Y, surface.Z, (int)surface.Block * 37 + 17, keepChance))
+                    {
+                        continue;
+                    }
+
+                    if (progressiveChunkReveal && chunkReveal < 0.999f)
+                    {
+                        var revealKeep = 0.32f + chunkReveal * 0.68f;
+                        if (!PassSpatialDither(surface.X, surface.Y, surface.Z, 911, revealKeep))
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (distance <= 0f)
+                    {
+                        distance = MathF.Sqrt(distSq);
+                    }
+
+                    var lodBlend = GetLodBlendWeights(distance, lodNearDistance, lodMidDistance, lodBlendBand);
+                    keepChance *= GetLodKeepChance(surface, lodBlend);
+
+                    var distanceFactor = distSq / Math.Max(1f, baseRenderDistSq);
+                    var center = new Vector3(surface.X + 0.5f, surface.Y + 0.5f, surface.Z + 0.5f);
+                    var baseColor = surface.Block switch
                     {
                         BlockType.Grass => new Color(100, 152, 78, 255),
                         BlockType.Dirt => new Color(136, 98, 63, 255),
@@ -574,32 +923,408 @@ public class GameApp : IGameRunner
                         BlockType.Leaves => new Color(86, 134, 66, 255),
                         _ => Color.White
                     };
-                    var topVisible = IsTopFaceVisible(x, y, z);
-                    color = ApplyVisualStyle(color, block, x, y, z, centerX, centerZ, topVisible);
-
-                    _platform.DrawCube(center, 1f, 1f, 1f, color);
-                    if (_graphics.DrawBlockWires)
+                    var color = BuildLodBlendedColor(baseColor, surface, distance, distanceFactor, lodBlend);
+                    if (chunkReveal < 0.999f)
                     {
-                        _platform.DrawCubeWires(center, 1f, 1f, 1f, new Color(0, 0, 0, 35));
+                        color = LerpColor(_graphics.FogColor, color, chunkReveal);
+                    }
+
+                    QueueWorldCubeInstance(center, color, GetDominantLodTier(lodBlend));
+
+                    if (collectSceneMetrics)
+                    {
+                        drawnSurfaceCount++;
+                        if ((drawnSurfaceCount & 7) == 0)
+                        {
+                            sceneHash = MixSceneHash(sceneHash, surface.X, surface.Y, surface.Z, surface.Block);
+                        }
                     }
                 }
             }
         }
+
+        FlushWorldCubeInstances();
+
+        if (collectSceneMetrics)
+        {
+            _lastDrawnSurfaceCount = drawnSurfaceCount;
+            _lastDrawSceneHash = drawnSurfaceCount > 0 ? sceneHash : 0UL;
+        }
+        else
+        {
+            _lastDrawnSurfaceCount = 0;
+            _lastDrawSceneHash = 0UL;
+        }
     }
 
-    private bool IsBlockVisible(int x, int y, int z)
+    private (float NearDistance, float MidDistance, float BlendBand) GetLodTransitionProfile(float renderDistance)
     {
-        return !_world.IsSolid(x + 1, y, z)
-            || !_world.IsSolid(x - 1, y, z)
-            || !_world.IsSolid(x, y + 1, z)
-            || !_world.IsSolid(x, y - 1, z)
-            || !_world.IsSolid(x, y, z + 1)
-            || !_world.IsSolid(x, y, z - 1);
+        var nearDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 5.5f),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 8.5f),
+            _ => Math.Min(renderDistance, 14f)
+        };
+        var midDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => Math.Min(renderDistance, 9f),
+            GraphicsQuality.Medium => Math.Min(renderDistance, 15f),
+            _ => Math.Min(renderDistance, 28f)
+        };
+        var blendBand = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1.8f,
+            GraphicsQuality.Medium => 2.6f,
+            _ => 4.2f
+        };
+
+        nearDistance = Math.Max(2f, nearDistance);
+        midDistance = Math.Max(nearDistance + 1f, midDistance);
+        return (nearDistance, midDistance, blendBand);
     }
 
-    private bool IsTopFaceVisible(int x, int y, int z)
+    private static LodBlendWeights GetLodBlendWeights(float distance, float nearDistance, float midDistance, float blendBand)
     {
-        return !_world.IsSolid(x, y + 1, z);
+        var band = Math.Max(0.001f, blendBand);
+        var nearToMid = SmoothStep01((distance - (nearDistance - band)) / (band * 2f));
+        var midToFar = SmoothStep01((distance - (midDistance - band)) / (band * 2f));
+
+        var near = Math.Clamp(1f - nearToMid, 0f, 1f);
+        var far = Math.Clamp(midToFar, 0f, 1f);
+        var mid = Math.Clamp(nearToMid - midToFar, 0f, 1f);
+
+        var sum = near + mid + far;
+        return new LodBlendWeights(near / sum, mid / sum, far / sum);
+    }
+
+    private float GetLodKeepChance(WorldMap.SurfaceBlock surface, LodBlendWeights weights)
+    {
+        var midKeep = surface.Block switch
+        {
+            BlockType.Leaves => 0.74f,
+            BlockType.Wood => 0.9f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.9f,
+            _ => 0.82f
+        };
+        var farKeep = surface.Block switch
+        {
+            BlockType.Leaves => 0.18f,
+            BlockType.Wood => 0.62f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.72f,
+            _ => 0.45f
+        };
+
+        if (!surface.TopVisible)
+        {
+            midKeep *= 0.86f;
+            farKeep *= 0.5f;
+        }
+
+        return Math.Clamp(weights.Near + weights.Mid * midKeep + weights.Far * farKeep, 0f, 1f);
+    }
+
+    private Color BuildLodBlendedColor(
+        Color baseColor,
+        WorldMap.SurfaceBlock surface,
+        float distance,
+        float distanceFactor,
+        LodBlendWeights lodBlend)
+    {
+        if (lodBlend.Near >= 0.999f)
+        {
+            return ApplyVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+        }
+
+        if (lodBlend.Mid >= 0.999f)
+        {
+            return ApplyMidVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+        }
+
+        if (lodBlend.Far >= 0.999f)
+        {
+            return ApplyFarVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, distance);
+        }
+
+        if (lodBlend.Near > 0.0001f && lodBlend.Far <= 0.0001f)
+        {
+            var nearColor = ApplyVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+            var midColor = ApplyMidVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+            var t = lodBlend.Mid / Math.Max(0.0001f, lodBlend.Near + lodBlend.Mid);
+            return LerpColor(nearColor, midColor, t);
+        }
+
+        if (lodBlend.Far > 0.0001f && lodBlend.Near <= 0.0001f)
+        {
+            var midColor = ApplyMidVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+            var farColor = ApplyFarVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, distance);
+            var t = lodBlend.Far / Math.Max(0.0001f, lodBlend.Mid + lodBlend.Far);
+            return LerpColor(midColor, farColor, t);
+        }
+
+        var isTerrainBlock = surface.Block is BlockType.Grass or BlockType.Dirt or BlockType.Stone;
+        if (isTerrainBlock && distanceFactor > 0.62f)
+        {
+            return ApplyFarVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, distance);
+        }
+
+        var blendedNear = ApplyVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, surface.VisibleFaces, surface.SkyExposure, distance);
+        var blendedFar = ApplyFarVisualStyle(baseColor, surface.Block, surface.X, surface.Y, surface.Z, surface.TopVisible, distance);
+        return LerpColor(blendedNear, blendedFar, 0.5f);
+    }
+
+    private Color ApplyMidVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, int visibleFaces, int skyExposure, float distance)
+    {
+        var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 13) - 6;
+        var noiseScale = _graphics.TextureNoiseStrength * 0.82f;
+        var dr = (int)(noise * noiseScale * 0.9f);
+        var dg = block == BlockType.Stone ? (int)(noise * noiseScale * 0.84f) : (int)(noise * noiseScale * 0.8f);
+        var db = block == BlockType.Stone ? (int)(noise * noiseScale * 0.54f) : (int)(noise * noiseScale * 0.66f);
+        var textured = ChangeRgb(baseColor, dr, dg, db);
+
+        var brightness = topVisible ? 1f : 0.88f;
+        brightness += (visibleFaces - 2) * 0.02f;
+        brightness *= (0.92f + Math.Clamp(skyExposure / 5f, 0f, 1f) * 0.11f) * _graphics.LightStrength;
+        var lit = MultiplyRgb(textured, brightness);
+        var contrasted = ApplyContrast(lit, 1f + (_graphics.Contrast - 1f) * 0.72f);
+        if (!_graphics.FogEnabled)
+        {
+            return contrasted;
+        }
+
+        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+        return LerpColor(contrasted, _graphics.FogColor, fogT);
+    }
+
+    private static WorldLodTier GetDominantLodTier(LodBlendWeights weights)
+    {
+        if (weights.Far >= weights.Mid && weights.Far >= weights.Near)
+        {
+            return WorldLodTier.Far;
+        }
+
+        return weights.Mid >= weights.Near
+            ? WorldLodTier.Mid
+            : WorldLodTier.Near;
+    }
+
+    private void QueueWorldCubeInstance(Vector3 center, Color color, WorldLodTier lodTier)
+    {
+        var quantizedColor = QuantizeInstanceColor(color);
+        var key = new InstancedBatchKey(quantizedColor.R, quantizedColor.G, quantizedColor.B, quantizedColor.A, lodTier);
+        if (!_worldInstanceBatches.TryGetValue(key, out var transforms))
+        {
+            transforms = [];
+            _worldInstanceBatches[key] = transforms;
+        }
+
+        transforms.Add(Matrix4x4.CreateTranslation(center));
+    }
+
+    private void FlushWorldCubeInstances()
+    {
+        foreach (var pair in _worldInstanceBatches)
+        {
+            var key = pair.Key;
+            var transforms = pair.Value;
+            if (transforms.Count == 0)
+            {
+                continue;
+            }
+
+            var color = new Color(key.R, key.G, key.B, key.A);
+            _platform.DrawCubeInstanced(transforms, color);
+            if (_graphics.DrawBlockWires)
+            {
+                for (var i = 0; i < transforms.Count; i++)
+                {
+                    var transform = transforms[i];
+                    var center = new Vector3(transform.M41, transform.M42, transform.M43);
+                    _platform.DrawCubeWires(center, 1f, 1f, 1f, new Color(0, 0, 0, 35));
+                }
+            }
+        }
+
+        _worldInstanceBatches.Clear();
+    }
+
+    private Color QuantizeInstanceColor(Color color)
+    {
+        var step = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 22,
+            GraphicsQuality.Medium => 16,
+            _ => 12
+        };
+        var alphaStep = _graphics.Quality == GraphicsQuality.High ? 8 : 12;
+        return new Color(
+            QuantizeChannel(color.R, step),
+            QuantizeChannel(color.G, step),
+            QuantizeChannel(color.B, step),
+            QuantizeChannel(color.A, alphaStep));
+    }
+
+    private static byte QuantizeChannel(byte value, int step)
+    {
+        if (value == 255 || step <= 1)
+        {
+            return value;
+        }
+
+        var rounded = (int)MathF.Round(value / (float)step) * step;
+        return (byte)Math.Clamp(rounded, 0, 255);
+    }
+
+    private float GetDistanceFadeBand()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 2.4f,
+            GraphicsQuality.Medium => 3.2f,
+            _ => 5.5f
+        };
+    }
+
+    private float GetFoliageFadeBand()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 2.0f,
+            GraphicsQuality.Medium => 3.0f,
+            _ => 4.5f
+        };
+    }
+
+    private float GetDistanceEdgeKeep(float distance, float renderDistance, float fadeBand)
+    {
+        var start = Math.Max(1f, renderDistance - fadeBand);
+        var end = renderDistance + fadeBand;
+        if (distance <= start)
+        {
+            return 1f;
+        }
+
+        if (distance >= end)
+        {
+            return 0f;
+        }
+
+        var t = (distance - start) / Math.Max(0.001f, end - start);
+        return 1f - SmoothStep01(t);
+    }
+
+    private float GetFoliageKeepChance(float distance, float foliageDistance, float fadeBand)
+    {
+        var start = foliageDistance;
+        var end = foliageDistance + fadeBand;
+        if (distance <= start)
+        {
+            return 1f;
+        }
+
+        if (distance >= end)
+        {
+            return 0f;
+        }
+
+        var t = (distance - start) / Math.Max(0.001f, end - start);
+        return 1f - SmoothStep01(t);
+    }
+
+    private float GetSparseFarKeepChance(BlockType block, float distance, float veryFarDistance, float ultraFarDistance, float renderDistance)
+    {
+        var veryBand = Math.Max(4f, Math.Min(renderDistance * 0.16f, 16f));
+        var ultraBand = Math.Max(4f, Math.Min(renderDistance * 0.18f, 18f));
+        var veryT = SmoothStep01((distance - veryFarDistance) / veryBand);
+        var ultraT = SmoothStep01((distance - ultraFarDistance) / ultraBand);
+
+        var veryMinKeep = block switch
+        {
+            BlockType.Wood => 0.48f,
+            BlockType.Leaves => 0.2f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.33f,
+            _ => 0.15f
+        };
+
+        var ultraMinKeep = block switch
+        {
+            BlockType.Wood => 0.22f,
+            BlockType.Leaves => 0.06f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.18f,
+            _ => 0f
+        };
+
+        var keepAfterVery = 1f + (veryMinKeep - 1f) * veryT;
+        var keepAfterUltra = 1f + (ultraMinKeep - 1f) * ultraT;
+        return Math.Clamp(keepAfterVery * keepAfterUltra, 0f, 1f);
+    }
+
+    private float GetChunkRevealFactor(int chunkX, int chunkZ)
+    {
+        var key = (chunkX, chunkZ);
+        if (!_chunkRevealStartedAt.TryGetValue(key, out var startedAt))
+        {
+            startedAt = _runtimeSeconds;
+            _chunkRevealStartedAt[key] = startedAt;
+        }
+
+        var duration = GetChunkRevealDurationSeconds();
+        var t = (_runtimeSeconds - startedAt) / duration;
+        return SmoothStep01(t);
+    }
+
+    private float GetChunkRevealDurationSeconds()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.2f,
+            GraphicsQuality.Medium => 0.28f,
+            _ => 0.34f
+        };
+    }
+
+    private static bool PassSpatialDither(int x, int y, int z, int salt, float keepChance)
+    {
+        if (keepChance >= 0.999f)
+        {
+            return true;
+        }
+
+        if (keepChance <= 0f)
+        {
+            return false;
+        }
+
+        return HashToUnit01(x, y, z, salt) < keepChance;
+    }
+
+    private static float HashToUnit01(int x, int y, int z, int salt)
+    {
+        unchecked
+        {
+            var h = (uint)(x * 73856093) ^ (uint)(y * 19349663) ^ (uint)(z * 83492791) ^ (uint)(salt * 2654435761u);
+            h ^= h >> 16;
+            h *= 2246822519u;
+            h ^= h >> 13;
+            h *= 3266489917u;
+            h ^= h >> 16;
+            return (h & 0x00FFFFFF) / 16777215f;
+        }
+    }
+
+    private static ulong MixSceneHash(ulong current, int x, int y, int z, BlockType block)
+    {
+        unchecked
+        {
+            var h = (ulong)(uint)(x * 73856093) ^ (ulong)(uint)(y * 19349663) ^ (ulong)(uint)(z * 83492791) ^ (ulong)(uint)(((int)block + 17) * 2654435761u);
+            current ^= h + 0x9E3779B97F4A7C15UL + (current << 6) + (current >> 2);
+            return current;
+        }
+    }
+
+    private static float SmoothStep01(float t)
+    {
+        var x = Math.Clamp(t, 0f, 1f);
+        return x * x * (3f - 2f * x);
     }
 
     private bool HasSteepDropNear(int x, int y, int z)
@@ -610,14 +1335,14 @@ public class GameApp : IGameRunner
             || !_world.IsSolid(x, y - 1, z - 1);
     }
 
-    private Color ApplyVisualStyle(Color baseColor, BlockType block, int x, int y, int z, int centerX, int centerZ, bool topVisible)
+    private Color ApplyVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, int visibleFaces, int skyExposure, float distance)
     {
         var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 15) - 7;
         var noiseScale = _graphics.TextureNoiseStrength;
 
         if (block == BlockType.Leaves)
         {
-            return ApplyLeafStyle(baseColor, x, z, centerX, centerZ, noise, noiseScale);
+            return ApplyLeafStyle(baseColor, noise, noiseScale, distance);
         }
 
         var dr = (int)(noise * noiseScale);
@@ -633,22 +1358,29 @@ public class GameApp : IGameRunner
         };
         var textured = ChangeRgb(baseColor, dr, dg, db);
 
-        var visibleFaces = CountVisibleFaces(x, y, z);
         var brightness = topVisible ? 1.06f : 0.9f;
         brightness += (visibleFaces - 2) * 0.028f;
+        var nearRelief = GetNearReliefContrast(distance);
 
         if (topVisible)
         {
-            var skyExposure = CountSkyExposure(x, y, z);
             brightness *= 0.82f + skyExposure * 0.05f;
+            var cavity = Math.Clamp((3f - skyExposure) / 3f, 0f, 1f);
+            var ridge = Math.Clamp((skyExposure - 3f) / 2f, 0f, 1f);
+            brightness *= 1f - cavity * nearRelief * 0.2f;
+            brightness *= 1f + ridge * nearRelief * 0.08f;
 
             if (_graphics.ReliefContoursEnabled && HasSteepDropNear(x, y, z))
             {
-                brightness *= 0.88f;
+                brightness *= 0.86f - nearRelief * 0.03f;
             }
         }
+        else
+        {
+            brightness *= 1f - nearRelief * 0.08f;
+        }
 
-        var sunExposure = Math.Clamp(CountSkyExposure(x, y, z) / 5f, 0f, 1f);
+        var sunExposure = Math.Clamp(skyExposure / 5f, 0f, 1f);
         brightness *= (0.94f + sunExposure * 0.16f) * _graphics.LightStrength;
 
         var lit = MultiplyRgb(textured, brightness);
@@ -659,14 +1391,49 @@ public class GameApp : IGameRunner
             return contrasted;
         }
 
-        var dx = x - centerX;
-        var dz = z - centerZ;
-        var distance = MathF.Sqrt(dx * dx + dz * dz);
         var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
         return LerpColor(contrasted, _graphics.FogColor, fogT);
     }
 
-    private Color ApplyLeafStyle(Color baseColor, int x, int z, int centerX, int centerZ, int noise, float noiseScale)
+    private float GetNearReliefContrast(float distance)
+    {
+        var nearRange = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 10f,
+            GraphicsQuality.Medium => 14f,
+            _ => 18f
+        };
+
+        if (distance <= 0.001f)
+        {
+            return 1f;
+        }
+
+        return 1f - SmoothStep01(distance / nearRange);
+    }
+
+    private Color ApplyFarVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, float distance)
+    {
+        var noise = (Math.Abs((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) % 11) - 5;
+        var noiseScale = _graphics.TextureNoiseStrength * 0.7f;
+        var dr = (int)(noise * noiseScale);
+        var dg = block == BlockType.Stone ? (int)(noise * 0.85f * noiseScale) : (int)(noise * 0.8f * noiseScale);
+        var db = block == BlockType.Stone ? (int)(noise * 0.52f * noiseScale) : (int)(noise * 0.68f * noiseScale);
+        var textured = ChangeRgb(baseColor, dr, dg, db);
+
+        var brightness = (topVisible ? 0.98f : 0.86f) * _graphics.LightStrength;
+        var lit = MultiplyRgb(textured, brightness);
+        var contrasted = ApplyContrast(lit, 1f + (_graphics.Contrast - 1f) * 0.55f);
+        if (!_graphics.FogEnabled)
+        {
+            return contrasted;
+        }
+
+        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+        return LerpColor(contrasted, _graphics.FogColor, fogT);
+    }
+
+    private Color ApplyLeafStyle(Color baseColor, int noise, float noiseScale, float distance)
     {
         var variation = (int)(noise * 0.6f * noiseScale);
         var textured = ChangeRgb(baseColor, variation / 4, variation, variation / 5);
@@ -678,34 +1445,8 @@ public class GameApp : IGameRunner
             return contrasted;
         }
 
-        var dx = x - centerX;
-        var dz = z - centerZ;
-        var distance = MathF.Sqrt(dx * dx + dz * dz);
         var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
         return LerpColor(contrasted, _graphics.FogColor, fogT);
-    }
-
-    private int CountVisibleFaces(int x, int y, int z)
-    {
-        var count = 0;
-        if (!_world.IsSolid(x + 1, y, z)) count++;
-        if (!_world.IsSolid(x - 1, y, z)) count++;
-        if (!_world.IsSolid(x, y + 1, z)) count++;
-        if (!_world.IsSolid(x, y - 1, z)) count++;
-        if (!_world.IsSolid(x, y, z + 1)) count++;
-        if (!_world.IsSolid(x, y, z - 1)) count++;
-        return count;
-    }
-
-    private int CountSkyExposure(int x, int y, int z)
-    {
-        var count = 0;
-        if (!_world.IsSolid(x, y + 1, z)) count++;
-        if (!_world.IsSolid(x + 1, y + 1, z)) count++;
-        if (!_world.IsSolid(x - 1, y + 1, z)) count++;
-        if (!_world.IsSolid(x, y + 1, z + 1)) count++;
-        if (!_world.IsSolid(x, y + 1, z - 1)) count++;
-        return count;
     }
 
     private static Color MultiplyRgb(Color color, float factor)
@@ -742,9 +1483,14 @@ public class GameApp : IGameRunner
             (byte)255);
     }
 
-    private static Color GetSkyColor()
+    private static Color GetSkyTopColor()
     {
-        return new Color(132, 188, 243, 255);
+        return new Color(119, 171, 222, 255);
+    }
+
+    private static Color GetSkyHorizonColor()
+    {
+        return new Color(166, 201, 228, 255);
     }
 
     private void DrawPlayerAvatar()
@@ -903,7 +1649,7 @@ public class GameApp : IGameRunner
             return false;
         }
 
-        if (tMax < tMin || tMax < 0f || tMin <= tieEpsilon)
+        if (tMin <= tieEpsilon)
         {
             faceNormal = Vector3.Zero;
             return false;
@@ -912,11 +1658,6 @@ public class GameApp : IGameRunner
         var xHit = hasX && MathF.Abs(nearX - tMin) <= tieEpsilon;
         var yHit = hasY && MathF.Abs(nearY - tMin) <= tieEpsilon;
         var zHit = hasZ && MathF.Abs(nearZ - tMin) <= tieEpsilon;
-        if (!xHit && !yHit && !zHit)
-        {
-            faceNormal = Vector3.Zero;
-            return false;
-        }
 
         var scoreX = xHit ? MathF.Abs(rayDirection.X) : float.NegativeInfinity;
         var scoreY = yHit ? MathF.Abs(rayDirection.Y) : float.NegativeInfinity;
@@ -1201,21 +1942,28 @@ public class GameApp : IGameRunner
         [
             new AutoCaptureShot(
                 "autocap-1.png",
-                new Vector3(320.72f, 35.0f, 305.52f),
-                new Vector3(324.00f, 34.80f, 302.30f)),
+                new Vector3(1152.50f, 40.00f, 1152.50f),
+                new Vector3(1156.40f, 34.80f, 1148.60f)),
             new AutoCaptureShot(
                 "autocap-2.png",
-                new Vector3(320.72f, 35.0f, 305.52f),
-                new Vector3(318.10f, 34.90f, 303.60f))
+                new Vector3(1152.50f, 40.00f, 1152.50f),
+                new Vector3(1148.40f, 34.90f, 1148.90f))
         ];
     }
 
     private BlockRaycastHit? PrepareAutoCaptureShot(AutoCaptureShot shot)
     {
         var pose = LiftPoseAboveTerrain(shot.Position);
+        if (_world.Seed != 0)
+        {
+            ClearSpawnCanopy(pose, horizontalRadius: 12, verticalSpan: 14);
+        }
+
         _player = new PlayerController(_config, pose);
         _playerVisual.Reset(pose);
-        _player.SetPose(pose, shot.LookTarget - shot.Position);
+        var captureLook = BuildGroundLookDirection(pose, shot.LookTarget - pose);
+        _player.SetPose(pose, captureLook);
+        ResetAdaptiveTracking(_player.Position);
         UpdateWorldStreaming(force: true);
         return VoxelRaycaster.Raycast(_world, _player.EyePosition, _player.LookDirection, _config.InteractionDistance);
     }
@@ -1227,30 +1975,216 @@ public class GameApp : IGameRunner
 
     private static WorldMap CreateDefaultWorld(GameConfig config)
     {
-        return new WorldMap(width: 600, height: 72, depth: 600, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        return new WorldMap(width: 2304, height: 72, depth: 2304, chunkSize: config.ChunkSize, seed: config.WorldSeed);
     }
 
     private Vector3 CreateSpawnPosition()
     {
         var centerX = Math.Clamp(_world.Width / 2, 0, _world.Width - 1);
         var centerZ = Math.Clamp(_world.Depth / 2, 0, _world.Depth - 1);
-        var topY = _world.GetTerrainTopY(centerX, centerZ);
-        var preferredY = topY + 3f;
-        var minY = 1.2f;
-        var maxY = Math.Max(minY, _world.Height - 1.2f);
-        var spawnY = Math.Clamp(preferredY, minY, maxY);
-        return new Vector3(centerX + 0.5f, spawnY, centerZ + 0.5f);
+        return FindClearSpawnPose(centerX, centerZ, searchRadius: 48);
     }
 
     private Vector3 LiftPoseAboveTerrain(Vector3 position)
     {
-        var x = Math.Clamp((int)MathF.Floor(position.X), 0, _world.Width - 1);
-        var z = Math.Clamp((int)MathF.Floor(position.Z), 0, _world.Depth - 1);
-        var topY = _world.GetTerrainTopY(x, z);
-        var minY = topY + 3f;
+        var baseX = Math.Clamp((int)MathF.Floor(position.X), 0, _world.Width - 1);
+        var baseZ = Math.Clamp((int)MathF.Floor(position.Z), 0, _world.Depth - 1);
+        if (!TryFindTreeFreeColumn(baseX, baseZ, radius: 24, out var x, out var z))
+        {
+            x = baseX;
+            z = baseZ;
+        }
+
+        var topY = Math.Max(_world.GetTerrainTopY(x, z), _world.GetTopSolidY(x, z));
+        var minY = topY + 1.2f;
+        var y = minY;
+        return new Vector3(x + 0.5f, y, z + 0.5f);
+    }
+
+    private Vector3 FindClearSpawnPose(int centerX, int centerZ, int searchRadius)
+    {
+        var minY = 1.2f;
         var maxY = Math.Max(minY, _world.Height - 1.2f);
-        var y = Math.Clamp(position.Y, minY, maxY);
-        return new Vector3(position.X, y, position.Z);
+
+        for (var radius = 0; radius <= Math.Max(0, searchRadius); radius++)
+        {
+            for (var dx = -radius; dx <= radius; dx++)
+            {
+                for (var dz = -radius; dz <= radius; dz++)
+                {
+                    if (radius > 0 && Math.Abs(dx) != radius && Math.Abs(dz) != radius)
+                    {
+                        continue;
+                    }
+
+                    var x = centerX + dx;
+                    var z = centerZ + dz;
+                    if (x < 0 || z < 0 || x >= _world.Width || z >= _world.Depth)
+                    {
+                        continue;
+                    }
+
+                    var terrainTop = _world.GetTerrainTopY(x, z);
+                    var topSolid = _world.GetTopSolidY(x, z);
+                    if (topSolid > terrainTop + 1)
+                    {
+                        continue;
+                    }
+
+                    var groundTop = Math.Max(terrainTop, topSolid);
+                    var preferredY = groundTop + 1.2f;
+                    var minClearY = groundTop + 1.2f;
+                    var feetY = Math.Clamp(MathF.Max(preferredY, minClearY), minY, maxY);
+                    var pose = new Vector3(x + 0.5f, feetY, z + 0.5f);
+                    if (IsPlayerPoseClear(pose))
+                    {
+                        return pose;
+                    }
+                }
+            }
+        }
+
+        var fallbackX = Math.Clamp(centerX, 0, _world.Width - 1);
+        var fallbackZ = Math.Clamp(centerZ, 0, _world.Depth - 1);
+        var fallbackTerrainTop = _world.GetTerrainTopY(fallbackX, fallbackZ);
+        var fallbackSolidTop = _world.GetTopSolidY(fallbackX, fallbackZ);
+        var fallbackGroundTop = Math.Max(fallbackTerrainTop, fallbackSolidTop);
+        var fallbackY = Math.Clamp(fallbackGroundTop + 1.2f, minY, maxY);
+        return new Vector3(fallbackX + 0.5f, fallbackY, fallbackZ + 0.5f);
+    }
+
+    private bool TryFindTreeFreeColumn(int centerX, int centerZ, int radius, out int foundX, out int foundZ)
+    {
+        for (var ring = 0; ring <= Math.Max(0, radius); ring++)
+        {
+            for (var dx = -ring; dx <= ring; dx++)
+            {
+                for (var dz = -ring; dz <= ring; dz++)
+                {
+                    if (ring > 0 && Math.Abs(dx) != ring && Math.Abs(dz) != ring)
+                    {
+                        continue;
+                    }
+
+                    var x = centerX + dx;
+                    var z = centerZ + dz;
+                    if (x < 0 || z < 0 || x >= _world.Width || z >= _world.Depth)
+                    {
+                        continue;
+                    }
+
+                    var terrainTop = _world.GetTerrainTopY(x, z);
+                    var topSolid = _world.GetTopSolidY(x, z);
+                    if (topSolid > terrainTop + 1)
+                    {
+                        continue;
+                    }
+
+                    foundX = x;
+                    foundZ = z;
+                    return true;
+                }
+            }
+        }
+
+        foundX = centerX;
+        foundZ = centerZ;
+        return false;
+    }
+
+    private void ClearSpawnCanopy(Vector3 pose, int horizontalRadius, int verticalSpan)
+    {
+        var centerX = Math.Clamp((int)MathF.Floor(pose.X), 0, _world.Width - 1);
+        var centerZ = Math.Clamp((int)MathF.Floor(pose.Z), 0, _world.Depth - 1);
+        var baseY = Math.Clamp((int)MathF.Floor(pose.Y), 0, _world.Height - 1);
+
+        var minX = Math.Max(0, centerX - Math.Max(0, horizontalRadius));
+        var maxX = Math.Min(_world.Width - 1, centerX + Math.Max(0, horizontalRadius));
+        var minZ = Math.Max(0, centerZ - Math.Max(0, horizontalRadius));
+        var maxZ = Math.Min(_world.Depth - 1, centerZ + Math.Max(0, horizontalRadius));
+        var minY = Math.Max(0, baseY - 1);
+        var maxY = Math.Min(_world.Height - 1, baseY + Math.Max(0, verticalSpan));
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var z = minZ; z <= maxZ; z++)
+            {
+                for (var y = minY; y <= maxY; y++)
+                {
+                    var block = _world.GetBlock(x, y, z);
+                    if (block is BlockType.Leaves or BlockType.Wood)
+                    {
+                        _world.SetBlock(x, y, z, BlockType.Air);
+                    }
+                }
+            }
+        }
+    }
+
+    private bool IsPlayerPoseClear(Vector3 pose)
+    {
+        const float halfWidth = 0.3f;
+        const float height = 1.8f;
+
+        var minX = (int)MathF.Floor(pose.X - halfWidth);
+        var maxX = (int)MathF.Floor(pose.X + halfWidth);
+        var minY = (int)MathF.Floor(pose.Y);
+        var maxY = (int)MathF.Floor(pose.Y + height);
+        var minZ = (int)MathF.Floor(pose.Z - halfWidth);
+        var maxZ = (int)MathF.Floor(pose.Z + halfWidth);
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var z = minZ; z <= maxZ; z++)
+                {
+                    if (_world.IsSolid(x, y, z))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private Vector3 BuildGroundLookDirection(Vector3 pose, Vector3 preferredForward)
+    {
+        const float eyeOffsetY = 1.656f;
+        var forward = ToHorizontalForward(preferredForward);
+        var eye = pose + new Vector3(0f, eyeOffsetY, 0f);
+
+        for (var distance = 5; distance <= 18; distance += 2)
+        {
+            var sampleX = Math.Clamp((int)MathF.Floor(pose.X + forward.X * distance), 0, _world.Width - 1);
+            var sampleZ = Math.Clamp((int)MathF.Floor(pose.Z + forward.Z * distance), 0, _world.Depth - 1);
+            var terrainY = _world.GetTerrainTopY(sampleX, sampleZ);
+            var target = new Vector3(sampleX + 0.5f, terrainY + 0.6f, sampleZ + 0.5f);
+            var toTarget = target - eye;
+            if (toTarget.LengthSquared() < 0.0001f || toTarget.Y > -0.2f)
+            {
+                continue;
+            }
+
+            return Vector3.Normalize(toTarget);
+        }
+
+        return Vector3.Normalize(new Vector3(forward.X, -0.45f, forward.Z));
+    }
+
+    private void AdvanceRuntime(float deltaSeconds)
+    {
+        var delta = deltaSeconds > 0f ? deltaSeconds : 1f / 60f;
+        _runtimeSeconds += Math.Clamp(delta, 1f / 240f, 0.1f);
+    }
+
+    private void ResetAdaptiveTracking(Vector3 position)
+    {
+        _lastAdaptiveProbePosition = new Vector2(position.X, position.Z);
+        _hasAdaptiveProbe = true;
+        _adaptiveMovementFreezeTimer = 0f;
     }
 
     private void UpdateWorldStreaming(bool force)
@@ -1259,21 +2193,342 @@ public class GameApp : IGameRunner
         var chunkX = Math.Clamp((int)MathF.Floor(center.X), 0, _world.Width - 1) / _world.ChunkSize;
         var chunkZ = Math.Clamp((int)MathF.Floor(center.Z), 0, _world.Depth - 1) / _world.ChunkSize;
 
-        var visibleChunkRadius = (_graphics.RenderDistance + _world.ChunkSize - 1) / _world.ChunkSize;
-        var chunkRadius = Math.Max(2, visibleChunkRadius + 1);
+        var measuredFps = _platform.GetFps();
+        var targetRenderDistance = ResolveStreamingRenderDistance(measuredFps, center, force);
+        var visibleChunkRadius = (targetRenderDistance + _world.ChunkSize - 1) / _world.ChunkSize;
+        var chunkRadius = Math.Max(2, visibleChunkRadius + GetStreamingWarmupChunks());
+        var underPressure = !force && measuredFps > 0 && measuredFps < 63;
+        var chunkLoadBudget = underPressure
+            ? 1
+            : (force ? GetChunkLoadBurstBudget(chunkRadius) : GetChunkLoadBudget());
+        var useBackgroundStreaming = !force && _state == AppState.Playing;
+        if (useBackgroundStreaming)
+        {
+            _ = _world.ApplyBackgroundStreamingResults(chunkLoadBudget + 1, GetSurfaceRebuildBudget() + 1);
+            _world.EnsureChunksAroundBudgetedAsync(center, chunkRadius, chunkLoadBudget);
+        }
+        else
+        {
+            _world.EnsureChunksAroundBudgeted(center, chunkRadius, chunkLoadBudget);
+        }
+
+        var prefetchBudget = force
+            ? Math.Max(1, GetForwardPrefetchBudget(underPressure: false))
+            : GetForwardPrefetchBudget(underPressure);
+        EnsureForwardChunksBudgeted(center, chunkRadius, prefetchBudget, useBackgroundStreaming);
+        var holdExtraRadius = _adaptiveMovementFreezeTimer > 0f ? 1 : 0;
+        var unloadRadius = chunkRadius + GetUnloadHysteresisChunks() + holdExtraRadius;
+        _world.UnloadFarChunks(center, unloadRadius);
+        CleanupChunkRevealCache(chunkX, chunkZ, unloadRadius + 2);
 
         if (!force
             && chunkX == _lastStreamChunkX
             && chunkZ == _lastStreamChunkZ
             && chunkRadius == _lastStreamRadius)
         {
+            var frameBudget = underPressure ? 1 : GetSurfaceRebuildBudget();
+            if (useBackgroundStreaming)
+            {
+                _world.QueueDirtyChunkSurfacesAsync(chunkX, chunkZ, frameBudget);
+                _ = _world.ApplyBackgroundStreamingResults(1, frameBudget);
+            }
+            else
+            {
+                _world.RebuildDirtyChunkSurfaces(chunkX, chunkZ, frameBudget);
+            }
+
             return;
         }
 
-        _world.EnsureChunksAround(center, chunkRadius);
-        _world.UnloadFarChunks(center, chunkRadius + 1);
+        var rebuildBudget = underPressure
+            ? 1
+            : (force ? GetSurfaceBurstBudget(chunkRadius) : GetSurfaceRebuildBudget());
+        if (useBackgroundStreaming)
+        {
+            _world.QueueDirtyChunkSurfacesAsync(chunkX, chunkZ, rebuildBudget);
+            _ = _world.ApplyBackgroundStreamingResults(chunkLoadBudget, rebuildBudget);
+        }
+        else
+        {
+            _world.RebuildDirtyChunkSurfaces(chunkX, chunkZ, rebuildBudget);
+        }
+
         _lastStreamChunkX = chunkX;
         _lastStreamChunkZ = chunkZ;
         _lastStreamRadius = chunkRadius;
+    }
+
+    private int ResolveStreamingRenderDistance(int measuredFps, Vector3 center, bool force)
+    {
+        if (force)
+        {
+            _adaptiveMovementFreezeTimer = 0f;
+            return GetAdaptiveRenderDistance(measuredFps, advanceSmoothing: true);
+        }
+
+        var delta = Math.Clamp(_platform.GetFrameTime(), 1f / 240f, 0.1f);
+        var speed = MeasureHorizontalSpeed(center, delta);
+        if (speed > GetAdaptiveFreezeSpeedThreshold())
+        {
+            _adaptiveMovementFreezeTimer = 0.85f;
+        }
+        else if (_adaptiveMovementFreezeTimer > 0f)
+        {
+            _adaptiveMovementFreezeTimer = MathF.Max(0f, _adaptiveMovementFreezeTimer - delta);
+        }
+
+        var allowIncrease = _adaptiveMovementFreezeTimer <= 0f;
+        return GetAdaptiveRenderDistance(measuredFps, advanceSmoothing: true, allowIncrease: allowIncrease);
+    }
+
+    private float MeasureHorizontalSpeed(Vector3 center, float deltaTime)
+    {
+        var current = new Vector2(center.X, center.Z);
+        if (!_hasAdaptiveProbe)
+        {
+            _lastAdaptiveProbePosition = current;
+            _hasAdaptiveProbe = true;
+            return 0f;
+        }
+
+        var moved = Vector2.Distance(current, _lastAdaptiveProbePosition);
+        _lastAdaptiveProbePosition = current;
+        return moved / Math.Max(deltaTime, 1f / 240f);
+    }
+
+    private float GetAdaptiveFreezeSpeedThreshold()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.7f,
+            GraphicsQuality.Medium => 0.65f,
+            _ => 0.6f
+        };
+    }
+
+    private int GetAdaptiveRenderDistance(int measuredFps, bool advanceSmoothing, bool allowIncrease = true)
+    {
+        var target = _graphics.ResolveRenderDistance(measuredFps);
+        if (_adaptiveRenderDistance < 0f)
+        {
+            _adaptiveRenderDistance = target;
+        }
+
+        if (advanceSmoothing)
+        {
+            if (target < _adaptiveRenderDistance)
+            {
+                // Снижаем быстро, чтобы вовремя сбрасывать нагрузку.
+                var drop = Math.Clamp((_adaptiveRenderDistance - target) * 0.45f, 2.5f, 4.5f);
+                _adaptiveRenderDistance = MathF.Max(target, _adaptiveRenderDistance - drop);
+            }
+            else if (target > _adaptiveRenderDistance && allowIncrease)
+            {
+                // Повышаем плавно и ограниченно, чтобы дальняя полоса не появлялась рывком.
+                var rise = Math.Clamp((target - _adaptiveRenderDistance) * 0.25f, 0.6f, 1.2f);
+                _adaptiveRenderDistance = MathF.Min(target, _adaptiveRenderDistance + rise);
+            }
+        }
+
+        var minDistance = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 12,
+            GraphicsQuality.Medium => 13,
+            _ => 24
+        };
+        return Math.Clamp((int)MathF.Round(_adaptiveRenderDistance), minDistance, _graphics.RenderDistance);
+    }
+
+    private int GetStreamingWarmupChunks()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 2
+        };
+    }
+
+    private int GetUnloadHysteresisChunks()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 2,
+            GraphicsQuality.Medium => 2,
+            _ => 2
+        };
+    }
+
+    private int GetForwardPrefetchBudget(bool underPressure)
+    {
+        if (underPressure)
+        {
+            return _graphics.Quality switch
+            {
+                GraphicsQuality.Low => 0,
+                GraphicsQuality.Medium => 1,
+                _ => 1
+            };
+        }
+
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 3
+        };
+    }
+
+    private int GetForwardPrefetchRadius(int chunkRadius)
+    {
+        var baseRadius = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 3
+        };
+
+        return Math.Clamp(baseRadius + chunkRadius / 4, 1, Math.Max(1, chunkRadius));
+    }
+
+    private float GetForwardPrefetchDistanceBlocks()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => _world.ChunkSize * 1.25f,
+            GraphicsQuality.Medium => _world.ChunkSize * 1.6f,
+            _ => _world.ChunkSize * 2.0f
+        };
+    }
+
+    private void EnsureForwardChunksBudgeted(Vector3 center, int chunkRadius, int maxNewChunks, bool useBackgroundStreaming)
+    {
+        if (maxNewChunks <= 0)
+        {
+            return;
+        }
+
+        var forward = ToHorizontalForward(_player.LookDirection);
+        var nearBudget = Math.Max(1, maxNewChunks - maxNewChunks / 3);
+        var nearDistance = GetForwardPrefetchDistanceBlocks();
+        var nearAhead = new Vector3(
+            center.X + forward.X * nearDistance,
+            center.Y,
+            center.Z + forward.Z * nearDistance);
+        var nearRadius = GetForwardPrefetchRadius(chunkRadius);
+        if (useBackgroundStreaming)
+        {
+            _world.EnsureChunksAroundBudgetedAsync(nearAhead, nearRadius, nearBudget);
+        }
+        else
+        {
+            _world.EnsureChunksAroundBudgeted(nearAhead, nearRadius, nearBudget);
+        }
+
+        var farBudget = maxNewChunks - nearBudget;
+        if (farBudget <= 0)
+        {
+            return;
+        }
+
+        var farAhead = new Vector3(
+            center.X + forward.X * nearDistance * 2f,
+            center.Y,
+            center.Z + forward.Z * nearDistance * 2f);
+        var farRadius = Math.Max(1, nearRadius - 1);
+        if (useBackgroundStreaming)
+        {
+            _world.EnsureChunksAroundBudgetedAsync(farAhead, farRadius, farBudget);
+        }
+        else
+        {
+            _world.EnsureChunksAroundBudgeted(farAhead, farRadius, farBudget);
+        }
+    }
+
+    private void CleanupChunkRevealCache(int centerChunkX, int centerChunkZ, int keepRadius)
+    {
+        if (_chunkRevealStartedAt.Count == 0)
+        {
+            return;
+        }
+
+        List<(int ChunkX, int ChunkZ)>? stale = null;
+        foreach (var key in _chunkRevealStartedAt.Keys)
+        {
+            if (Math.Abs(key.ChunkX - centerChunkX) <= keepRadius
+                && Math.Abs(key.ChunkZ - centerChunkZ) <= keepRadius)
+            {
+                continue;
+            }
+
+            stale ??= [];
+            stale.Add(key);
+        }
+
+        if (stale is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < stale.Count; i++)
+        {
+            _chunkRevealStartedAt.Remove(stale[i]);
+        }
+    }
+
+    private int GetSurfaceRebuildBudget()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 3
+        };
+    }
+
+    private int GetSurfaceBurstBudget(int chunkRadius)
+    {
+        var baseBudget = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 4,
+            GraphicsQuality.Medium => 6,
+            _ => 6
+        };
+
+        // Мягкая прогревка кэша: снижаем пиковую нагрузку в кадре при стриминге.
+        return Math.Clamp(baseBudget + chunkRadius / 2, 3, 12);
+    }
+
+    private int GetChunkLoadBudget()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 3
+        };
+    }
+
+    private int GetChunkLoadBurstBudget(int chunkRadius)
+    {
+        var baseBudget = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 4,
+            GraphicsQuality.Medium => 5,
+            _ => 6
+        };
+
+        return Math.Clamp(baseBudget + chunkRadius / 2, 3, 12);
+    }
+
+    private int GetSurfaceDrawFallbackBudget()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 2,
+            GraphicsQuality.Medium => 3,
+            _ => 4
+        };
     }
 }

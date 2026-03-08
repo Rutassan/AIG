@@ -28,6 +28,7 @@ public interface IGamePlatform
     void BeginMode3D(Camera3D camera);
     void EndMode3D();
     void DrawCube(Vector3 position, float width, float height, float length, Color color);
+    void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color);
     void DrawCubeWires(Vector3 position, float width, float height, float length, Color color);
     int GetScreenWidth();
     int GetScreenHeight();

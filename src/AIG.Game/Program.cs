@@ -24,7 +24,7 @@ public static class Program
     };
     internal static Func<IGamePlatform> PlatformFactory { get; set; } = static () => new RaylibGamePlatform();
     internal static Func<GameConfig, WorldMap> WorldFactory { get; set; } = static config =>
-        new WorldMap(width: 600, height: 72, depth: 600, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        new WorldMap(width: 2304, height: 72, depth: 2304, chunkSize: config.ChunkSize, seed: config.WorldSeed);
 
     public static void Main(string[] args)
     {

@@ -17,4 +17,6 @@ internal sealed class Chunk
     public BlockType Get(int x, int y, int z) => _blocks[x, y, z];
 
     public void Set(int x, int y, int z, BlockType value) => _blocks[x, y, z] = value;
+
+    public BlockType[,,] SnapshotBlocks() => (BlockType[,,])_blocks.Clone();
 }
