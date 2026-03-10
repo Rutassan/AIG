@@ -6,6 +6,7 @@ namespace AIG.Game.Tests.Fakes;
 
 internal sealed class FakeGamePlatform : IGamePlatform
 {
+    internal sealed record CubeCall(Vector3 Position, float Width, float Height, float Length, Color Color);
     internal sealed record CubeWireCall(Vector3 Position, float Width, float Height, float Length, Color Color);
 
     private sealed record FrameInput(
@@ -22,6 +23,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly HashSet<KeyboardKey> _downKeys = new();
     private readonly HashSet<KeyboardKey> _pressedKeys = new();
     private readonly List<string> _uiTexts = [];
+    private readonly List<CubeCall> _cubeCalls = [];
     private readonly List<CubeWireCall> _cubeWireCalls = [];
     private readonly List<string> _screenshots = [];
 
@@ -54,6 +56,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public int ScreenHeight { get; set; } = 720;
     public int Fps { get; set; } = 120;
     public IReadOnlyList<string> DrawnUiTexts => _uiTexts;
+    public IReadOnlyList<CubeCall> DrawnCubes => _cubeCalls;
     public IReadOnlyList<CubeWireCall> DrawnCubeWires => _cubeWireCalls;
     public IReadOnlyList<string> SavedScreenshots => _screenshots;
 
@@ -233,6 +236,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void DrawCube(Vector3 position, float width, float height, float length, Color color)
     {
         DrawCubeCalls++;
+        _cubeCalls.Add(new CubeCall(position, width, height, length, color));
     }
 
     public void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color)
@@ -240,6 +244,10 @@ internal sealed class FakeGamePlatform : IGamePlatform
         DrawCubeInstancedCalls++;
         DrawCubeInstancedInstances += transforms.Count;
         DrawCubeCalls += transforms.Count;
+        foreach (var t in transforms)
+        {
+            _cubeCalls.Add(new CubeCall(new Vector3(t.M41, t.M42, t.M43), 1f, 1f, 1f, color));
+        }
     }
 
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color)

@@ -130,7 +130,7 @@ public sealed class CameraAndVisualTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(7, platform.DrawCubeCalls);
+        Assert.Equal(12, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "GameApp DrawPlayerAvatar покрывает ветки прыжка и падения")]
@@ -155,7 +155,7 @@ public sealed class CameraAndVisualTests
         SetAutoPropertyBackingField(visual, "VerticalSpeed", -1.2f);
         drawMethod!.Invoke(app, null);
 
-        Assert.Equal(14, platform.DrawCubeCalls);
+        Assert.Equal(24, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "GameApp DrawFirstPersonHand рисует руку и блок в режиме 1-го лица")]
@@ -180,7 +180,7 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(2, platform.DrawCubeCalls);
+        Assert.Equal(5, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "GameApp DrawFirstPersonHand имеет fallback для почти вертикального взгляда")]
@@ -205,7 +205,43 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(2, platform.DrawCubeCalls);
+        Assert.Equal(5, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "GameApp DrawFirstPersonHand при браслете разводит руки по разным сторонам кадра")]
+    public void GameApp_DrawFirstPersonHand_WithDevice_KeepsHandsOnOppositeSides()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var deviceField = typeof(GameApp).GetField("_botDevice", BindingFlags.Instance | BindingFlags.NonPublic);
+        var visualField = typeof(GameApp).GetField("_botDeviceVisual", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(deviceField);
+        Assert.NotNull(visualField);
+
+        var device = (BotWristDeviceState)deviceField!.GetValue(app)!;
+        var visual = (BotWristDeviceVisualState)visualField!.GetValue(app)!;
+        device.OpenMain();
+        visual.Update(true, 0.1f);
+        visual.TriggerTap();
+
+        SetPrivateField(app, "_cameraMode", GameCameraMode.FirstPerson);
+        SetPrivateField(app, "_state", GetPrivateAppStateValue("Playing"));
+
+        var method = typeof(GameApp).GetMethod("DrawFirstPersonHand", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app,
+        [
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3.6f, 4f),
+                Target = new Vector3(4f, 3.6f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective
+            }
+        ]);
+
+        Assert.Contains(platform.DrawnCubes, cube => cube.Position.X < 3.9f);
+        Assert.Contains(platform.DrawnCubes, cube => cube.Position.X > 4.1f);
     }
 
     [Fact(DisplayName = "GetCameraModeName возвращает подписи для режимов камеры")]

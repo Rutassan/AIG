@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "dgSpecHash": "XoMsYosqfqf7rGoi4CHSdQi25iCjFc0Q8TbdeXLQb8eJim17S8aKzKqGjohWyJXSBkocXm7jWE07PdrXAh2iiw==",
+  "dgSpecHash": "9o2R/rtwjX3tsqDvoMmgqN+jJj0GdgOZa7x9eFP2FSjX1MexFBkDM/6cD0xcbJdKtfB6bjXBu0VhCQgWqXjnUA==",
   "success": true,
   "projectFilePath": "/home/rutasan/AIG/tests/AIG.Game.Tests/AIG.Game.Tests.csproj",
   "expectedPackageFiles": [
@@ -94,7 +94,7 @@
     "/home/rutasan/.nuget/packages/xunit.extensibility.core/2.4.2/xunit.extensibility.core.2.4.2.nupkg.sha512",
     "/home/rutasan/.nuget/packages/xunit.extensibility.execution/2.4.2/xunit.extensibility.execution.2.4.2.nupkg.sha512",
     "/home/rutasan/.nuget/packages/xunit.runner.visualstudio/2.4.5/xunit.runner.visualstudio.2.4.5.nupkg.sha512",
-    "/home/rutasan/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.23/microsoft.aspnetcore.app.ref.8.0.23.nupkg.sha512"
+    "/home/rutasan/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.24/microsoft.aspnetcore.app.ref.8.0.24.nupkg.sha512"
   ],
   "logs": []
 }

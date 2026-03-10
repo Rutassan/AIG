@@ -15,9 +15,10 @@ public class GameApp : IGameRunner
     private const int MenuButtonWidth = 360;
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
-    private const int BotDevicePanelWidth = 430;
-    private const int BotDeviceButtonHeight = 48;
-    private const int BotDeviceButtonsGap = 12;
+    private const int BotDevicePanelWidth = 372;
+    private const int BotDevicePanelHeight = 398;
+    private const int BotDeviceButtonHeight = 42;
+    private const int BotDeviceButtonsGap = 10;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
     private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
     private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
@@ -68,6 +69,7 @@ public class GameApp : IGameRunner
     private int _lastDrawnSurfaceCount;
     private ulong _lastDrawSceneHash;
     private bool _sceneMetricsEnabled;
+    private bool _debugHudEnabled;
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
     private string? _pendingScreenshotPath;
@@ -155,7 +157,7 @@ public class GameApp : IGameRunner
                 _lastFrameMs = delta * 1000f;
                 AdvanceRuntime(delta);
                 var cameraBob = 0f;
-                _ = HandleCaptureHotkeys();
+                HandleGlobalUiHotkeys();
                 _botDeviceVisual.Update(_state == AppState.Playing && _botDevice.IsOpen, delta);
 
                 if (_state == AppState.Playing)
@@ -182,12 +184,12 @@ public class GameApp : IGameRunner
                     var input = _botDevice.IsOpen
                         ? default
                         : ReadInput(_platform);
-                    _player.Update(_world, input, delta);
+                    _player.Update(_world, input, delta, PlayerPoseIntersectsCompanion);
                     _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
                     UpdateWorldStreaming(force: false);
                     if (_companion is not null)
                     {
-                        _companion.Update(_world, _player.Position, _player.LookDirection, delta);
+                        _companion.Update(_world, _player.Position, _player.LookDirection, delta, CompanionPoseIntersectsPlayer);
                         _companionVisual.Update(_companion.Position, delta, _config.MoveSpeed);
                     }
 
@@ -207,7 +209,7 @@ public class GameApp : IGameRunner
 
                     if (!_botDevice.IsOpen && _platform.IsMouseButtonPressed(MouseButton.Right))
                     {
-                        BlockInteraction.TryPlace(_world, currentHit, _hotbar[_selectedHotbarIndex], BlockCenterIntersectsPlayer);
+                        BlockInteraction.TryPlace(_world, currentHit, _hotbar[_selectedHotbarIndex], BlockCenterIntersectsBlockingActor);
                     }
                 }
                 else
@@ -542,6 +544,18 @@ public class GameApp : IGameRunner
     private void HandleHotbarInput()
     {
         _selectedHotbarIndex = SelectHotbarIndex(_selectedHotbarIndex, _platform, _hotbar.Length);
+    }
+
+    internal bool HandleGlobalUiHotkeys()
+    {
+        var handled = HandleCaptureHotkeys();
+        if (_platform.IsKeyPressed(KeyboardKey.F3))
+        {
+            _debugHudEnabled = !_debugHudEnabled;
+            handled = true;
+        }
+
+        return handled;
     }
 
     internal bool HandleCaptureHotkeys()
@@ -997,7 +1011,10 @@ public class GameApp : IGameRunner
             DrawScreenFogOverlay(view);
 
             DrawHud(_state == AppState.Playing && !_botDevice.IsOpen);
-            DrawHotbar();
+            if (_state == AppState.Playing && !_botDevice.IsOpen)
+            {
+                DrawHotbar();
+            }
             if (_state == AppState.Playing && _botDevice.IsOpen)
             {
                 DrawBotDeviceOverlay();
@@ -1052,10 +1069,11 @@ public class GameApp : IGameRunner
         var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
         var horizonY = (int)MathF.Round(height * (0.60f + viewY * 0.16f));
         var fog = _graphics.FogColor;
+        var overlayAlpha = _botDevice.IsOpen ? 0.74f : 1f;
 
-        DrawHorizonBand(width, height, horizonY, 48, new Color(fog.R, fog.G, fog.B, (byte)34));
-        DrawHorizonBand(width, height, horizonY + 26, 52, new Color(fog.R, fog.G, fog.B, (byte)26));
-        DrawHorizonBand(width, height, horizonY + 58, 62, new Color(fog.R, fog.G, fog.B, (byte)18));
+        DrawHorizonBand(width, height, horizonY, 48, new Color(fog.R, fog.G, fog.B, (byte)(34 * overlayAlpha)));
+        DrawHorizonBand(width, height, horizonY + 26, 52, new Color(fog.R, fog.G, fog.B, (byte)(26 * overlayAlpha)));
+        DrawHorizonBand(width, height, horizonY + 58, 62, new Color(fog.R, fog.G, fog.B, (byte)(18 * overlayAlpha)));
     }
 
     private void DrawHorizonBand(int width, int height, int y, int bandHeight, Color color)
@@ -1892,12 +1910,12 @@ public class GameApp : IGameRunner
 
     private static Color GetSkyTopColor()
     {
-        return new Color(119, 171, 222, 255);
+        return new Color(104, 170, 230, 255);
     }
 
     private static Color GetSkyHorizonColor()
     {
-        return new Color(166, 201, 228, 255);
+        return new Color(190, 223, 242, 255);
     }
 
     private void DrawPlayerAvatar()
@@ -1948,37 +1966,51 @@ public class GameApp : IGameRunner
     {
         var forward = new Vector3(MathF.Sin(yaw), 0f, MathF.Cos(yaw));
         forward = Vector3.Normalize(forward);
-
         var right = new Vector3(-forward.Z, 0f, forward.X);
-        var walkSwing = MathF.Sin(visual.WalkPhase) * 0.22f * visual.WalkBlend;
-        var armLift = visual.IsJumping ? 0.08f : visual.IsFalling ? -0.05f : 0f;
+        var walkSwing = MathF.Sin(visual.WalkPhase) * 0.26f * visual.WalkBlend;
 
         var torso = root + new Vector3(0f, 1.08f, 0f);
-        var head = root + new Vector3(0f, 1.82f, 0f) + forward * 0.04f;
-        var leftArm = root + Vector3.UnitY * (1.12f + armLift) - right * 0.38f + forward * walkSwing;
-        var rightArm = root + Vector3.UnitY * (1.12f + armLift) + right * 0.38f - forward * walkSwing;
-        var leftLeg = root + Vector3.UnitY * 0.44f - right * 0.16f - forward * walkSwing;
-        var rightLeg = root + Vector3.UnitY * 0.44f + right * 0.16f + forward * walkSwing;
-        Vector3? wristDevice = null;
+        var chest = root + new Vector3(0f, 1.42f, 0f);
+        var head = root + new Vector3(0f, 1.82f, 0f) + forward * 0.05f;
 
+        var leftShoulder = chest - right * 0.34f;
+        var rightShoulder = chest + right * 0.34f;
+        var leftElbow = leftShoulder - Vector3.UnitY * 0.28f + forward * walkSwing;
+        var rightElbow = rightShoulder - Vector3.UnitY * 0.28f - forward * walkSwing;
+        var leftHand = leftElbow - Vector3.UnitY * 0.30f + forward * 0.04f;
+        var rightHand = rightElbow - Vector3.UnitY * 0.30f - forward * 0.04f;
+
+        var leftHip = root + Vector3.UnitY * 0.82f - right * 0.16f;
+        var rightHip = root + Vector3.UnitY * 0.82f + right * 0.16f;
+        var leftKnee = leftHip - Vector3.UnitY * 0.38f - forward * walkSwing;
+        var rightKnee = rightHip - Vector3.UnitY * 0.38f + forward * walkSwing;
+        var leftFoot = leftKnee - Vector3.UnitY * 0.36f + forward * 0.04f;
+        var rightFoot = rightKnee - Vector3.UnitY * 0.36f - forward * 0.04f;
+
+        Vector3? wristDevice = null;
         if (devicePose is WristDevicePose pose)
         {
-            leftArm = root + Vector3.UnitY * (1.16f + 0.18f * pose.RaiseBlend) - right * (0.34f - 0.16f * pose.RaiseBlend) + forward * (0.04f + 0.32f * pose.RaiseBlend);
-            rightArm = root + Vector3.UnitY * (1.08f + 0.08f * pose.RaiseBlend) + right * (0.34f - 0.10f * pose.TapBlend) + forward * (0.02f + 0.10f * pose.RaiseBlend + 0.34f * pose.TapBlend);
-            wristDevice = leftArm + forward * 0.18f + right * 0.10f + Vector3.UnitY * 0.02f;
+            leftElbow = leftShoulder - Vector3.UnitY * (0.18f - 0.08f * pose.RaiseBlend) - right * 0.05f + forward * (0.10f + 0.12f * pose.RaiseBlend);
+            leftHand = leftElbow - Vector3.UnitY * 0.20f - right * (0.02f - 0.02f * pose.RaiseBlend) + forward * (0.14f + 0.14f * pose.RaiseBlend);
+            rightElbow = rightShoulder - Vector3.UnitY * (0.22f - 0.06f * pose.RaiseBlend) + right * 0.03f + forward * (0.06f + 0.08f * pose.RaiseBlend + 0.10f * pose.TapBlend);
+            rightHand = rightElbow - Vector3.UnitY * 0.18f + right * (0.05f - 0.04f * pose.TapBlend) + forward * (0.10f + 0.18f * pose.TapBlend);
+            wristDevice = leftHand + forward * 0.12f + right * 0.04f + Vector3.UnitY * 0.01f;
         }
 
-        _platform.DrawCube(torso, 0.6f, 0.9f, 0.36f, torsoColor);
+        _platform.DrawCube(torso, 0.62f, 0.80f, 0.38f, torsoColor);
+        _platform.DrawCube(chest, 0.66f, 0.18f, 0.34f, armColor);
         _platform.DrawCube(head, 0.46f, 0.46f, 0.46f, skinColor);
-        _platform.DrawCube(leftArm, 0.2f, 0.72f, 0.2f, armColor);
-        _platform.DrawCube(rightArm, 0.2f, 0.72f, 0.2f, armColor);
-        _platform.DrawCube(leftLeg, 0.24f, 0.74f, 0.24f, legColor);
-        _platform.DrawCube(rightLeg, 0.24f, 0.74f, 0.24f, legColor);
+        DrawAvatarLimb(leftShoulder, leftElbow, leftHand, armColor, skinColor);
+        DrawAvatarLimb(rightShoulder, rightElbow, rightHand, armColor, skinColor);
+        DrawAvatarLimb(leftHip, leftKnee, leftFoot, legColor, legColor);
+        DrawAvatarLimb(rightHip, rightKnee, rightFoot, legColor, legColor);
+
         if (wristDevice is Vector3 devicePosition)
         {
-            _platform.DrawCube(devicePosition, 0.26f, 0.18f, 0.18f, new Color(46, 62, 70, 255));
-            _platform.DrawCube(devicePosition + forward * 0.08f, 0.02f, 0.20f, 0.18f, new Color(118, 255, 228, 155));
+            _platform.DrawCube(devicePosition, 0.28f, 0.14f, 0.18f, new Color(38, 52, 58, 255));
+            _platform.DrawCube(devicePosition + forward * 0.07f, 0.03f, 0.10f, 0.14f, new Color(118, 255, 228, 165));
         }
+
         _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.74f, 0.02f, 0.74f, new Color(0, 0, 0, 35));
     }
 
@@ -1997,31 +2029,80 @@ public class GameApp : IGameRunner
         var up = Vector3.Normalize(Vector3.Cross(right, forward));
 
         var bob = MathF.Sin(_playerVisual.WalkPhase * 2f) * 0.03f * _playerVisual.WalkBlend * _graphics.ViewBobScale;
+        var bobOffset = up * bob;
         if (_botDevice.IsOpen)
         {
             var raise = _botDeviceVisual.RaiseBlend;
             var tap = _botDeviceVisual.TapBlend;
-            var deviceHand = camera.Position + forward * (0.46f + 0.08f * raise) - right * (0.12f - 0.22f * raise) - up * (0.42f - 0.20f * raise) + up * bob;
-            var deviceBody = deviceHand + forward * 0.18f + right * 0.09f;
-            var hologram = deviceBody + forward * 0.10f + up * 0.06f;
-            var tapHand = camera.Position + forward * (0.56f + 0.10f * raise + 0.08f * tap) + right * (0.22f - 0.18f * tap) - up * (0.36f - 0.08f * raise) + up * bob;
 
-            _platform.DrawCube(deviceHand, 0.16f, 0.28f, 0.18f, new Color(232, 202, 172, 255));
-            _platform.DrawCube(deviceBody, 0.24f, 0.17f, 0.16f, new Color(50, 68, 76, 255));
-            _platform.DrawCube(hologram, 0.02f, 0.22f, 0.18f, new Color(118, 255, 228, 150));
-            _platform.DrawCube(tapHand, 0.15f, 0.24f, 0.17f, new Color(232, 202, 172, 255));
+            var deviceForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.30f + 0.08f * raise, -0.46f + 0.10f * raise, -0.46f + 0.16f * raise) + bobOffset;
+            var deviceWrist = ComposeViewPoint(camera.Position, forward, right, up, 0.48f + 0.10f * raise, -0.32f + 0.09f * raise, -0.32f + 0.15f * raise) + bobOffset;
+            var devicePalm = ComposeViewPoint(camera.Position, forward, right, up, 0.62f + 0.10f * raise, -0.22f + 0.08f * raise, -0.22f + 0.10f * raise) + bobOffset;
+            var deviceModule = devicePalm + forward * 0.12f + right * 0.03f + up * 0.02f;
+
+            var hologramCenter = ComposeViewPoint(camera.Position, forward, right, up, 0.84f + 0.08f * raise, 0.06f, -0.02f) + bobOffset;
+            var fingertipTarget = hologramCenter + right * 0.12f - up * 0.08f;
+            var tapForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.22f + 0.10f * raise, 0.56f - 0.08f * raise, -0.48f + 0.14f * raise) + bobOffset;
+            var tapPalm = Vector3.Lerp(tapForearm, fingertipTarget, 0.74f + 0.10f * tap);
+            var tapFinger = Vector3.Lerp(tapPalm, fingertipTarget, 0.68f + 0.16f * tap);
+
+            DrawFirstPersonArm(deviceForearm, deviceWrist, devicePalm, skinColor: new Color(232, 202, 172, 255), sleeveColor: new Color(198, 170, 144, 255));
+            DrawFirstPersonArm(tapForearm, tapPalm, tapFinger, skinColor: new Color(230, 198, 168, 255), sleeveColor: new Color(206, 178, 152, 255));
+
+            _platform.DrawCube(deviceModule, 0.20f, 0.11f, 0.16f, new Color(34, 48, 56, 255));
+            _platform.DrawCube(deviceModule - right * 0.11f, 0.06f, 0.13f, 0.18f, new Color(26, 36, 44, 255));
+            _platform.DrawCube(deviceModule + forward * 0.06f, 0.03f, 0.06f, 0.10f, new Color(122, 255, 230, 195));
+            _platform.DrawCube((deviceModule + hologramCenter) * 0.5f + up * 0.02f, 0.05f, 0.18f, 0.03f, new Color(118, 255, 228, 95));
+            DrawWristHologram(hologramCenter, tap);
             return;
         }
 
-        var hand = camera.Position + forward * 0.72f + right * 0.34f - up * 0.28f + up * bob;
-        var held = hand + forward * 0.16f + right * 0.08f;
+        var forearm = ComposeViewPoint(camera.Position, forward, right, up, 0.42f, 0.42f, -0.38f) + bobOffset;
+        var wrist = ComposeViewPoint(camera.Position, forward, right, up, 0.58f, 0.32f, -0.28f) + bobOffset;
+        var palm = ComposeViewPoint(camera.Position, forward, right, up, 0.72f, 0.26f, -0.22f) + bobOffset;
+        var held = palm + forward * 0.16f + right * 0.04f;
 
-        _platform.DrawCube(hand, 0.16f, 0.26f, 0.18f, new Color(232, 202, 172, 255));
+        DrawFirstPersonArm(forearm, wrist, palm, skinColor: new Color(232, 202, 172, 255), sleeveColor: new Color(198, 170, 144, 255));
         _platform.DrawCube(held, 0.18f, 0.18f, 0.18f, GetHeldBlockColor(_hotbar[_selectedHotbarIndex]));
         if (_graphics.DrawBlockWires)
         {
             _platform.DrawCubeWires(held, 0.18f, 0.18f, 0.18f, new Color(0, 0, 0, 35));
         }
+    }
+
+    private void DrawAvatarLimb(Vector3 start, Vector3 middle, Vector3 end, Color upperColor, Color lowerColor)
+    {
+        _platform.DrawCube(Vector3.Lerp(start, middle, 0.5f), 0.18f, 0.32f, 0.18f, upperColor);
+        _platform.DrawCube(Vector3.Lerp(middle, end, 0.5f), 0.18f, 0.30f, 0.18f, lowerColor);
+    }
+
+    private static Vector3 ComposeViewPoint(Vector3 origin, Vector3 forward, Vector3 right, Vector3 up, float forwardOffset, float rightOffset, float upOffset)
+    {
+        return origin + forward * forwardOffset + right * rightOffset + up * upOffset;
+    }
+
+    private void DrawFirstPersonArm(Vector3 forearm, Vector3 wrist, Vector3 palm, Color skinColor, Color sleeveColor)
+    {
+        _platform.DrawCube(Vector3.Lerp(forearm, wrist, 0.45f), 0.18f, 0.22f, 0.18f, sleeveColor);
+        _platform.DrawCube(Vector3.Lerp(wrist, palm, 0.50f), 0.17f, 0.18f, 0.17f, skinColor);
+        _platform.DrawCube(palm, 0.15f, 0.12f, 0.14f, skinColor);
+        _platform.DrawCube(palm + new Vector3(0.02f, -0.01f, 0.02f), 0.08f, 0.05f, 0.10f, skinColor);
+    }
+
+    private void DrawWristHologram(Vector3 center, float tapBlend)
+    {
+        var glow = new Color(118, 255, 228, 55);
+        var bright = new Color(126, 255, 234, 125);
+        var hot = new Color(176, 255, 244, 185);
+        var pulse = 1f + tapBlend * 0.12f;
+
+        _platform.DrawCube(center, 0.44f * pulse, 0.28f * pulse, 0.02f, glow);
+        _platform.DrawCube(center + new Vector3(0f, 0.12f, 0.01f), 0.28f, 0.03f, 0.03f, bright);
+        _platform.DrawCube(center + new Vector3(-0.12f, 0.04f, 0.01f), 0.10f, 0.02f, 0.03f, hot);
+        _platform.DrawCube(center + new Vector3(0.10f, 0.04f, 0.01f), 0.18f, 0.02f, 0.03f, bright);
+        _platform.DrawCube(center + new Vector3(-0.08f, -0.04f, 0.01f), 0.18f, 0.02f, 0.03f, bright);
+        _platform.DrawCube(center + new Vector3(0.10f, -0.04f, 0.01f), 0.12f, 0.02f, 0.03f, hot);
+        _platform.DrawCube(center + new Vector3(0f, -0.12f, 0.01f), 0.34f, 0.03f, 0.03f, bright);
     }
 
     private static Color GetHeldBlockColor(BlockType block)
@@ -2202,18 +2283,34 @@ public class GameApp : IGameRunner
             _platform.DrawLine(centerX, centerY - 8, centerX, centerY + 8, Color.Black);
         }
 
-        var hudHeight = _companion is null ? 112 : 186;
-        _platform.DrawRectangle(8, 8, 500, hudHeight, new Color(255, 255, 255, 190));
-        _platform.DrawUiText($"FPS: {_platform.GetFps()}", new Vector2(16, 14), 20, 1f, Color.Black);
-        _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(16, 38), 20, 1f, Color.DarkGray);
-        _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(16, 62), 18, 1f, Color.DarkGray);
-        _platform.DrawUiText($"Камера: {GetCameraModeName(_cameraMode)}", new Vector2(16, 84), 18, 1f, Color.DarkGray);
+        if (_debugHudEnabled)
+        {
+            var hudHeight = _companion is null ? 112 : 186;
+            _platform.DrawRectangle(10, 10, 484, hudHeight, new Color(12, 24, 31, 185));
+            _platform.DrawRectangle(14, 14, 476, 30, new Color(31, 62, 74, 210));
+            _platform.DrawUiText($"DEBUG HUD  |  FPS: {_platform.GetFps()}", new Vector2(22, 18), 18, 1f, new Color(166, 241, 227, 255));
+            _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(22, 52), 18, 1f, new Color(225, 235, 239, 255));
+            _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(22, 76), 17, 1f, new Color(191, 214, 220, 255));
+            _platform.DrawUiText($"Камера: {GetCameraModeName(_cameraMode)}", new Vector2(22, 98), 17, 1f, new Color(191, 214, 220, 255));
+            if (_companion is not null)
+            {
+                _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(22, 122), 17, 1f, Color.White);
+                _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(22, 144), 17, 1f, new Color(191, 214, 220, 255));
+                _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(22, 166), 17, 1f, new Color(191, 214, 220, 255));
+                _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(22, 188), 17, 1f, new Color(191, 214, 220, 255));
+            }
+
+            return;
+        }
+
+        var compactHeight = _companion is null ? 58 : 86;
+        _platform.DrawRectangle(14, 14, 268, compactHeight, new Color(10, 22, 30, 132));
+        _platform.DrawRectangle(18, 18, 260, 24, new Color(40, 84, 92, 176));
+        _platform.DrawUiText($"FPS {_platform.GetFps()}  |  {GetCameraModeName(_cameraMode)}", new Vector2(28, 22), 16, 1f, new Color(181, 246, 235, 255));
         if (_companion is not null)
         {
-            _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(16, 108), 18, 1f, Color.Black);
-            _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(16, 130), 18, 1f, Color.DarkGray);
-            _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(16, 152), 18, 1f, Color.DarkGray);
-            _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(16, 174), 18, 1f, Color.DarkGray);
+            _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(28, 48), 17, 1f, Color.White);
+            _platform.DrawUiText(_companion.GetActiveSummary(), new Vector2(28, 68), 15, 1f, new Color(194, 221, 226, 255));
         }
     }
 
@@ -2225,8 +2322,9 @@ public class GameApp : IGameRunner
             return;
         }
 
-        var x = Math.Max(16, _platform.GetScreenWidth() - 220);
-        _platform.DrawUiText(label, new Vector2(x, 16), 24, 1f, new Color(228, 44, 44, 255));
+        var x = Math.Max(16, _platform.GetScreenWidth() - 192);
+        _platform.DrawRectangle(x - 12, 10, 176, 34, new Color(28, 10, 10, 140));
+        _platform.DrawUiText(label, new Vector2(x, 16), 22, 1f, new Color(244, 84, 84, 255));
     }
 
     private void DrawHotbar()
@@ -2335,58 +2433,69 @@ public class GameApp : IGameRunner
         }
 
         var panel = GetBotDevicePanelRect();
-        var accent = new Color(118, 255, 228, 190);
-        var glow = new Color(66, 126, 140, 210);
-        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(8, 28, 36, 208));
-        _platform.DrawRectangle(panel.X + 4, panel.Y + 4, panel.W - 8, 56, new Color(17, 49, 58, 220));
-        _platform.DrawUiText("Наручный модуль бота", new Vector2(panel.X + 20, panel.Y + 18), 28, 1f, accent);
-        _platform.DrawUiText("Проекция активна", new Vector2(panel.X + 22, panel.Y + 58), 18, 1f, new Color(170, 224, 235, 255));
-        _platform.DrawUiText($"Статус: {_companion.Status.GetLabel()}", new Vector2(panel.X + 22, panel.Y + 88), 18, 1f, Color.White);
-        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 22, panel.Y + 112), 18, 1f, new Color(210, 240, 246, 255));
-        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 22, panel.Y + 134), 18, 1f, new Color(210, 240, 246, 255));
-        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 22, panel.Y + 156), 18, 1f, new Color(210, 240, 246, 255));
+        var accent = new Color(150, 255, 236, 220);
+        var glow = new Color(74, 176, 188, 160);
+        var lines = new Color(168, 255, 242, 110);
+        _platform.DrawRectangle(panel.X - 8, panel.Y - 8, panel.W + 16, panel.H + 16, new Color(14, 66, 76, 48));
+        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(7, 27, 35, 116));
+        _platform.DrawRectangle(panel.X + 8, panel.Y + 8, panel.W - 16, panel.H - 16, new Color(15, 49, 58, 156));
+        _platform.DrawRectangle(panel.X + 16, panel.Y + 14, panel.W - 32, 44, new Color(15, 64, 74, 112));
+        DrawBotDeviceCorner(panel.X, panel.Y, 1, 1, lines);
+        DrawBotDeviceCorner(panel.X + panel.W, panel.Y, -1, 1, lines);
+        DrawBotDeviceCorner(panel.X, panel.Y + panel.H, 1, -1, lines);
+        DrawBotDeviceCorner(panel.X + panel.W, panel.Y + panel.H, -1, -1, lines);
+
+        _platform.DrawUiText("Наручный модуль бота", new Vector2(panel.X + 24, panel.Y + 20), 24, 1f, accent);
+        _platform.DrawUiText("Проекция активна", new Vector2(panel.X + 24, panel.Y + 60), 16, 1f, new Color(176, 233, 240, 255));
+        _platform.DrawUiText($"Статус: {_companion.Status.GetLabel()}", new Vector2(panel.X + 24, panel.Y + 86), 17, 1f, Color.White);
+        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 24, panel.Y + 108), 16, 1f, new Color(206, 237, 241, 255));
+        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 24, panel.Y + 128), 16, 1f, new Color(206, 237, 241, 255));
+        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 24, panel.Y + 148), 16, 1f, new Color(206, 237, 241, 255));
+        _platform.DrawRectangle(panel.X + 24, panel.Y + 174, panel.W - 48, 1, glow);
 
         switch (_botDevice.Screen)
         {
             case BotWristDeviceScreen.Main:
                 DrawBotDeviceButton(GetBotDeviceGatherButtonRect(), "Сбор ресурсов", glow, Color.White);
-                DrawBotDeviceButton(GetBotDeviceBuildButtonRect(), "Построить Дом S", new Color(76, 121, 173, 220), Color.White);
-                DrawBotDeviceButton(GetBotDeviceCancelButtonRect(), "Сбросить команды", new Color(168, 80, 80, 220), Color.White);
-                DrawBotDeviceButton(GetBotDeviceCloseButtonRect(), "Убрать устройство", new Color(48, 73, 79, 220), Color.White);
-                _platform.DrawUiText("Клавиша B: открыть/убрать модуль", new Vector2(panel.X + 22, panel.Y + 352), 18, 1f, accent);
+                DrawBotDeviceButton(GetBotDeviceBuildButtonRect(), "Построить Дом S", new Color(74, 114, 180, 148), Color.White);
+                DrawBotDeviceButton(GetBotDeviceCancelButtonRect(), "Сбросить команды", new Color(170, 84, 84, 146), Color.White);
+                DrawBotDeviceButton(GetBotDeviceCloseButtonRect(), "Убрать устройство", new Color(54, 84, 92, 138), Color.White);
+                _platform.DrawUiText("B / ESC: убрать модуль", new Vector2(panel.X + 24, panel.Y + panel.H - 48), 16, 1f, accent);
                 break;
             case BotWristDeviceScreen.GatherResource:
-                _platform.DrawUiText("Сбор ресурсов", new Vector2(panel.X + 22, panel.Y + 188), 26, 1f, accent);
+                _platform.DrawUiText("Сбор ресурсов", new Vector2(panel.X + 24, panel.Y + 190), 24, 1f, accent);
                 DrawBotDeviceResourceButton(GetBotDeviceWoodButtonRect(), "Дерево", BotResourceType.Wood);
                 DrawBotDeviceResourceButton(GetBotDeviceStoneButtonRect(), "Камень", BotResourceType.Stone);
                 DrawBotDeviceResourceButton(GetBotDeviceDirtButtonRect(), "Земля", BotResourceType.Dirt);
                 DrawBotDeviceResourceButton(GetBotDeviceLeavesButtonRect(), "Листва", BotResourceType.Leaves);
                 var amount = GetBotDeviceAmountRect();
-                _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(14, 42, 50, 230));
-                _platform.DrawUiText($"Количество: {_botDevice.AmountText}", new Vector2(amount.X + 18, amount.Y + 12), 24, 1f, Color.White);
-                _platform.DrawUiText("Цифры: 0-9, Backspace, Enter", new Vector2(amount.X + 18, amount.Y + 44), 16, 1f, accent);
+                _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(9, 38, 45, 158));
+                _platform.DrawUiText($"Количество: {_botDevice.AmountText}", new Vector2(amount.X + 18, amount.Y + 10), 22, 1f, Color.White);
+                _platform.DrawUiText("0-9, Backspace, Enter", new Vector2(amount.X + 18, amount.Y + 40), 15, 1f, accent);
                 DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Подтвердить сбор", glow, Color.White);
-                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 220), Color.White);
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 138), Color.White);
                 break;
             case BotWristDeviceScreen.BuildHouse:
-                _platform.DrawUiText("Строительство", new Vector2(panel.X + 22, panel.Y + 188), 26, 1f, accent);
-                _platform.DrawUiText("Шаблон: Дом S", new Vector2(panel.X + 22, panel.Y + 224), 22, 1f, Color.White);
-                _platform.DrawUiText("Бот сам подготовит площадку, доберет ресурсы и начнет стройку.", new Vector2(panel.X + 22, panel.Y + 258), 18, 1f, new Color(210, 240, 246, 255));
-                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Запустить стройку", new Color(76, 121, 173, 220), Color.White);
-                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 220), Color.White);
+                _platform.DrawUiText("Строительство", new Vector2(panel.X + 24, panel.Y + 190), 24, 1f, accent);
+                _platform.DrawUiText("Шаблон: Дом S", new Vector2(panel.X + 24, panel.Y + 226), 20, 1f, Color.White);
+                _platform.DrawUiText("Бот сам подготовит площадку,", new Vector2(panel.X + 24, panel.Y + 256), 17, 1f, new Color(210, 240, 246, 255));
+                _platform.DrawUiText("доберет ресурсы и начнет стройку.", new Vector2(panel.X + 24, panel.Y + 278), 17, 1f, new Color(210, 240, 246, 255));
+                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Запустить стройку", new Color(74, 114, 180, 148), Color.White);
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 138), Color.White);
                 break;
         }
 
         if (!string.IsNullOrWhiteSpace(_botDevice.Message))
         {
-            _platform.DrawUiText(_botDevice.Message, new Vector2(panel.X + 22, panel.Y + panel.H - 30), 18, 1f, accent);
+            _platform.DrawUiText(_botDevice.Message, new Vector2(panel.X + 24, panel.Y + panel.H - 24), 16, 1f, accent);
         }
     }
 
     private void DrawBotDeviceButton((int X, int Y, int W, int H) rect, string label, Color background, Color text)
     {
         _platform.DrawRectangle(rect.X, rect.Y, rect.W, rect.H, background);
-        _platform.DrawUiText(label, new Vector2(rect.X + 18, rect.Y + 13), 24, 1f, text);
+        _platform.DrawRectangle(rect.X + 3, rect.Y + 3, rect.W - 6, rect.H - 6, new Color(12, 42, 51, 92));
+        _platform.DrawUiText(label, new Vector2(rect.X + 16, rect.Y + 10), 21, 1f, text);
     }
 
     private void DrawBotDeviceResourceButton((int X, int Y, int W, int H) rect, string label, BotResourceType resource)
@@ -2401,15 +2510,16 @@ public class GameApp : IGameRunner
 
     private (int X, int Y, int W, int H) GetBotDevicePanelRect()
     {
-        var x = _platform.GetScreenWidth() - BotDevicePanelWidth - 52;
-        var y = 84;
-        return (x, y, BotDevicePanelWidth, 418);
+        var maxX = Math.Max(18, _platform.GetScreenWidth() - BotDevicePanelWidth - 18);
+        var x = Math.Clamp(_platform.GetScreenWidth() / 2 + 76, 18, maxX);
+        var y = Math.Max(18, (_platform.GetScreenHeight() - BotDevicePanelHeight) / 2);
+        return (x, y, BotDevicePanelWidth, BotDevicePanelHeight);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceGatherButtonRect()
     {
         var panel = GetBotDevicePanelRect();
-        return (panel.X + 20, panel.Y + 188, panel.W - 40, BotDeviceButtonHeight);
+        return (panel.X + 24, panel.Y + 190, panel.W - 48, BotDeviceButtonHeight);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceBuildButtonRect()
@@ -2433,7 +2543,7 @@ public class GameApp : IGameRunner
     private (int X, int Y, int W, int H) GetBotDeviceWoodButtonRect()
     {
         var panel = GetBotDevicePanelRect();
-        return (panel.X + 20, panel.Y + 226, 184, BotDeviceButtonHeight);
+        return (panel.X + 24, panel.Y + 226, 154, BotDeviceButtonHeight);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceStoneButtonRect()
@@ -2457,7 +2567,17 @@ public class GameApp : IGameRunner
     private (int X, int Y, int W, int H) GetBotDeviceAmountRect()
     {
         var dirt = GetBotDeviceDirtButtonRect();
-        return (dirt.X, dirt.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, BotDevicePanelWidth - 40, 74);
+        return (dirt.X, dirt.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, BotDevicePanelWidth - 48, 70);
+    }
+
+    private void DrawBotDeviceCorner(int x, int y, int dirX, int dirY, Color color)
+    {
+        var hx = dirX > 0 ? x : x - 26;
+        var hy = dirY > 0 ? y : y - 2;
+        var vx = dirX > 0 ? x : x - 2;
+        var vy = dirY > 0 ? y : y - 24;
+        _platform.DrawRectangle(hx, hy, 26, 2, color);
+        _platform.DrawRectangle(vx, vy, 2, 24, color);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceConfirmButtonRect()
@@ -2474,18 +2594,73 @@ public class GameApp : IGameRunner
 
     private bool BlockCenterIntersectsPlayer(Vector3 blockCenter)
     {
-        var half = _player.ColliderHalfWidth;
-        var height = _player.ColliderHeight;
+        return BlockCenterIntersectsActor(blockCenter, _player.Position, _player.ColliderHalfWidth, _player.ColliderHeight);
+    }
 
-        var playerMin = new Vector3(_player.Position.X - half, _player.Position.Y, _player.Position.Z - half);
-        var playerMax = new Vector3(_player.Position.X + half, _player.Position.Y + height, _player.Position.Z + half);
+    private bool BlockCenterIntersectsCompanion(Vector3 blockCenter)
+    {
+        return _companion is not null
+            && BlockCenterIntersectsActor(blockCenter, _companion.Position, _companion.Actor.ColliderHalfWidth, _companion.Actor.ColliderHeight);
+    }
+
+    private bool BlockCenterIntersectsBlockingActor(Vector3 blockCenter)
+    {
+        return BlockCenterIntersectsPlayer(blockCenter) || BlockCenterIntersectsCompanion(blockCenter);
+    }
+
+    private bool PlayerPoseIntersectsCompanion(Vector3 pose)
+    {
+        return _companion is not null
+            && DoActorVolumesOverlap(
+                pose,
+                _player.ColliderHalfWidth,
+                _player.ColliderHeight,
+                _companion.Position,
+                _companion.Actor.ColliderHalfWidth,
+                _companion.Actor.ColliderHeight);
+    }
+
+    private bool CompanionPoseIntersectsPlayer(Vector3 pose)
+    {
+        return _companion is not null
+            && DoActorVolumesOverlap(
+                pose,
+                _companion.Actor.ColliderHalfWidth,
+                _companion.Actor.ColliderHeight,
+                _player.Position,
+                _player.ColliderHalfWidth,
+                _player.ColliderHeight);
+    }
+
+    private static bool BlockCenterIntersectsActor(Vector3 blockCenter, Vector3 actorPosition, float half, float height)
+    {
+        var actorMin = new Vector3(actorPosition.X - half, actorPosition.Y, actorPosition.Z - half);
+        var actorMax = new Vector3(actorPosition.X + half, actorPosition.Y + height, actorPosition.Z + half);
 
         var blockMin = blockCenter - new Vector3(0.5f, 0.5f, 0.5f);
         var blockMax = blockCenter + new Vector3(0.5f, 0.5f, 0.5f);
 
-        return (playerMin.X <= blockMax.X) & (playerMax.X >= blockMin.X)
-            & (playerMin.Y <= blockMax.Y) & (playerMax.Y >= blockMin.Y)
-            & (playerMin.Z <= blockMax.Z) & (playerMax.Z >= blockMin.Z);
+        return (actorMin.X <= blockMax.X) & (actorMax.X >= blockMin.X)
+            & (actorMin.Y <= blockMax.Y) & (actorMax.Y >= blockMin.Y)
+            & (actorMin.Z <= blockMax.Z) & (actorMax.Z >= blockMin.Z);
+    }
+
+    private static bool DoActorVolumesOverlap(
+        Vector3 firstPosition,
+        float firstHalfWidth,
+        float firstHeight,
+        Vector3 secondPosition,
+        float secondHalfWidth,
+        float secondHeight)
+    {
+        var firstMin = new Vector3(firstPosition.X - firstHalfWidth, firstPosition.Y, firstPosition.Z - firstHalfWidth);
+        var firstMax = new Vector3(firstPosition.X + firstHalfWidth, firstPosition.Y + firstHeight, firstPosition.Z + firstHalfWidth);
+        var secondMin = new Vector3(secondPosition.X - secondHalfWidth, secondPosition.Y, secondPosition.Z - secondHalfWidth);
+        var secondMax = new Vector3(secondPosition.X + secondHalfWidth, secondPosition.Y + secondHeight, secondPosition.Z + secondHalfWidth);
+
+        return (firstMin.X <= secondMax.X) & (firstMax.X >= secondMin.X)
+            & (firstMin.Y <= secondMax.Y) & (firstMax.Y >= secondMin.Y)
+            & (firstMin.Z <= secondMax.Z) & (firstMax.Z >= secondMin.Z);
     }
 
     internal static string GetBlockName(BlockType block)

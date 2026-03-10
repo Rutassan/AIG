@@ -419,13 +419,20 @@ public sealed class WorldMap
             return false;
         }
 
-        if (_dirtySurfaceChunks.Contains(key) || !_chunkSurfaceCache.TryGetValue(key, out var cached))
+        var hasCachedSurface = _chunkSurfaceCache.TryGetValue(key, out var cached);
+        if (_dirtySurfaceChunks.Contains(key))
+        {
+            blocks = hasCachedSurface ? cached! : EmptySurfaceBlocks;
+            return true;
+        }
+
+        if (!hasCachedSurface)
         {
             blocks = EmptySurfaceBlocks;
             return true;
         }
 
-        blocks = cached;
+        blocks = cached!;
         return true;
     }
 

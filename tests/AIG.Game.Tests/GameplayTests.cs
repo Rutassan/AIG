@@ -430,6 +430,33 @@ public sealed class GameplayTests
         Assert.Equal(BlockType.Air, world.GetBlock(5, 3, 6));
     }
 
+    [Fact(DisplayName = "Игрок не проходит сквозь внешнюю сущность, если передан extra collision callback")]
+    public void PlayerController_Update_RespectsExtraCollisionCallback()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var blockerCenter = new Vector3(5.35f, 2.02f, 4.5f);
+        var blockerHalf = 0.3f;
+        var blockerHeight = 1.8f;
+
+        player.Update(
+            world,
+            new PlayerInput(0f, 1f, false, 0f, 0f),
+            0.2f,
+            pose =>
+            {
+                var min = new Vector3(pose.X - player.ColliderHalfWidth, pose.Y, pose.Z - player.ColliderHalfWidth);
+                var max = new Vector3(pose.X + player.ColliderHalfWidth, pose.Y + player.ColliderHeight, pose.Z + player.ColliderHalfWidth);
+                var blockerMin = new Vector3(blockerCenter.X - blockerHalf, blockerCenter.Y, blockerCenter.Z - blockerHalf);
+                var blockerMax = new Vector3(blockerCenter.X + blockerHalf, blockerCenter.Y + blockerHeight, blockerCenter.Z + blockerHalf);
+                return min.X <= blockerMax.X && max.X >= blockerMin.X
+                    && min.Y <= blockerMax.Y && max.Y >= blockerMin.Y
+                    && min.Z <= blockerMax.Z && max.Z >= blockerMin.Z;
+            });
+
+        Assert.True(player.Position.X < 5.05f, $"Player X={player.Position.X:0.000}");
+    }
+
     [Fact(DisplayName = "Установка не выполняется при невалидных условиях")]
     public void Place_Fails_ForInvalidCases()
     {

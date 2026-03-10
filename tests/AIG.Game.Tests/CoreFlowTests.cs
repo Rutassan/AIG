@@ -1849,6 +1849,74 @@ public sealed class CoreFlowTests
         Assert.False(misses);
     }
 
+    [Fact(DisplayName = "GameApp учитывает спутника как блокирующую сущность для установки блока и движения")]
+    public void GameApp_EntityBlockingHelpers_IncludeCompanion()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            RenderDistance = 4,
+            InteractionDistance = 8f
+        };
+
+        var app = new GameApp(
+            config,
+            new FakeGamePlatform(),
+            new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0));
+
+        var player = new PlayerController(config, new Vector3(10.5f, 5f, 10.5f));
+        var companion = new CompanionBot(config, new Vector3(12.5f, 5f, 10.5f));
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+
+        var blockMethod = typeof(GameApp).GetMethod("BlockCenterIntersectsBlockingActor", BindingFlags.Instance | BindingFlags.NonPublic);
+        var playerMoveMethod = typeof(GameApp).GetMethod("PlayerPoseIntersectsCompanion", BindingFlags.Instance | BindingFlags.NonPublic);
+        var botMoveMethod = typeof(GameApp).GetMethod("CompanionPoseIntersectsPlayer", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(blockMethod);
+        Assert.NotNull(playerMoveMethod);
+        Assert.NotNull(botMoveMethod);
+
+        Assert.True((bool)blockMethod!.Invoke(app, [new Vector3(10.5f, 5.5f, 10.5f)])!);
+        Assert.True((bool)blockMethod!.Invoke(app, [new Vector3(12.5f, 5.5f, 10.5f)])!);
+        Assert.False((bool)blockMethod.Invoke(app, [new Vector3(15.5f, 5.5f, 10.5f)])!);
+        Assert.True((bool)playerMoveMethod!.Invoke(app, [new Vector3(12.5f, 5f, 10.5f)])!);
+        Assert.True((bool)botMoveMethod!.Invoke(app, [new Vector3(10.5f, 5f, 10.5f)])!);
+    }
+
+    [Fact(DisplayName = "GameApp helper-методы блокировки корректно возвращают false без спутника")]
+    public void GameApp_EntityBlockingHelpers_ReturnFalseWithoutCompanion()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            RenderDistance = 4,
+            InteractionDistance = 8f
+        };
+
+        var app = new GameApp(
+            config,
+            new FakeGamePlatform(),
+            new WorldMap(width: 21, height: 12, depth: 21, chunkSize: 8, seed: 0));
+
+        SetPrivateField(app, "_player", new PlayerController(config, new Vector3(10.5f, 5f, 10.5f)));
+        SetPrivateField(app, "_companion", (CompanionBot?)null);
+
+        var companionBlockMethod = typeof(GameApp).GetMethod("BlockCenterIntersectsCompanion", BindingFlags.Instance | BindingFlags.NonPublic);
+        var blockMethod = typeof(GameApp).GetMethod("BlockCenterIntersectsBlockingActor", BindingFlags.Instance | BindingFlags.NonPublic);
+        var playerMoveMethod = typeof(GameApp).GetMethod("PlayerPoseIntersectsCompanion", BindingFlags.Instance | BindingFlags.NonPublic);
+        var botMoveMethod = typeof(GameApp).GetMethod("CompanionPoseIntersectsPlayer", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(companionBlockMethod);
+        Assert.NotNull(blockMethod);
+        Assert.NotNull(playerMoveMethod);
+        Assert.NotNull(botMoveMethod);
+
+        Assert.False((bool)companionBlockMethod!.Invoke(app, [new Vector3(12.5f, 5.5f, 10.5f)])!);
+        Assert.False((bool)blockMethod!.Invoke(app, [new Vector3(15.5f, 5.5f, 10.5f)])!);
+        Assert.False((bool)playerMoveMethod!.Invoke(app, [new Vector3(12.5f, 5f, 10.5f)])!);
+        Assert.False((bool)botMoveMethod!.Invoke(app, [new Vector3(12.5f, 5f, 10.5f)])!);
+    }
+
     [Fact(DisplayName = "Подсветка блока рисуется на грани попадания, а не по центру всего блока")]
     public void Run_BlockHighlight_UsesRaycastHitCoordinates()
     {
@@ -2233,7 +2301,7 @@ public sealed class CoreFlowTests
         Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Графика: Высокая", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Туман: Выкл", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Контуры рельефа: Выкл", StringComparison.Ordinal));
-        Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Render:", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, t => t.Contains("FPS", StringComparison.Ordinal));
     }
 
     [Fact(DisplayName = "Клики вне кнопок меню не выполняют действий")]
@@ -2299,7 +2367,7 @@ public sealed class CoreFlowTests
         var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 777));
         app.Run();
 
-        Assert.Contains(platform.DrawnUiTexts, t => t.Contains("Камера: 3-е лицо", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, t => t.Contains("3-е лицо", StringComparison.Ordinal));
     }
 
     [Fact(DisplayName = "DrawWorld в medium покрывает fade-ветку листвы")]
@@ -2508,7 +2576,7 @@ public sealed class CoreFlowTests
 
         world.SetBlock(24, 3, 24, BlockType.Wood);
         Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var dirtySurfaceBefore));
-        Assert.Empty(dirtySurfaceBefore);
+        Assert.NotEmpty(dirtySurfaceBefore);
 
         update.Invoke(app, [false]); // та же позиция -> early return + sync rebuild path
 
@@ -2587,7 +2655,7 @@ public sealed class CoreFlowTests
         public void Run() => action();
     }
 
-    private static void SetPrivateField(object target, string fieldName, object value)
+    private static void SetPrivateField(object target, string fieldName, object? value)
     {
         var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(field);

@@ -25,5 +25,5 @@ public sealed class GameConfig
     public string BotDiagnosticsDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "botlogs");
     public string ScreenshotDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "captures", "screenshots");
     public string VideoDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "captures", "videos");
-    public int VideoCaptureFps { get; init; } = 30;
+    public int VideoCaptureFps { get; init; } = 15;
 }

@@ -525,7 +525,7 @@ public sealed class WorldAndPlayerTests
         Assert.True(leavesCount > 0, "Ожидали хотя бы одну листву.");
     }
 
-    [Fact(DisplayName = "Кэш поверхностей чанка прогревается бюджетно и обновляется после изменения блока")]
+    [Fact(DisplayName = "Кэш поверхностей чанка не скрывает старую картинку до пересборки и обновляется после изменения блока")]
     public void World_SurfaceCache_RebuildsInBudgetAndRefreshesAfterSetBlock()
     {
         var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 16, seed: 0);
@@ -543,7 +543,8 @@ public sealed class WorldAndPlayerTests
         world.SetBlock(17, 2, 17, BlockType.Stone);
 
         Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var dirtySurface));
-        Assert.Empty(dirtySurface);
+        Assert.NotEmpty(dirtySurface);
+        Assert.Same(warmSurface, dirtySurface);
 
         var rebuiltAfterChange = world.RebuildDirtyChunkSurfaces(new Vector3(17.5f, 2f, 17.5f), maxChunks: 2);
         Assert.True(rebuiltAfterChange >= 1);
@@ -571,6 +572,23 @@ public sealed class WorldAndPlayerTests
         var ok = world.TryGetChunkSurfaceBlocks(1, 1, out var blocks);
 
         Assert.False(ok);
+        Assert.Empty(blocks);
+    }
+
+    [Fact(DisplayName = "TryGetChunkSurfaceBlocks возвращает пустой список для загруженного чанка без dirty-флага и без surface-cache")]
+    public void World_TryGetChunkSurfaceBlocks_ReturnsEmptyForLoadedChunkWithoutCache()
+    {
+        var world = new WorldMap(width: 32, height: 8, depth: 32, chunkSize: 16, seed: 0);
+        world.EnsureChunksAround(new Vector3(8f, 0f, 8f), radiusInChunks: 0);
+
+        var dirtyField = typeof(WorldMap).GetField("_dirtySurfaceChunks", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(dirtyField);
+        var dirty = (HashSet<(int ChunkX, int ChunkZ)>)dirtyField!.GetValue(world)!;
+        dirty.Clear();
+
+        var ok = world.TryGetChunkSurfaceBlocks(0, 0, out var blocks);
+
+        Assert.True(ok);
         Assert.Empty(blocks);
     }
 

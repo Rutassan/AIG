@@ -14,7 +14,7 @@ public sealed class GameCaptureTests
     public void FfmpegVideoEncoder_CreateStartInfo_BuildsExpectedArguments()
     {
         var request = new VideoEncodingRequest(
-            "/tmp/aig-frames/frame-%06d.png",
+            "/tmp/aig-frames/frame-%06d.bmp",
             "/tmp/aig-video.mp4",
             30);
 
@@ -22,7 +22,7 @@ public sealed class GameCaptureTests
 
         Assert.Equal("ffmpeg", startInfo.FileName);
         Assert.Equal("-y", startInfo.ArgumentList[0]);
-        Assert.Contains("/tmp/aig-frames/frame-%06d.png", startInfo.ArgumentList);
+        Assert.Contains("/tmp/aig-frames/frame-%06d.bmp", startInfo.ArgumentList);
         Assert.Contains("libx264", startInfo.ArgumentList);
         Assert.Equal("/tmp/aig-video.mp4", startInfo.ArgumentList[^1]);
     }
@@ -84,11 +84,11 @@ public sealed class GameCaptureTests
             var framesDir = Path.Combine(tempRoot, "frames");
             Directory.CreateDirectory(framesDir);
             File.WriteAllBytes(
-                Path.Combine(framesDir, "frame-000000.png"),
-                Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO9W7J0AAAAASUVORK5CYII="));
+                Path.Combine(framesDir, "frame-000000.bmp"),
+                Convert.FromBase64String("Qk02AAAAAAAAADYAAAAoAAAAAQAAAAEAAAABABgAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAA////AA=="));
 
             var request = new VideoEncodingRequest(
-                Path.Combine(framesDir, "frame-%06d.png"),
+                Path.Combine(framesDir, "frame-%06d.bmp"),
                 Path.Combine(tempRoot, "out.mp4"),
                 1);
 
@@ -163,7 +163,7 @@ public sealed class GameCaptureTests
         }
     }
 
-    [Fact(DisplayName = "GameCaptureManager записывает кадры и очищает временные PNG после успешной сборки видео")]
+    [Fact(DisplayName = "GameCaptureManager записывает BMP-кадры и очищает временные кадры после успешной сборки видео")]
     public void GameCaptureManager_StartAndStopRecording_CleansFramesDirectoryOnSuccess()
     {
         var tempRoot = CreateTempDirectory();
@@ -184,9 +184,11 @@ public sealed class GameCaptureTests
             var outputPath = manager.StartRecording();
             Assert.True(manager.IsRecording);
             Assert.True(manager.TryGetNextRecordingFramePath(0f, out var firstFrame));
+            Assert.EndsWith(".bmp", firstFrame, StringComparison.Ordinal);
             File.WriteAllText(firstFrame, "frame");
             Assert.False(manager.TryGetNextRecordingFramePath(0.01f, out _));
             Assert.True(manager.TryGetNextRecordingFramePath(0.05f, out var secondFrame));
+            Assert.EndsWith(".bmp", secondFrame, StringComparison.Ordinal);
             File.WriteAllText(secondFrame, "frame");
 
             var result = manager.StopRecording();

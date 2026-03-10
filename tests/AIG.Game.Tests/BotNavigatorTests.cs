@@ -21,6 +21,21 @@ public sealed class BotNavigatorTests
         Assert.Equal(new Vector3(4.5f, 2.02f, 4.5f), cell.ToPose());
     }
 
+    [Fact(DisplayName = "BotNavigator корректно ищет ближайшую стоячую клетку у края мира")]
+    public void BotNavigator_FindsNearestStandCell_AtWorldEdge()
+    {
+        var world = CreateFlatWorld(8, 12);
+        world.SetBlock(0, 2, 0, BlockType.Wood);
+        world.SetBlock(0, 3, 0, BlockType.Wood);
+        world.SetBlock(0, 2, 1, BlockType.Wood);
+        world.SetBlock(0, 3, 1, BlockType.Wood);
+
+        var found = BotNavigator.TryFindNearestStandCell(world, Settings, new Vector3(0.2f, 2.02f, 0.2f), searchRadius: 2, out var cell);
+
+        Assert.True(found);
+        Assert.Equal(new BotNavigationCell(1, 2, 0), cell);
+    }
+
     [Fact(DisplayName = "BotNavigator строит маршрут обхода вокруг стены для следования")]
     public void BotNavigator_BuildsStandRoute_AroundWall()
     {
@@ -48,6 +63,35 @@ public sealed class BotNavigatorTests
         Assert.NotEmpty(route);
         Assert.Contains(route, pose => (int)MathF.Floor(pose.X) == 7 && (int)MathF.Floor(pose.Z) == 8);
         Assert.Equal(new Vector3(11.5f, 2.02f, 8.5f), route[^1]);
+    }
+
+    [Fact(DisplayName = "BotNavigator для follow умеет строить маршрут в обход запретной зоны игрока")]
+    public void BotNavigator_BuildsStandRoute_AroundForbiddenPlayerZone()
+    {
+        var world = CreateFlatWorld(16, 12);
+        var playerPose = new Vector3(7.5f, 2.02f, 6.5f);
+
+        var found = BotNavigator.TryBuildStandRoute(
+            world,
+            Settings,
+            new Vector3(3.5f, 2.02f, 6.5f),
+            new Vector3(11.5f, 2.02f, 6.5f),
+            goalRadius: 0,
+            cell =>
+            {
+                var pose = cell.ToPose();
+                var delta = pose - playerPose;
+                return delta.X * delta.X + delta.Z * delta.Z > 1.25f * 1.25f;
+            },
+            out var route);
+
+        Assert.True(found);
+        Assert.NotEmpty(route);
+        Assert.DoesNotContain(route, pose =>
+        {
+            var delta = pose - playerPose;
+            return delta.X * delta.X + delta.Z * delta.Z <= 1.25f * 1.25f;
+        });
     }
 
     [Fact(DisplayName = "BotNavigator для стройки предпочитает землю у дома, а не крышу рядом с целью")]
@@ -116,6 +160,7 @@ public sealed class BotNavigatorTests
             (0, world.Width - 1, 0, world.Depth - 1),
             (Func<BotNavigationCell, bool>)(_ => false),
             (Func<BotNavigationCell, float>)(_ => 0f),
+            null,
             null,
             null
         };

@@ -30,6 +30,7 @@ internal static class BotNavigator
         Vector3 startPose,
         Vector3 desiredPose,
         int goalRadius,
+        Func<BotNavigationCell, bool>? canVisitCell,
         out Vector3[] waypoints)
     {
         var desiredFeetCell = ClampFeetCell(world, (int)MathF.Floor(desiredPose.Y + 0.1f));
@@ -44,8 +45,20 @@ internal static class BotNavigator
             bounds,
             cell => IsStandRouteGoal(cell, desiredPose, desiredFeetCell, goalRadius),
             cell => GetStandTraversalPenalty(world, cell, desiredFeetCell),
+            canVisitCell,
             out _,
             out waypoints);
+    }
+
+    internal static bool TryBuildStandRoute(
+        WorldMap world,
+        BotNavigationSettings settings,
+        Vector3 startPose,
+        Vector3 desiredPose,
+        int goalRadius,
+        out Vector3[] waypoints)
+    {
+        return TryBuildStandRoute(world, settings, startPose, desiredPose, goalRadius, canVisitCell: null, out waypoints);
     }
 
     internal static bool TryBuildActionRoute(
@@ -73,6 +86,7 @@ internal static class BotNavigator
                 cell => CanActFromCell(settings, cell, targetX, targetY, targetZ)
                     && !DoesPoseOverlapBlock(settings, cell.ToPose(), targetX, targetY, targetZ),
                 cell => GetActionTraversalPenalty(world, blueprint, targetY, cell),
+                canVisitCell: null,
                 out var goalCell,
                 out waypoints))
         {
@@ -157,6 +171,7 @@ internal static class BotNavigator
         (int MinX, int MaxX, int MinZ, int MaxZ) bounds,
         Func<BotNavigationCell, bool> isGoal,
         Func<BotNavigationCell, float> traversalPenalty,
+        Func<BotNavigationCell, bool>? canVisitCell,
         out BotNavigationCell goalCell,
         out Vector3[] waypoints)
     {
@@ -207,6 +222,11 @@ internal static class BotNavigator
             foreach (var neighbor in EnumerateNeighbors(world, settings, current, bounds))
             {
                 if (closed.Contains(neighbor))
+                {
+                    continue;
+                }
+
+                if (canVisitCell is not null && !canVisitCell(neighbor))
                 {
                     continue;
                 }

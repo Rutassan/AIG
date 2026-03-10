@@ -69,7 +69,7 @@ public sealed class PlayerController
         }
     }
 
-    public void Update(WorldMap world, PlayerInput input, float deltaTime)
+    public void Update(WorldMap world, PlayerInput input, float deltaTime, Func<Vector3, bool>? extraCollisionAt = null)
     {
         ApplyLook(input);
 
@@ -88,7 +88,7 @@ public sealed class PlayerController
 
         for (var i = 0; i < substeps; i++)
         {
-            ApplyHorizontalMovement(world, input, stepDelta);
+            ApplyHorizontalMovement(world, input, stepDelta, extraCollisionAt);
             ApplyVerticalMovement(world, stepDelta);
         }
     }
@@ -102,7 +102,7 @@ public sealed class PlayerController
         Pitch = Math.Clamp(Pitch, -limit, limit);
     }
 
-    private void ApplyHorizontalMovement(WorldMap world, PlayerInput input, float deltaTime)
+    private void ApplyHorizontalMovement(WorldMap world, PlayerInput input, float deltaTime, Func<Vector3, bool>? extraCollisionAt)
     {
         var forward = new Vector3(MathF.Sin(Yaw), 0f, MathF.Cos(Yaw));
         var right = new Vector3(-forward.Z, 0f, forward.X);
@@ -117,13 +117,13 @@ public sealed class PlayerController
         var next = Position;
 
         var xMove = new Vector3(displacement.X, 0f, 0f);
-        if (!CollidesAt(world, next + xMove))
+        if (!CollidesAt(world, next + xMove, extraCollisionAt))
         {
             next += xMove;
         }
 
         var zMove = new Vector3(0f, 0f, displacement.Z);
-        if (!CollidesAt(world, next + zMove))
+        if (!CollidesAt(world, next + zMove, extraCollisionAt))
         {
             next += zMove;
         }
@@ -191,7 +191,7 @@ public sealed class PlayerController
             || world.IsSolidAt(new Vector3(maxX, probeY, maxZ));
     }
 
-    private static bool CollidesAt(WorldMap world, Vector3 position)
+    private static bool CollidesAt(WorldMap world, Vector3 position, Func<Vector3, bool>? extraCollisionAt = null)
     {
         var min = new Vector3(position.X - HalfWidth, position.Y, position.Z - HalfWidth);
         var max = new Vector3(position.X + HalfWidth, position.Y + Height, position.Z + HalfWidth);
@@ -217,6 +217,6 @@ public sealed class PlayerController
             }
         }
 
-        return false;
+        return extraCollisionAt?.Invoke(position) == true;
     }
 }

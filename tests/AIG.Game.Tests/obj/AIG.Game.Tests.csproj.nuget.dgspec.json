@@ -57,7 +57,7 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[8.0.23, 8.0.23]"
+              "version": "[8.0.24, 8.0.24]"
             }
           ],
           "frameworkReferences": {
@@ -65,7 +65,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.123/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.124/PortableRuntimeIdentifierGraph.json"
         }
       }
     },
@@ -142,7 +142,7 @@
           "downloadDependencies": [
             {
               "name": "Microsoft.AspNetCore.App.Ref",
-              "version": "[8.0.23, 8.0.23]"
+              "version": "[8.0.24, 8.0.24]"
             }
           ],
           "frameworkReferences": {
@@ -150,7 +150,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.123/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "/usr/share/dotnet/sdk/8.0.124/PortableRuntimeIdentifierGraph.json"
         }
       }
     }

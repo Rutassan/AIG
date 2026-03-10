@@ -13,6 +13,16 @@ internal sealed class CompanionBot
     private const float ActionArrivalDistance = 0.08f;
     private const float PreciseActionArrivalDistance = 0.01f;
     private const float ActionVerticalArrivalTolerance = 0.18f;
+    private const float FollowDistance = 4.8f;
+    private const float FollowSideOffset = 2.6f;
+    private const float FollowIdleDistance = 1.65f;
+    private const float FollowRouteReuseDistance = 2.4f;
+    private const float PlayerKeepoutDistance = 2.35f;
+    private const float PlayerViewKeepoutDistance = 5.25f;
+    private const float PlayerViewKeepoutDot = 0.05f;
+    private const float PlayerRouteBlockDistance = 1.15f;
+    private const float PlayerRouteFrontDistance = 3.35f;
+    private const float PlayerRouteFrontDot = 0.8f;
     private const float GatherTargetBlockDuration = 1.75f;
     private const float RouteProgressThreshold = 0.015f;
     private const float RouteMicroMoveThreshold = 0.05f;
@@ -46,6 +56,7 @@ internal sealed class CompanionBot
     private float _retargetCooldown;
     private float _stuckTime;
     private int _strafeSign = 1;
+    private float _followSideSign;
     private Vector3 _lastPosition;
     private Vector3 _lastPlayerPosition;
     private bool _hasPlayerPosition;
@@ -53,6 +64,7 @@ internal sealed class CompanionBot
     private Vector3[] _navigationWaypoints = Array.Empty<Vector3>();
     private int _navigationWaypointIndex;
     private NavigationGoal _navigationGoal;
+    private Func<Vector3, bool>? _playerCollisionProbe;
 
     internal CompanionBot(GameConfig config, Vector3 spawnPosition, Action<string>? diagnostics = null)
     {
@@ -109,11 +121,12 @@ internal sealed class CompanionBot
         Status = BotStatus.Idle;
     }
 
-    internal void Update(WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, float deltaTime)
+    internal void Update(WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, float deltaTime, Func<Vector3, bool>? playerCollisionProbe = null)
     {
         var previousStatus = Status;
         _lastPlayerPosition = playerPosition;
         _hasPlayerPosition = true;
+        _playerCollisionProbe = playerCollisionProbe;
         var safeDelta = Math.Clamp(deltaTime, 1f / 240f, 0.1f);
         _actionCooldown = MathF.Max(0f, _actionCooldown - safeDelta);
         _retargetCooldown = MathF.Max(0f, _retargetCooldown - safeDelta);
@@ -188,11 +201,7 @@ internal sealed class CompanionBot
             return;
         }
 
-        var followForward = ToHorizontal(playerLookDirection);
-        var followRight = new Vector3(-followForward.Z, 0f, followForward.X);
-        var desired = playerPosition - followForward * 2.2f + followRight * 1.4f;
-
-        if (Vector3.DistanceSquared(Position, desired) < 9f)
+        if (!TryResolveFollowPose(world, playerPosition, playerLookDirection, out var desired))
         {
             ResetNavigationRoute();
             Status = BotStatus.Idle;
@@ -200,7 +209,15 @@ internal sealed class CompanionBot
             return;
         }
 
-        if (TryEnsureStandRoute(world, desired, goalRadius: 1))
+        if (IsComfortableFollowPose(Position, desired, playerPosition, playerLookDirection))
+        {
+            ResetNavigationRoute();
+            Status = BotStatus.Idle;
+            StepIdle(world, deltaTime);
+            return;
+        }
+
+        if (TryEnsureStandRoute(world, desired, goalRadius: 1, playerPosition, playerLookDirection))
         {
             Status = BotStatus.Moving;
             var moveResult = MoveAlongNavigationRoute(world, deltaTime, MoveArrivalDistance);
@@ -776,6 +793,21 @@ internal sealed class CompanionBot
             return false;
         }
 
+        if (step.Block != BlockType.Air)
+        {
+            if (DoesActorOverlapBlock(Position, Actor.ColliderHalfWidth, Actor.ColliderHeight, step.X, step.Y, step.Z))
+            {
+                Trace($"build-self-overlap step={FormatBuildStep(step)}");
+                return false;
+            }
+
+            if (_hasPlayerPosition && DoesActorOverlapBlock(_lastPlayerPosition, Actor.ColliderHalfWidth, Actor.ColliderHeight, step.X, step.Y, step.Z))
+            {
+                Trace($"build-player-overlap step={FormatBuildStep(step)}");
+                return false;
+            }
+        }
+
         world.SetBlock(step.X, step.Y, step.Z, step.Block);
         _actionCooldown = 0.05f;
         Trace($"build-place step={FormatBuildStep(step)} stock={GetStockpile(step.Block)}");
@@ -956,6 +988,107 @@ internal sealed class CompanionBot
         };
     }
 
+    private Vector3 GetPreferredFollowPose(Vector3 playerPosition, Vector3 playerLookDirection, float sideSign)
+    {
+        var followForward = ToHorizontal(playerLookDirection);
+        var followRight = new Vector3(-followForward.Z, 0f, followForward.X);
+        return playerPosition - followForward * FollowDistance + followRight * (FollowSideOffset * sideSign);
+    }
+
+    private bool TryResolveFollowPose(WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, out Vector3 desiredPose)
+    {
+        var sideSign = GetPreferredFollowSideSign(playerPosition, playerLookDirection);
+        var followForward = ToHorizontal(playerLookDirection);
+        var candidateAnchors = new (Vector3 Anchor, float SideSign)[]
+        {
+            (GetPreferredFollowPose(playerPosition, playerLookDirection, sideSign), sideSign),
+            (playerPosition - followForward * (FollowDistance + 1.4f) + new Vector3(-followForward.Z, 0f, followForward.X) * (FollowSideOffset * sideSign * 1.25f), sideSign),
+            (playerPosition - followForward * (FollowDistance + 2.4f), sideSign),
+            (GetPreferredFollowPose(playerPosition, playerLookDirection, -sideSign), -sideSign)
+        };
+
+        return TryFindSafeFollowPose(world, playerPosition, playerLookDirection, candidateAnchors, out desiredPose);
+    }
+
+    private float GetPreferredFollowSideSign(Vector3 playerPosition, Vector3 playerLookDirection)
+    {
+        if (MathF.Abs(_followSideSign) > 0.5f)
+        {
+            return _followSideSign;
+        }
+
+        var followForward = ToHorizontal(playerLookDirection);
+        var followRight = new Vector3(-followForward.Z, 0f, followForward.X);
+        var side = Vector3.Dot(Position - playerPosition, followRight);
+        if (MathF.Abs(side) <= 0.1f)
+        {
+            _followSideSign = _strafeSign >= 0 ? 1f : -1f;
+            return _followSideSign;
+        }
+
+        _followSideSign = side >= 0f ? 1f : -1f;
+        return _followSideSign;
+    }
+
+    private bool TryFindSafeFollowPose(
+        WorldMap world,
+        Vector3 playerPosition,
+        Vector3 playerLookDirection,
+        (Vector3 Anchor, float SideSign)[] candidateAnchors,
+        out Vector3 desiredPose)
+    {
+        for (var i = 0; i < candidateAnchors.Length; i++)
+        {
+            if (!TryFindStandPoseNear(world, candidateAnchors[i].Anchor, searchRadius: 3, out var snappedPose))
+            {
+                continue;
+            }
+
+            if (!IsSafeFollowPose(snappedPose, playerPosition, playerLookDirection))
+            {
+                continue;
+            }
+
+            desiredPose = snappedPose;
+            _followSideSign = candidateAnchors[i].SideSign;
+            return true;
+        }
+
+        desiredPose = Position;
+        return false;
+    }
+
+    private bool IsSafeFollowPose(Vector3 pose, Vector3 playerPosition, Vector3 playerLookDirection)
+    {
+        if (_playerCollisionProbe?.Invoke(pose) == true)
+        {
+            return false;
+        }
+
+        var toPose = pose - playerPosition;
+        var horizontal = new Vector2(toPose.X, toPose.Z);
+        var horizontalDistanceSq = horizontal.LengthSquared();
+        if (horizontalDistanceSq <= PlayerKeepoutDistance * PlayerKeepoutDistance)
+        {
+            return false;
+        }
+
+        if (horizontalDistanceSq > PlayerViewKeepoutDistance * PlayerViewKeepoutDistance || horizontalDistanceSq <= 0.0001f)
+        {
+            return true;
+        }
+
+        var forward = ToHorizontal(playerLookDirection);
+        var horizontalDirection = Vector3.Normalize(new Vector3(horizontal.X, 0f, horizontal.Y));
+        return Vector3.Dot(forward, horizontalDirection) < PlayerViewKeepoutDot;
+    }
+
+    private bool IsComfortableFollowPose(Vector3 currentPose, Vector3 desiredPose, Vector3 playerPosition, Vector3 playerLookDirection)
+    {
+        return IsSafeFollowPose(currentPose, playerPosition, playerLookDirection)
+            && Vector3.DistanceSquared(currentPose, desiredPose) <= FollowIdleDistance * FollowIdleDistance;
+    }
+
     private MoveResult MoveTowardsPose(WorldMap world, Vector3 targetPose, float deltaTime)
     {
         return MoveTowardsPose(world, targetPose, deltaTime, MoveArrivalDistance);
@@ -1004,7 +1137,7 @@ internal sealed class CompanionBot
         var jump = Actor.IsGrounded && (obstacleAhead || delta.Y > 0.8f || !hasGroundAhead);
 
         var before = Position;
-        Actor.Update(world, new PlayerInput(moveForward, moveRight, jump, lookDeltaX, 0f), deltaTime);
+        Actor.Update(world, new PlayerInput(moveForward, moveRight, jump, lookDeltaX, 0f), deltaTime, _playerCollisionProbe);
 
         var moved = new Vector2(Position.X - before.X, Position.Z - before.Z).Length();
         var distanceAfter = Vector3.Distance(Position, targetPose);
@@ -1039,7 +1172,7 @@ internal sealed class CompanionBot
             : deltaTime * 0.65f;
     }
 
-    private bool TryEnsureStandRoute(WorldMap world, Vector3 desiredPose, int goalRadius)
+    private bool TryEnsureStandRoute(WorldMap world, Vector3 desiredPose, int goalRadius, Vector3 playerPosition, Vector3 playerLookDirection)
     {
         var desiredX = Math.Clamp((int)MathF.Floor(desiredPose.X), 0, Math.Max(0, world.Width - 1));
         var desiredFeetCell = Math.Clamp((int)MathF.Floor(desiredPose.Y + 0.1f), 1, Math.Max(1, world.Height - 2));
@@ -1050,7 +1183,19 @@ internal sealed class CompanionBot
             return true;
         }
 
-        if (!BotNavigator.TryBuildStandRoute(world, GetNavigationSettings(), Position, desiredPose, goalRadius, out var waypoints))
+        if (CanReuseFollowRoute(goal, desiredPose, playerPosition, playerLookDirection))
+        {
+            return true;
+        }
+
+        if (!BotNavigator.TryBuildStandRoute(
+                world,
+                GetNavigationSettings(),
+                Position,
+                desiredPose,
+                goalRadius,
+                cell => IsFollowRouteCellAllowed(cell, playerPosition, playerLookDirection),
+                out var waypoints))
         {
             ResetNavigationRoute();
             Trace($"follow-route-failed desired={FormatVector(desiredPose)} radius={goalRadius}");
@@ -1062,6 +1207,48 @@ internal sealed class CompanionBot
         _navigationWaypointIndex = 0;
         Trace($"follow-route waypoints={waypoints.Length} desired={FormatVector(desiredPose)} radius={goalRadius}");
         return true;
+    }
+
+    private bool CanReuseFollowRoute(NavigationGoal goal, Vector3 desiredPose, Vector3 playerPosition, Vector3 playerLookDirection)
+    {
+        if (_navigationGoal.Purpose != NavigationPurpose.Follow || _navigationWaypointIndex >= _navigationWaypoints.Length)
+        {
+            return false;
+        }
+
+        var currentGoalPose = new Vector3(_navigationGoal.X + 0.5f, _navigationGoal.Y + 0.02f, _navigationGoal.Z + 0.5f);
+        if (!IsSafeFollowPose(currentGoalPose, playerPosition, playerLookDirection))
+        {
+            return false;
+        }
+
+        if (Vector3.DistanceSquared(currentGoalPose, desiredPose) > FollowRouteReuseDistance * FollowRouteReuseDistance)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool IsFollowRouteCellAllowed(BotNavigationCell cell, Vector3 playerPosition, Vector3 playerLookDirection)
+    {
+        var pose = cell.ToPose();
+        var toPose = pose - playerPosition;
+        var horizontal = new Vector2(toPose.X, toPose.Z);
+        var distanceSq = horizontal.LengthSquared();
+        if (distanceSq <= PlayerRouteBlockDistance * PlayerRouteBlockDistance)
+        {
+            return false;
+        }
+
+        if (distanceSq > PlayerRouteFrontDistance * PlayerRouteFrontDistance || distanceSq <= 0.0001f)
+        {
+            return true;
+        }
+
+        var forward = ToHorizontal(playerLookDirection);
+        var horizontalDirection = Vector3.Normalize(new Vector3(horizontal.X, 0f, horizontal.Y));
+        return Vector3.Dot(forward, horizontalDirection) < PlayerRouteFrontDot;
     }
 
     private bool TryEnsureActionRoute(
@@ -1309,7 +1496,7 @@ internal sealed class CompanionBot
 
     private void StepIdle(WorldMap world, float deltaTime)
     {
-        Actor.Update(world, new PlayerInput(0f, 0f, false, 0f, 0f), deltaTime);
+        Actor.Update(world, new PlayerInput(0f, 0f, false, 0f, 0f), deltaTime, _playerCollisionProbe);
         _lastPosition = Position;
     }
 
@@ -1511,12 +1698,17 @@ internal sealed class CompanionBot
 
     private bool DoesPoseOverlapBlock(Vector3 pose, int x, int y, int z)
     {
-        var minX = pose.X - Actor.ColliderHalfWidth + 0.03f;
-        var maxX = pose.X + Actor.ColliderHalfWidth - 0.03f;
+        return DoesActorOverlapBlock(pose, Actor.ColliderHalfWidth, Actor.ColliderHeight, x, y, z);
+    }
+
+    private static bool DoesActorOverlapBlock(Vector3 pose, float halfWidth, float height, int x, int y, int z)
+    {
+        var minX = pose.X - halfWidth + 0.03f;
+        var maxX = pose.X + halfWidth - 0.03f;
         var minY = pose.Y + 0.02f;
-        var maxY = pose.Y + Actor.ColliderHeight - 0.03f;
-        var minZ = pose.Z - Actor.ColliderHalfWidth + 0.03f;
-        var maxZ = pose.Z + Actor.ColliderHalfWidth - 0.03f;
+        var maxY = pose.Y + height - 0.03f;
+        var minZ = pose.Z - halfWidth + 0.03f;
+        var maxZ = pose.Z + halfWidth - 0.03f;
         return maxX > x
             && minX < x + 1f
             && maxY > y

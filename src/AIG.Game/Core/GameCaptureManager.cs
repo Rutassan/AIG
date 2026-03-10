@@ -86,6 +86,7 @@ internal static class FfmpegVideoEncoder
 
 internal sealed class GameCaptureManager
 {
+    private const string RecordingFrameExtension = ".bmp";
     private sealed record RecordingSession(string FramesDirectory, string OutputFilePath);
 
     private readonly string _screenshotsDirectory;
@@ -153,7 +154,7 @@ internal sealed class GameCaptureManager
         }
 
         var result = _encoder(new VideoEncodingRequest(
-            Path.Combine(session.FramesDirectory, "frame-%06d.png"),
+            Path.Combine(session.FramesDirectory, $"frame-%06d{RecordingFrameExtension}"),
             session.OutputFilePath,
             _videoFramesPerSecond));
 
@@ -190,7 +191,7 @@ internal sealed class GameCaptureManager
             _recordingAccumulator = 0f;
         }
 
-        framePath = Path.Combine(_recordingSession.FramesDirectory, $"frame-{_recordingFrameIndex:D06}.png");
+        framePath = Path.Combine(_recordingSession.FramesDirectory, $"frame-{_recordingFrameIndex:D06}{RecordingFrameExtension}");
         _recordingFrameIndex++;
         return true;
     }

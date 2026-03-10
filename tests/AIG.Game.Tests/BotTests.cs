@@ -680,8 +680,92 @@ public sealed class BotTests
         bot.Update(world, new Vector3(18.5f, 2.02f, 18.5f), new Vector3(1f, 0f, 0f), 1f / 30f);
         Assert.Equal(BotStatus.Moving, bot.Status);
 
-        bot.Update(world, bot.Position, new Vector3(1f, 0f, 0f), 1f / 30f);
-        Assert.Equal(BotStatus.Idle, bot.Status);
+        StepBot(bot, world, new Vector3(18.5f, 2.02f, 18.5f), 180);
+        Assert.Contains(bot.Status, new[] { BotStatus.Idle, BotStatus.Moving });
+        Assert.True((bool)InvokePrivate(bot, "IsSafeFollowPose", bot.Position, new Vector3(18.5f, 2.02f, 18.5f), new Vector3(1f, 0f, 0f))!);
+    }
+
+    [Fact(DisplayName = "CompanionBot в режиме follow отлипает от игрока и не лезет прямо в камеру")]
+    public void CompanionBot_Follow_KeepsOutOfPlayerView()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        WarmWorld(world, new Vector3(10.5f, 2f, 10.5f));
+
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = new Vector3(0f, 0f, 1f);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 11.4f));
+
+        Func<Vector3, bool> playerCollisionProbe = pose =>
+        {
+            var min = new Vector3(pose.X - bot.Actor.ColliderHalfWidth, pose.Y, pose.Z - bot.Actor.ColliderHalfWidth);
+            var max = new Vector3(pose.X + bot.Actor.ColliderHalfWidth, pose.Y + bot.Actor.ColliderHeight, pose.Z + bot.Actor.ColliderHalfWidth);
+            var playerMin = new Vector3(playerPosition.X - 0.3f, playerPosition.Y, playerPosition.Z - 0.3f);
+            var playerMax = new Vector3(playerPosition.X + 0.3f, playerPosition.Y + 1.8f, playerPosition.Z + 0.3f);
+            return min.X <= playerMax.X && max.X >= playerMin.X
+                && min.Y <= playerMax.Y && max.Y >= playerMin.Y
+                && min.Z <= playerMax.Z && max.Z >= playerMin.Z;
+        };
+
+        bot.Update(world, playerPosition, playerLook, 1f / 30f, playerCollisionProbe);
+
+        StepBot(bot, world, playerPosition, playerLook, 180, playerCollisionProbe);
+
+        Assert.Contains(bot.Status, new[] { BotStatus.Idle, BotStatus.Moving });
+        Assert.True(Vector3.Distance(bot.Position, playerPosition) > 1.15f, $"Bot={bot.Position}");
+    }
+
+    [Fact(DisplayName = "CompanionBot в follow не телепортируется, даже если оказался слишком близко к игроку")]
+    public void CompanionBot_UpdateFollowPlayer_DoesNotTeleportWhenTooClose()
+    {
+        var world = CreateFlatWorld(32, 12);
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = Vector3.UnitZ;
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 11.1f));
+        var before = bot.Position;
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, playerPosition, playerLook, 1f / 30f);
+
+        Assert.Contains(bot.Status, new[] { BotStatus.Idle, BotStatus.Moving });
+        Assert.True(Vector3.Distance(before, bot.Position) < 0.5f, $"Before={before} After={bot.Position}");
+        Assert.True(Vector3.Distance(bot.Position, playerPosition) < 4.5f, $"Bot={bot.Position}");
+    }
+
+    [Fact(DisplayName = "CompanionBot выбирает сторону follow по текущему боку и fallback-стрейфу")]
+    public void CompanionBot_GetPreferredFollowSideSign_CoversSideAndFallbackBranches()
+    {
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = Vector3.UnitZ;
+
+        var rightSideBot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 10.5f));
+        Assert.Equal(1f, (float)InvokePrivate(rightSideBot, "GetPreferredFollowSideSign", playerPosition, playerLook)!);
+
+        var fallbackBot = new CompanionBot(new GameConfig(), playerPosition);
+        SetPrivateField(fallbackBot, "_strafeSign", -1);
+        Assert.Equal(-1f, (float)InvokePrivate(fallbackBot, "GetPreferredFollowSideSign", playerPosition, playerLook)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot считает follow-позу комфортной только если она и безопасна, и близка к цели")]
+    public void CompanionBot_IsComfortableFollowPose_RequiresSafeAndNearDesired()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 4.9f));
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = Vector3.UnitZ;
+        var desired = new Vector3(10.5f, 2.02f, 5.7f);
+
+        Assert.True((bool)InvokePrivate(bot, "IsComfortableFollowPose", bot.Position, desired, playerPosition, playerLook)!);
+        Assert.False((bool)InvokePrivate(bot, "IsComfortableFollowPose", new Vector3(10.5f, 2.02f, 12.2f), desired, playerPosition, playerLook)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot запрещает follow-маршрут через игрока и через передний конус обзора")]
+    public void CompanionBot_IsFollowRouteCellAllowed_BlocksNearAndFrontCells()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = Vector3.UnitZ;
+
+        Assert.False((bool)InvokePrivate(bot, "IsFollowRouteCellAllowed", new BotNavigationCell(10, 2, 10), playerPosition, playerLook)!);
+        Assert.False((bool)InvokePrivate(bot, "IsFollowRouteCellAllowed", new BotNavigationCell(10, 2, 12), playerPosition, playerLook)!);
+        Assert.True((bool)InvokePrivate(bot, "IsFollowRouteCellAllowed", new BotNavigationCell(7, 2, 9), playerPosition, playerLook)!);
     }
 
     [Fact(DisplayName = "CompanionBot private helper-ветки по summary, сбору и запасам покрыты")]
@@ -902,6 +986,20 @@ public sealed class BotTests
 
         SetPrivateField(bot, "_buildStepIndex", 0);
         Assert.False((bool)InvokePrivate(bot, "TryApplyBuildStep", world, woodStep)!);
+
+        var selfOverlapBot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(selfOverlapBot, "AddStockpile", BlockType.Wood, 1);
+        var selfOverlapStep = new HouseBuildStep(5, 2, 5, BlockType.Wood);
+        Assert.False((bool)InvokePrivate(selfOverlapBot, "TryApplyBuildStep", world, selfOverlapStep)!);
+        Assert.Equal(BlockType.Air, world.GetBlock(5, 2, 5));
+
+        var playerOverlapBot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(playerOverlapBot, "AddStockpile", BlockType.Wood, 1);
+        SetPrivateField(playerOverlapBot, "_hasPlayerPosition", true);
+        SetPrivateField(playerOverlapBot, "_lastPlayerPosition", new Vector3(7.5f, 2.02f, 5.5f));
+        var playerOverlapStep = new HouseBuildStep(7, 2, 5, BlockType.Wood);
+        Assert.False((bool)InvokePrivate(playerOverlapBot, "TryApplyBuildStep", world, playerOverlapStep)!);
+        Assert.Equal(BlockType.Air, world.GetBlock(7, 2, 5));
 
         world.SetBlock(6, 2, 6, BlockType.Wood);
         Assert.True((bool)InvokePrivate(bot, "TryApplyBuildStep", world, airStep)!);
@@ -1186,7 +1284,8 @@ public sealed class BotTests
         var world = CreateFlatWorld(32, 12);
         var playerPosition = new Vector3(18.5f, 2.02f, 18.5f);
         var playerLookDirection = Vector3.UnitX;
-        var desired = playerPosition - new Vector3(1f, 0f, 0f) * 2.2f + new Vector3(0f, 0f, 1f) * 1.4f;
+        var desiredProbeBot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var desired = (Vector3)InvokePrivate(desiredProbeBot, "GetPreferredFollowPose", playerPosition, playerLookDirection, -1f)!;
         var desiredX = (int)MathF.Floor(desired.X);
         var desiredY = (int)MathF.Floor(desired.Y + 0.1f);
         var desiredZ = (int)MathF.Floor(desired.Z);
@@ -1201,14 +1300,137 @@ public sealed class BotTests
 
         Assert.Equal(BotStatus.NoPath, blockedBot.Status);
 
-        var arrivedBot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var arrivedBot = new CompanionBot(new GameConfig(), desired + new Vector3(-0.2f, 0f, 0f));
         SetPrivateField(arrivedBot, "_navigationGoal", CreateNavigationGoal("Follow", desiredX, desiredY, desiredZ, 1, null));
-        SetPrivateField(arrivedBot, "_navigationWaypoints", new[] { arrivedBot.Position + new Vector3(0.2f, 0f, 0f) });
+        SetPrivateField(arrivedBot, "_navigationWaypoints", new[] { desired });
         SetPrivateField(arrivedBot, "_navigationWaypointIndex", 0);
 
         InvokePrivate(arrivedBot, "UpdateFollowPlayer", world, playerPosition, playerLookDirection, 1f / 30f);
 
         Assert.Equal(BotStatus.Idle, arrivedBot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot переводит follow в Idle, если текущий waypoint уже достигнут")]
+    public void CompanionBot_UpdateFollowPlayer_IdlesWhenWaypointAlreadyReached()
+    {
+        var world = CreateFlatWorld(32, 12);
+        var playerPosition = new Vector3(18.5f, 2.02f, 18.5f);
+        var playerLookDirection = Vector3.UnitX;
+        var desiredProbeBot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var desired = (Vector3)InvokePrivate(desiredProbeBot, "GetPreferredFollowPose", playerPosition, playerLookDirection, -1f)!;
+        var desiredX = (int)MathF.Floor(desired.X);
+        var desiredY = (int)MathF.Floor(desired.Y + 0.1f);
+        var desiredZ = (int)MathF.Floor(desired.Z);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        SetPrivateField(bot, "_navigationGoal", CreateNavigationGoal("Follow", desiredX, desiredY, desiredZ, 1, null));
+        SetPrivateField(bot, "_navigationWaypoints", new[] { bot.Position });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, playerPosition, playerLookDirection, 1f / 30f);
+
+        Assert.Equal(BotStatus.Idle, bot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot в follow уходит в Idle, если безопасная позиция неразрешима")]
+    public void CompanionBot_UpdateFollowPlayer_IdlesWhenNoSafeFollowPoseExists()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var playerPosition = new Vector3(10.5f, 2.02f, 10.5f);
+        var playerLook = Vector3.UnitZ;
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 4.9f));
+        SetPrivateField(bot, "_playerCollisionProbe", new Func<Vector3, bool>(_ => true));
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, playerPosition, playerLook, 1f / 30f);
+
+        Assert.Equal(BotStatus.Idle, bot.Status);
+        Assert.Empty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
+    [Fact(DisplayName = "CompanionBot в follow очищает маршрут и уходит в Idle, если safe-поза есть, но путь к ней отсутствует")]
+    public void CompanionBot_UpdateFollowPlayer_IdlesWhenSafePoseExistsButRouteFails()
+    {
+        var world = CreateFlatWorld(24, 12);
+        for (var x = 9; x <= 11; x++)
+        {
+            for (var z = 9; z <= 11; z++)
+            {
+                if (x == 10 && z == 10)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 2, z, BlockType.Wood);
+                world.SetBlock(x, 3, z, BlockType.Wood);
+            }
+        }
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 10.5f));
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(8.5f, 2.02f, 8.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, new Vector3(18.5f, 2.02f, 18.5f), Vector3.UnitZ, 1f / 30f);
+
+        Assert.Equal(BotStatus.Idle, bot.Status);
+        Assert.Empty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
+    [Fact(DisplayName = "CompanionBot TryEnsureStandRoute переиспользует goal и сбрасывает маршрут при неудаче")]
+    public void CompanionBot_TryEnsureStandRoute_ReusesGoal_AndClearsRouteOnFailure()
+    {
+        var world = CreateFlatWorld(32, 12);
+        var playerPosition = new Vector3(18.5f, 2.02f, 18.5f);
+        var playerLookDirection = Vector3.UnitX;
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var desired = (Vector3)InvokePrivate(bot, "GetPreferredFollowPose", playerPosition, playerLookDirection, -1f)!;
+        var desiredX = (int)MathF.Floor(desired.X);
+        var desiredY = (int)MathF.Floor(desired.Y + 0.1f);
+        var desiredZ = (int)MathF.Floor(desired.Z);
+
+        SetPrivateField(bot, "_navigationGoal", CreateNavigationGoal("Follow", desiredX, desiredY, desiredZ, 1, null));
+        Assert.True((bool)InvokePrivate(bot, "TryEnsureStandRoute", world, desired, 1, playerPosition, playerLookDirection)!);
+
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(desiredX + 0.5f, desiredY + 0.02f, desiredZ + 0.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+        var nearbyDesired = desired + new Vector3(1.1f, 0f, 0f);
+        Assert.True((bool)InvokePrivate(bot, "TryEnsureStandRoute", world, nearbyDesired, 1, playerPosition, playerLookDirection)!);
+        Assert.Equal(CreateNavigationGoal("Follow", desiredX, desiredY, desiredZ, 1, null), GetPrivateField(bot, "_navigationGoal"));
+
+        var blockedWorld = new WorldMap(width: 6, height: 8, depth: 6, chunkSize: 8, seed: 0);
+        for (var x = 0; x < blockedWorld.Width; x++)
+        {
+            for (var z = 0; z < blockedWorld.Depth; z++)
+            {
+                for (var y = 0; y < blockedWorld.Height; y++)
+                {
+                    blockedWorld.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(1.5f, 2.02f, 1.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+        Assert.False((bool)InvokePrivate(bot, "TryEnsureStandRoute", blockedWorld, new Vector3(4.5f, 2.02f, 4.5f), 1, playerPosition, playerLookDirection)!);
+        Assert.Empty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
+    [Fact(DisplayName = "CompanionBot не переиспользует follow-маршрут, если текущая goal-поза вошла в небезопасную зону игрока")]
+    public void CompanionBot_CanReuseFollowRoute_ReturnsFalseForUnsafeCurrentGoal()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var unsafeGoal = CreateNavigationGoal("Follow", 10, 2, 12, 1, null);
+        SetPrivateField(bot, "_navigationGoal", unsafeGoal);
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(10.5f, 2.02f, 12.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+
+        var reused = (bool)InvokePrivate(
+            bot,
+            "CanReuseFollowRoute",
+            unsafeGoal,
+            new Vector3(10.5f, 2.02f, 12.5f),
+            new Vector3(10.5f, 2.02f, 10.5f),
+            Vector3.UnitZ)!;
+
+        Assert.False(reused);
     }
 
     [Fact(DisplayName = "CompanionBot использует локальную рабочую позу и покрывает NavigationGoal")]
@@ -2022,7 +2244,7 @@ public sealed class BotTests
         var view = CameraViewBuilder.Build(player, world, AIG.Game.Core.CameraMode.FirstPerson, 0f);
         InvokePrivate(app, "DrawFrame", null, view);
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Убрать устройство", StringComparison.Ordinal));
-        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Клавиша B: открыть/убрать модуль", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("B / ESC: убрать модуль", StringComparison.Ordinal));
 
         device.OpenBuildHouse();
         Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
@@ -2031,6 +2253,53 @@ public sealed class BotTests
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Шаблон: Дом S", StringComparison.Ordinal));
 
         _ = GetRect(app, "GetBotDeviceCloseButtonRect");
+    }
+
+    [Fact(DisplayName = "GameApp по F3 переключает компактный и расширенный HUD")]
+    public void GameApp_HandleGlobalUiHotkeys_TogglesDebugHud()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+
+        InvokePrivate(app, "DrawHud", false);
+        Assert.DoesNotContain(platform.DrawnUiTexts, text => text.Contains("Pos:", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Бот:", StringComparison.Ordinal));
+
+        platform.SetPressedKeys(KeyboardKey.F3);
+        Assert.True((bool)InvokePrivate(app, "HandleGlobalUiHotkeys")!);
+        InvokePrivate(app, "DrawHud", false);
+
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("DEBUG HUD", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Pos:", StringComparison.Ordinal));
+    }
+
+    [Fact(DisplayName = "GameApp рисует debug HUD без ветки бота, если спутник отсутствует")]
+    public void GameApp_DrawHud_DebugWithoutCompanion_CoversNullBranch()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", null);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+
+        platform.SetPressedKeys(KeyboardKey.F3);
+        Assert.True((bool)InvokePrivate(app, "HandleGlobalUiHotkeys")!);
+        InvokePrivate(app, "DrawHud", false);
+
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("DEBUG HUD", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.DrawnUiTexts, text => text.Contains("Бот:", StringComparison.Ordinal));
     }
 
     private static void WarmWorld(WorldMap world, Vector3 position)
@@ -2087,11 +2356,21 @@ public sealed class BotTests
 
     private static void StepBot(CompanionBot bot, WorldMap world, Vector3 playerPosition, int frames)
     {
+        StepBot(bot, world, playerPosition, new Vector3(1f, 0f, 0f), frames, null);
+    }
+
+    private static void StepBot(CompanionBot bot, WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, int frames)
+    {
+        StepBot(bot, world, playerPosition, playerLookDirection, frames, null);
+    }
+
+    private static void StepBot(CompanionBot bot, WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, int frames, Func<Vector3, bool>? playerCollisionProbe)
+    {
         for (var i = 0; i < frames; i++)
         {
             world.EnsureChunksAround(bot.Position, radiusInChunks: 3);
             _ = world.RebuildDirtyChunkSurfaces(bot.Position, maxChunks: 256);
-            bot.Update(world, playerPosition, new Vector3(1f, 0f, 0f), 1f / 30f);
+            bot.Update(world, playerPosition, playerLookDirection, 1f / 30f, playerCollisionProbe);
         }
     }
 
