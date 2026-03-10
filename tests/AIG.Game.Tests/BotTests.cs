@@ -1505,8 +1505,85 @@ public sealed class BotTests
         Assert.Equal(new HouseBuildStep(8, 2, 5, BlockType.Air), Assert.IsType<HouseBuildStep>(selection.Args[3]!));
     }
 
-    [Fact(DisplayName = "Пауза рисует bot-панель и HUD показывает статусы бота")]
-    public void GameApp_PauseMenu_DrawsBotPanelAndHud()
+    [Fact(DisplayName = "CompanionBot не пытается заново искать маршрут стройки, пока активен no-path cooldown")]
+    public void CompanionBot_UpdateBuildCommand_NoPathCooldownSkipsHeavyRetry()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Cooldown-build",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(8, 2, 8, BlockType.Wood)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 7.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        SetPrivateField(bot, "_noPathTimer", 0.25f);
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BotStatus.NoPath, bot.Status);
+        Assert.Equal(BlockType.Air, world.GetBlock(8, 2, 8));
+        Assert.Equal(1, bot.GetStockpile(BlockType.Wood));
+    }
+
+    [Fact(DisplayName = "CompanionBot не пытается заново добывать, пока активен no-path cooldown")]
+    public void CompanionBot_UpdateGatherCommand_NoPathCooldownSkipsHeavyRetry()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 8, BlockType.Wood);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 7.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.Gather(BotResourceType.Wood, 1));
+        SetPrivateField(bot, "_noPathTimer", 0.25f);
+
+        InvokePrivate(bot, "UpdateGatherCommand", world, BotResourceType.Wood, 1, 1f / 30f);
+
+        Assert.Equal(BotStatus.NoPath, bot.Status);
+        Assert.Equal(0, bot.GatheredAmount);
+        Assert.Equal(BlockType.Wood, world.GetBlock(8, 2, 8));
+    }
+
+    [Fact(DisplayName = "CompanionBot score для reroute-кандидата штрафует дальние и нересурсные шаги")]
+    public void CompanionBot_ScoreBuildRerouteCandidate_PenalizesDistanceAndMissingResources()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var nearLoaded = (float)InvokePrivate(bot, "ScoreBuildRerouteCandidate", 1, new HouseBuildStep(6, 2, 5, BlockType.Wood), true)!;
+        var farUnloaded = (float)InvokePrivate(bot, "ScoreBuildRerouteCandidate", 24, new HouseBuildStep(30, 6, 30, BlockType.Wood), false)!;
+
+        Assert.True(farUnloaded > nearLoaded);
+    }
+
+    [Fact(DisplayName = "CompanionBot строит stage-route к далекой рабочей точке стройки вместо тяжелого прямого action-route")]
+    public void CompanionBot_TryEnsureActionRoute_UsesStageRouteForFarBuildTarget()
+    {
+        var world = CreateFlatWorld(96, 12);
+        var traces = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 6.5f), traces.Add);
+        var purpose = ParseNestedEnum(typeof(CompanionBot), "NavigationPurpose", "BuildAction");
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Stage-route",
+            originX: 52,
+            floorY: 2,
+            originZ: 52,
+            steps:
+            [
+                new HouseBuildStep(58, 2, 58, BlockType.Wood)
+            ]);
+
+        Assert.True((bool)InvokePrivate(bot, "TryEnsureActionRoute", world, purpose, 58, 2, 58, 7, blueprint)!);
+        Assert.Contains(traces, trace => trace.Contains("action-route-stage", StringComparison.Ordinal));
+        Assert.NotEmpty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
+    [Fact(DisplayName = "Пауза больше не рисует bot-панель, а HUD по-прежнему показывает статусы бота")]
+    public void GameApp_PauseMenu_DoesNotDrawBotPanel_AndHudStillShowsBotStatus()
     {
         var config = new GameConfig { FullscreenByDefault = false };
         var platform = new FakeGamePlatform();
@@ -1523,9 +1600,9 @@ public sealed class BotTests
         InvokePrivate(app, "DrawMenu");
 
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Бот:", StringComparison.Ordinal));
-        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Бот-команды", StringComparison.Ordinal));
-        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Собрать", StringComparison.Ordinal));
-        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Построить дом S", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.DrawnUiTexts, text => text.Contains("Наручный модуль бота", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.DrawnUiTexts, text => text.Contains("Сбор ресурсов", StringComparison.Ordinal));
+        Assert.DoesNotContain(platform.DrawnUiTexts, text => text.Contains("Построить Дом S", StringComparison.Ordinal));
     }
 
     [Fact(DisplayName = "GameApp companion streaming покрывает early-return и оба режима стриминга")]
@@ -1548,78 +1625,412 @@ public sealed class BotTests
         InvokePrivate(app, "StreamCompanionWorkArea", true, false);
     }
 
-    [Fact(DisplayName = "Run обрабатывает bot-команды из паузного меню")]
-    public void GameApp_Run_ProcessesBotMenuCommands()
+    [Fact(DisplayName = "GameApp рисует экран наручного устройства со статусом, сбором и количеством")]
+    public void GameApp_DrawBotDeviceOverlay_ShowsGatherScreen()
     {
         var config = new GameConfig { FullscreenByDefault = false };
         var platform = new FakeGamePlatform();
         var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
         var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = GetPrivateField(app, "_botDevice")!;
 
-        var start = GetRect(app, "GetStartButtonRect");
-        var botResource = GetRect(app, "GetBotResourceButtonRect");
-        var botAmount = GetRect(app, "GetBotAmountButtonRect");
-        var botGather = GetRect(app, "GetBotGatherButtonRect");
-        var botBuild = GetRect(app, "GetBotBuildButtonRect");
-        var botCancel = GetRect(app, "GetBotCancelButtonRect");
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+        InvokePublic(device, "OpenMain");
+        InvokePublic(device, "OpenGatherResource");
+        InvokePublic(device, "SelectResource", BotResourceType.Stone);
+        InvokePublic(device, "SetMessage", "Введите количество.");
 
-        platform.EnqueueFrameInput(Center(start), leftMousePressed: true);
-        platform.EnqueueFrameInput(Vector2.Zero, pressedKeys: [KeyboardKey.Escape]);
-        platform.EnqueueFrameInput(Center(botResource), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botAmount), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botGather), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botBuild), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botCancel), leftMousePressed: true);
-        platform.EnqueueWindowShouldClose(false, false, false, false, false, false, false, true);
+        InvokePrivate(app, "DrawBotDeviceOverlay");
 
-        app.Run();
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Наручный модуль бота", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Сбор ресурсов", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Количество: 16", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Камень", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Введите количество.", StringComparison.Ordinal));
+    }
 
-        var message = (string)GetPrivateField(app, "_botMenuMessage")!;
-        var companion = (CompanionBot)GetPrivateField(app, "_companion")!;
+    [Fact(DisplayName = "GameApp hotkey устройства открывает и закрывает модуль без перехода в паузу")]
+    public void GameApp_HandlePlayingModeHotkeys_OpensAndClosesDeviceWithoutPause()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = GetPrivateField(app, "_botDevice")!;
 
-        Assert.Equal("Команды бота сброшены.", message);
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+
+        platform.SetPressedKeys(KeyboardKey.B);
+        Assert.True((bool)InvokePrivate(app, "HandlePlayingModeHotkeys")!);
+        Assert.True((bool)device.GetType().GetProperty("IsOpen")!.GetValue(device)!);
+        Assert.Equal("Playing", GetPrivateField(app, "_state")!.ToString());
+        Assert.True(platform.EnableCursorCalled);
+
+        platform.SetPressedKeys(KeyboardKey.Escape);
+        Assert.True((bool)InvokePrivate(app, "HandlePlayingModeHotkeys")!);
+        Assert.False((bool)device.GetType().GetProperty("IsOpen")!.GetValue(device)!);
+        Assert.Equal("Playing", GetPrivateField(app, "_state")!.ToString());
+        Assert.True(platform.DisableCursorCalled);
+    }
+
+    [Fact(DisplayName = "GameApp обрабатывает сбор, стройку и отмену через наручное устройство")]
+    public void GameApp_HandleBotDeviceInput_ProcessesCommands()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = GetPrivateField(app, "_botDevice")!;
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+        InvokePublic(device, "OpenMain");
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.Equal("GatherResource", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
+
+        device.GetType().GetField("<AmountText>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(device, "0");
+        platform.SetPressedKeys(KeyboardKey.Three);
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.SetPressedKeys(KeyboardKey.Two);
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.SetPressedKeys();
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.NotNull(companion.ActiveCommand);
+        Assert.Contains("x32", (string)device.GetType().GetProperty("Message")!.GetValue(device)!);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.Equal("Main", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.Equal("BuildHouse", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.NotNull(companion.QueuedCommand);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceCancelButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
         Assert.Null(companion.ActiveCommand);
         Assert.Null(companion.QueuedCommand);
+        Assert.Equal("Команды бота сброшены.", (string)device.GetType().GetProperty("Message")!.GetValue(device)!);
     }
 
-    [Fact(DisplayName = "Run пишет сообщение о переполненной очереди для команды сбора")]
-    public void GameApp_Run_ShowsQueueFullMessage_ForGather()
+    [Fact(DisplayName = "GameApp показывает переполнение очереди через наручное устройство для сбора и стройки")]
+    public void GameApp_HandleBotDeviceInput_ShowsQueueFullMessages()
     {
-        var app = CreateBotMenuApp(out var platform);
-        var start = GetRect(app, "GetStartButtonRect");
-        var botGather = GetRect(app, "GetBotGatherButtonRect");
-        var botBuild = GetRect(app, "GetBotBuildButtonRect");
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = GetPrivateField(app, "_botDevice")!;
 
-        platform.EnqueueFrameInput(Center(start), leftMousePressed: true);
-        platform.EnqueueFrameInput(Vector2.Zero, pressedKeys: [KeyboardKey.Escape]);
-        platform.EnqueueFrameInput(Center(botGather), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botBuild), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botGather), leftMousePressed: true);
-        platform.EnqueueWindowShouldClose(false, false, false, false, false, true);
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+        InvokePublic(device, "OpenMain");
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+        Assert.Equal("Очередь бота заполнена.", (string)device.GetType().GetProperty("Message")!.GetValue(device)!);
+
+        companion.CancelAll();
+        InvokePublic(device, "BackToMain");
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBackButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        Assert.Equal("Очередь бота заполнена.", (string)device.GetType().GetProperty("Message")!.GetValue(device)!);
+    }
+
+    [Fact(DisplayName = "GameApp рисует устройство в первом лице и позу рук с устройством в третьем лице")]
+    public void GameApp_DrawDeviceBranches_Work()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = GetPrivateField(app, "_botDevice")!;
+        var visual = GetPrivateField(app, "_botDeviceVisual")!;
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+        InvokePublic(device, "OpenMain");
+        InvokePublic(visual, "Update", true, 0.1f);
+        InvokePublic(visual, "TriggerTap");
+        SetPrivateField(app, "_cameraMode", ParseInternalEnum("AIG.Game.Core.CameraMode", "FirstPerson"));
+
+        InvokePrivate(app, "DrawFirstPersonHand", new Camera3D
+        {
+            Position = player.EyePosition,
+            Target = player.EyePosition + player.LookDirection,
+            Up = Vector3.UnitY,
+            FovY = 60f,
+            Projection = CameraProjection.Perspective
+        });
+
+        SetPrivateField(app, "_cameraMode", ParseInternalEnum("AIG.Game.Core.CameraMode", "ThirdPerson"));
+        InvokePrivate(app, "DrawPlayerAvatar");
+
+        Assert.True(platform.DrawCubeCalls >= 6);
+    }
+
+    [Fact(DisplayName = "Run открывает наручный модуль в игровом цикле без паузы")]
+    public void Run_BotDeviceHotkey_OpensOverlayWithoutPause()
+    {
+        var platform = new FakeGamePlatform();
+        platform.EnqueueWindowShouldClose(false, false, false, true);
+        platform.EnqueueFrameInput(mousePosition: new Vector2(640f, 320f), leftMousePressed: true);
+        platform.EnqueueFrameInput(mousePosition: Vector2.Zero, pressedKeys: [KeyboardKey.B]);
+        platform.EnqueueFrameInput(mousePosition: Vector2.Zero);
+
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            platform,
+            new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 777));
 
         app.Run();
 
-        Assert.Equal("Очередь бота заполнена.", (string)GetPrivateField(app, "_botMenuMessage")!);
+        Assert.True(platform.EnableCursorCalled);
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Наручный модуль бота", StringComparison.Ordinal));
     }
 
-    [Fact(DisplayName = "Run пишет сообщение о переполненной очереди для команды строительства")]
-    public void GameApp_Run_ShowsQueueFullMessage_ForBuild()
+    [Fact(DisplayName = "GameApp покрывает ранние return ветки наручного модуля")]
+    public void GameApp_BotDeviceEarlyReturnBranches_Work()
     {
-        var app = CreateBotMenuApp(out var platform);
-        var start = GetRect(app, "GetStartButtonRect");
-        var botGather = GetRect(app, "GetBotGatherButtonRect");
-        var botBuild = GetRect(app, "GetBotBuildButtonRect");
+        var (app, platform, _, _, companion, device, _) = CreatePlayingBotDeviceApp();
 
-        platform.EnqueueFrameInput(Center(start), leftMousePressed: true);
-        platform.EnqueueFrameInput(Vector2.Zero, pressedKeys: [KeyboardKey.Escape]);
-        platform.EnqueueFrameInput(Center(botBuild), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botGather), leftMousePressed: true);
-        platform.EnqueueFrameInput(Center(botBuild), leftMousePressed: true);
-        platform.EnqueueWindowShouldClose(false, false, false, false, false, true);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "PauseMenu"));
+        InvokePrivate(app, "OpenBotDevice");
+        Assert.False(device.IsOpen);
 
-        app.Run();
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+        SetPrivateField(app, "_companion", null);
+        InvokePrivate(app, "OpenBotDevice");
+        Assert.False(device.IsOpen);
 
-        Assert.Equal("Очередь бота заполнена.", (string)GetPrivateField(app, "_botMenuMessage")!);
+        InvokePrivate(app, "CloseBotDevice");
+        Assert.False(platform.DisableCursorCalled);
+
+        SetDeviceAmount(device, "9");
+        device.SetMessage("before");
+        InvokePrivate(app, "QueueGatherFromDevice");
+        Assert.Equal("before", device.Message);
+
+        device.OpenBuildHouse();
+        InvokePrivate(app, "QueueBuildFromDevice");
+        Assert.Equal("before", device.Message);
+
+        device.OpenMain();
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_companion", null);
+        InvokePrivate(app, "HandleBotDeviceInput");
+
+        SetPrivateField(app, "_companion", companion);
+        device.Close();
+        InvokePrivate(app, "HandleBotDeviceInput");
+
+        device.OpenMain();
+        platform.SetPressedKeys();
+        Assert.False((bool)InvokePrivate(app, "HandlePlayingModeHotkeys")!);
+
+        platform.SetPressedKeys(KeyboardKey.B);
+        Assert.True((bool)InvokePrivate(app, "HandlePlayingModeHotkeys")!);
+        Assert.False(device.IsOpen);
+    }
+
+    [Fact(DisplayName = "GameApp покрывает Backspace, Enter и валидацию количества в наручном модуле")]
+    public void GameApp_HandleBotDeviceInput_CoversKeyboardAndValidationBranches()
+    {
+        var (app, platform, _, _, companion, device, _) = CreatePlayingBotDeviceApp();
+
+        device.OpenGatherResource();
+
+        SetDeviceAmount(device, string.Empty);
+        platform.SetPressedKeys(KeyboardKey.Backspace);
+        InvokePrivate(app, "HandleBotDeviceInput");
+
+        SetDeviceAmount(device, "18");
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal("1", device.AmountText);
+        Assert.Contains("Количество: 1", device.Message, StringComparison.Ordinal);
+
+        SetDeviceAmount(device, "0");
+        platform.SetPressedKeys(KeyboardKey.Enter);
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal("Введите количество больше нуля.", device.Message);
+
+        SetDeviceAmount(device, "5");
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.NotNull(companion.ActiveCommand);
+        Assert.Contains("x5", device.Message, StringComparison.Ordinal);
+
+        device.OpenBuildHouse();
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.NotNull(companion.QueuedCommand);
+    }
+
+    [Fact(DisplayName = "GameApp покрывает выбор ресурсов и закрытие наручного модуля")]
+    public void GameApp_HandleBotDeviceInput_CoversResourceButtonsAndCloseAction()
+    {
+        var (app, platform, _, _, _, device, _) = CreatePlayingBotDeviceApp();
+
+        device.OpenGatherResource();
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceWoodButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal(BotResourceType.Wood, device.SelectedResource);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceStoneButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal(BotResourceType.Stone, device.SelectedResource);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceDirtButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal(BotResourceType.Dirt, device.SelectedResource);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceLeavesButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        Assert.Equal(BotResourceType.Leaves, device.SelectedResource);
+        Assert.Contains("Листва", device.Message, StringComparison.Ordinal);
+
+        device.BackToMain();
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceCloseButtonRect"));
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        Assert.False(device.IsOpen);
+        Assert.True(platform.DisableCursorCalled);
+    }
+
+    [Fact(DisplayName = "GameApp покрывает ReadBotDeviceAction, DrawFrame и DrawBotDeviceOverlay для main/build/early-return")]
+    public void GameApp_BotDeviceActionAndOverlayBranches_Work()
+    {
+        var (app, platform, world, player, companion, device, _) = CreatePlayingBotDeviceApp();
+
+        Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
+
+        var drawnBefore = platform.DrawnUiTexts.Count;
+        InvokePrivate(app, "DrawBotDeviceOverlay");
+        Assert.Equal(drawnBefore, platform.DrawnUiTexts.Count);
+
+        device.OpenMain();
+        SetPrivateField(app, "_companion", null);
+        InvokePrivate(app, "DrawBotDeviceOverlay");
+
+        SetPrivateField(app, "_companion", companion);
+        platform.MousePosition = Vector2.Zero;
+        platform.LeftMousePressed = false;
+        Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
+
+        var view = CameraViewBuilder.Build(player, world, AIG.Game.Core.CameraMode.FirstPerson, 0f);
+        InvokePrivate(app, "DrawFrame", null, view);
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Убрать устройство", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Клавиша B: открыть/убрать модуль", StringComparison.Ordinal));
+
+        device.OpenBuildHouse();
+        Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
+        InvokePrivate(app, "DrawBotDeviceOverlay");
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Строительство", StringComparison.Ordinal));
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Шаблон: Дом S", StringComparison.Ordinal));
+
+        _ = GetRect(app, "GetBotDeviceCloseButtonRect");
     }
 
     private static void WarmWorld(WorldMap world, Vector3 position)
@@ -1656,6 +2067,24 @@ public sealed class BotTests
         return new GameApp(config, platform, world);
     }
 
+    private static (GameApp App, FakeGamePlatform Platform, WorldMap World, PlayerController Player, CompanionBot Companion, BotWristDeviceState Device, BotWristDeviceVisualState Visual) CreatePlayingBotDeviceApp()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var platform = new FakeGamePlatform();
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.02f, 8.5f));
+        var companion = new CompanionBot(config, new Vector3(10.5f, 2.02f, 8.5f));
+        var device = (BotWristDeviceState)GetPrivateField(app, "_botDevice")!;
+        var visual = (BotWristDeviceVisualState)GetPrivateField(app, "_botDeviceVisual")!;
+
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_companion", companion);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+
+        return (app, platform, world, player, companion, device, visual);
+    }
+
     private static void StepBot(CompanionBot bot, WorldMap world, Vector3 playerPosition, int frames)
     {
         for (var i = 0; i < frames; i++)
@@ -1671,6 +2100,13 @@ public sealed class BotTests
         var nested = owner.GetNestedType(nestedTypeName, BindingFlags.NonPublic);
         Assert.NotNull(nested);
         return Enum.Parse(nested!, value);
+    }
+
+    private static object ParseInternalEnum(string fullTypeName, string value)
+    {
+        var enumType = typeof(GameApp).Assembly.GetType(fullTypeName);
+        Assert.NotNull(enumType);
+        return Enum.Parse(enumType!, value);
     }
 
     private static object? GetPrivateField(object target, string fieldName)
@@ -1690,6 +2126,13 @@ public sealed class BotTests
     private static object? InvokePrivate(object target, string methodName, params object?[]? args)
     {
         var method = FindPrivateMethod(target.GetType(), methodName, BindingFlags.Instance | BindingFlags.NonPublic, args);
+        Assert.NotNull(method);
+        return method!.Invoke(target, args);
+    }
+
+    private static object? InvokePublic(object target, string methodName, params object?[]? args)
+    {
+        var method = FindPrivateMethod(target.GetType(), methodName, BindingFlags.Instance | BindingFlags.Public, args);
         Assert.NotNull(method);
         return method!.Invoke(target, args);
     }
@@ -1732,6 +2175,13 @@ public sealed class BotTests
     private static Vector2 Center((int X, int Y, int W, int H) rect)
     {
         return new Vector2(rect.X + rect.W / 2f, rect.Y + rect.H / 2f);
+    }
+
+    private static void SetDeviceAmount(BotWristDeviceState device, string amount)
+    {
+        typeof(BotWristDeviceState)
+            .GetField("<AmountText>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(device, amount);
     }
 
     private static object CreateNavigationGoal(string purposeName, int x, int y, int z, int radius, HouseBlueprint? blueprint)

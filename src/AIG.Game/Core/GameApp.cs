@@ -15,12 +15,13 @@ public class GameApp : IGameRunner
     private const int MenuButtonWidth = 360;
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
-    private const int BotPanelWidth = 390;
-    private const int BotButtonHeight = 46;
-    private const int BotButtonsGap = 12;
+    private const int BotDevicePanelWidth = 430;
+    private const int BotDeviceButtonHeight = 48;
+    private const int BotDeviceButtonsGap = 12;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
     private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
     private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
+    private readonly record struct WristDevicePose(float RaiseBlend, float TapBlend);
 
     private enum WorldLodTier : byte
     {
@@ -45,7 +46,8 @@ public class GameApp : IGameRunner
     private readonly GraphicsSettings _graphics;
     private readonly PlayerVisualState _playerVisual = new();
     private readonly PlayerVisualState _companionVisual = new();
-    private readonly BotCommandSelection _botMenuSelection = new();
+    private readonly BotWristDeviceState _botDevice = new();
+    private readonly BotWristDeviceVisualState _botDeviceVisual = new();
 
     private PlayerController _player = null!;
     private CompanionBot? _companion;
@@ -67,7 +69,6 @@ public class GameApp : IGameRunner
     private bool _sceneMetricsEnabled;
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
-    private string _botMenuMessage = string.Empty;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -87,6 +88,22 @@ public class GameApp : IGameRunner
         MainMenu,
         Playing,
         PauseMenu
+    }
+
+    private enum BotDeviceAction
+    {
+        None = 0,
+        OpenGatherResource,
+        OpenBuildHouse,
+        BackToMain,
+        QueueGather,
+        QueueBuildHouse,
+        CancelCommands,
+        CloseDevice,
+        SelectWood,
+        SelectStone,
+        SelectDirt,
+        SelectLeaves
     }
 
     public void Run()
@@ -128,27 +145,36 @@ public class GameApp : IGameRunner
 
             while (!shouldExit && !_platform.WindowShouldClose())
             {
-                if (_state == AppState.Playing && _platform.IsKeyPressed(KeyboardKey.Escape))
-                {
-                    _state = AppState.PauseMenu;
-                    _platform.EnableCursor();
-                }
-
                 var delta = _platform.GetFrameTime();
                 _lastFrameMs = delta * 1000f;
                 AdvanceRuntime(delta);
                 var cameraBob = 0f;
+                _botDeviceVisual.Update(_state == AppState.Playing && _botDevice.IsOpen, delta);
 
                 if (_state == AppState.Playing)
                 {
-                    if (_platform.IsKeyPressed(KeyboardKey.V) || _platform.IsKeyPressed(KeyboardKey.F5))
+                    if (HandlePlayingModeHotkeys())
+                    {
+                        currentHit = null;
+                    }
+
+                    if (!_botDevice.IsOpen && (_platform.IsKeyPressed(KeyboardKey.V) || _platform.IsKeyPressed(KeyboardKey.F5)))
                     {
                         _cameraMode = CameraViewBuilder.Toggle(_cameraMode);
                     }
 
-                    HandleHotbarInput();
+                    if (_botDevice.IsOpen)
+                    {
+                        HandleBotDeviceInput();
+                    }
+                    else
+                    {
+                        HandleHotbarInput();
+                    }
 
-                    var input = ReadInput(_platform);
+                    var input = _botDevice.IsOpen
+                        ? default
+                        : ReadInput(_platform);
                     _player.Update(_world, input, delta);
                     _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
                     UpdateWorldStreaming(force: false);
@@ -164,13 +190,15 @@ public class GameApp : IGameRunner
 
                     currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
 
-                    currentHit = VoxelRaycaster.Raycast(_world, currentView.RayOrigin, currentView.RayDirection, _config.InteractionDistance);
-                    if (_platform.IsMouseButtonPressed(MouseButton.Left))
+                    currentHit = _botDevice.IsOpen
+                        ? null
+                        : VoxelRaycaster.Raycast(_world, currentView.RayOrigin, currentView.RayDirection, _config.InteractionDistance);
+                    if (!_botDevice.IsOpen && _platform.IsMouseButtonPressed(MouseButton.Left))
                     {
                         BlockInteraction.TryBreak(_world, currentHit);
                     }
 
-                    if (_platform.IsMouseButtonPressed(MouseButton.Right))
+                    if (!_botDevice.IsOpen && _platform.IsMouseButtonPressed(MouseButton.Right))
                     {
                         BlockInteraction.TryPlace(_world, currentHit, _hotbar[_selectedHotbarIndex], BlockCenterIntersectsPlayer);
                     }
@@ -201,35 +229,6 @@ public class GameApp : IGameRunner
                             break;
                         case MenuAction.ToggleReliefContours:
                             _graphics.ToggleReliefContours();
-                            break;
-                        case MenuAction.CycleBotResource:
-                            _botMenuSelection.CycleResource();
-                            _botMenuMessage = $"Ресурс: {_botMenuSelection.SelectedResource.GetLabel()}";
-                            break;
-                        case MenuAction.CycleBotAmount:
-                            _botMenuSelection.CycleAmount();
-                            _botMenuMessage = $"Количество: {_botMenuSelection.SelectedAmount}";
-                            break;
-                        case MenuAction.QueueBotGather:
-                            if (_companion is not null)
-                            {
-                                _botMenuMessage = _companion.Enqueue(BotCommand.Gather(_botMenuSelection.SelectedResource, _botMenuSelection.SelectedAmount))
-                                    ? "Команда на сбор добавлена."
-                                    : "Очередь бота заполнена.";
-                            }
-                            break;
-                        case MenuAction.QueueBotBuildHouse:
-                            if (_companion is not null)
-                            {
-                                var blueprint = HouseBlueprint.CreateCabinS(_world, _player.Position, _player.LookDirection);
-                                _botMenuMessage = _companion.Enqueue(BotCommand.BuildHouse(blueprint))
-                                    ? $"Строю: {blueprint.Name}"
-                                    : "Очередь бота заполнена.";
-                            }
-                            break;
-                        case MenuAction.CancelBotCommands:
-                            _companion!.CancelAll();
-                            _botMenuMessage = "Команды бота сброшены.";
                             break;
                         case MenuAction.Exit:
                             shouldExit = true;
@@ -532,6 +531,287 @@ public class GameApp : IGameRunner
         _selectedHotbarIndex = SelectHotbarIndex(_selectedHotbarIndex, _platform, _hotbar.Length);
     }
 
+    private bool HandlePlayingModeHotkeys()
+    {
+        if (_botDevice.IsOpen)
+        {
+            if (_platform.IsKeyPressed(KeyboardKey.B) || _platform.IsKeyPressed(KeyboardKey.Escape))
+            {
+                CloseBotDevice();
+                return true;
+            }
+
+            return false;
+        }
+
+        if (_platform.IsKeyPressed(KeyboardKey.B))
+        {
+            OpenBotDevice();
+            return true;
+        }
+
+        if (_platform.IsKeyPressed(KeyboardKey.Escape))
+        {
+            _state = AppState.PauseMenu;
+            _platform.EnableCursor();
+            return true;
+        }
+
+        return false;
+    }
+
+    private void OpenBotDevice()
+    {
+        if (_state != AppState.Playing || _companion is null)
+        {
+            return;
+        }
+
+        _botDevice.OpenMain();
+        _platform.EnableCursor();
+    }
+
+    private void CloseBotDevice()
+    {
+        if (!_botDevice.IsOpen)
+        {
+            return;
+        }
+
+        _botDevice.Close();
+        if (_state == AppState.Playing)
+        {
+            _platform.DisableCursor();
+        }
+    }
+
+    private void HandleBotDeviceInput()
+    {
+        if (_companion is null || !_botDevice.IsOpen)
+        {
+            return;
+        }
+
+        HandleBotDeviceDigitInput();
+
+        if (_botDevice.Screen == BotWristDeviceScreen.GatherResource && _platform.IsKeyPressed(KeyboardKey.Enter))
+        {
+            TriggerBotDeviceTap();
+            QueueGatherFromDevice();
+            return;
+        }
+
+        if (_botDevice.Screen == BotWristDeviceScreen.BuildHouse && _platform.IsKeyPressed(KeyboardKey.Enter))
+        {
+            TriggerBotDeviceTap();
+            QueueBuildFromDevice();
+            return;
+        }
+
+        switch (ReadBotDeviceAction())
+        {
+            case BotDeviceAction.OpenGatherResource:
+                _botDevice.OpenGatherResource();
+                _botDevice.SetMessage("Выберите ресурс и введите количество.");
+                TriggerBotDeviceTap();
+                break;
+            case BotDeviceAction.OpenBuildHouse:
+                _botDevice.OpenBuildHouse();
+                _botDevice.SetMessage("Подтвердите строительство Дом S.");
+                TriggerBotDeviceTap();
+                break;
+            case BotDeviceAction.BackToMain:
+                _botDevice.BackToMain();
+                _botDevice.SetMessage(string.Empty);
+                TriggerBotDeviceTap();
+                break;
+            case BotDeviceAction.QueueGather:
+                TriggerBotDeviceTap();
+                QueueGatherFromDevice();
+                break;
+            case BotDeviceAction.QueueBuildHouse:
+                TriggerBotDeviceTap();
+                QueueBuildFromDevice();
+                break;
+            case BotDeviceAction.CancelCommands:
+                TriggerBotDeviceTap();
+                _companion.CancelAll();
+                _botDevice.SetMessage("Команды бота сброшены.");
+                break;
+            case BotDeviceAction.CloseDevice:
+                TriggerBotDeviceTap();
+                CloseBotDevice();
+                break;
+            case BotDeviceAction.SelectWood:
+                SelectDeviceResource(BotResourceType.Wood);
+                break;
+            case BotDeviceAction.SelectStone:
+                SelectDeviceResource(BotResourceType.Stone);
+                break;
+            case BotDeviceAction.SelectDirt:
+                SelectDeviceResource(BotResourceType.Dirt);
+                break;
+            case BotDeviceAction.SelectLeaves:
+                SelectDeviceResource(BotResourceType.Leaves);
+                break;
+        }
+    }
+
+    private void HandleBotDeviceDigitInput()
+    {
+        if (_botDevice.Screen != BotWristDeviceScreen.GatherResource)
+        {
+            return;
+        }
+
+        if (_platform.IsKeyPressed(KeyboardKey.Backspace))
+        {
+            if (_botDevice.BackspaceAmount())
+            {
+                _botDevice.SetMessage($"Количество: {_botDevice.AmountText}");
+                TriggerBotDeviceTap();
+            }
+        }
+
+        for (var digit = 0; digit <= 9; digit++)
+        {
+            var key = (KeyboardKey)((int)KeyboardKey.Zero + digit);
+            if (!_platform.IsKeyPressed(key))
+            {
+                continue;
+            }
+
+            if (_botDevice.AppendDigit(digit))
+            {
+                _botDevice.SetMessage($"Количество: {_botDevice.AmountText}");
+                TriggerBotDeviceTap();
+            }
+        }
+    }
+
+    private void SelectDeviceResource(BotResourceType resource)
+    {
+        _botDevice.SelectResource(resource);
+        _botDevice.SetMessage($"Ресурс: {resource.GetLabel()}");
+        TriggerBotDeviceTap();
+    }
+
+    private void QueueGatherFromDevice()
+    {
+        if (_companion is null)
+        {
+            return;
+        }
+
+        if (!_botDevice.TryGetAmount(out var amount))
+        {
+            _botDevice.SetMessage("Введите количество больше нуля.");
+            return;
+        }
+
+        _botDevice.SetMessage(_companion.Enqueue(BotCommand.Gather(_botDevice.SelectedResource, amount))
+            ? $"Сбор: {_botDevice.SelectedResource.GetLabel()} x{amount}"
+            : "Очередь бота заполнена.");
+    }
+
+    private void QueueBuildFromDevice()
+    {
+        if (_companion is null)
+        {
+            return;
+        }
+
+        var blueprint = HouseBlueprint.CreateCabinS(_world, _player.Position, _player.LookDirection);
+        _botDevice.SetMessage(_companion.Enqueue(BotCommand.BuildHouse(blueprint))
+            ? $"Строю: {blueprint.Name}"
+            : "Очередь бота заполнена.");
+    }
+
+    private void TriggerBotDeviceTap()
+    {
+        _botDeviceVisual.TriggerTap();
+    }
+
+    private BotDeviceAction ReadBotDeviceAction()
+    {
+        if (!_botDevice.IsOpen)
+        {
+            return BotDeviceAction.None;
+        }
+
+        if (_botDevice.Screen == BotWristDeviceScreen.Main)
+        {
+            if (IsButtonClicked(GetBotDeviceGatherButtonRect()))
+            {
+                return BotDeviceAction.OpenGatherResource;
+            }
+
+            if (IsButtonClicked(GetBotDeviceBuildButtonRect()))
+            {
+                return BotDeviceAction.OpenBuildHouse;
+            }
+
+            if (IsButtonClicked(GetBotDeviceCancelButtonRect()))
+            {
+                return BotDeviceAction.CancelCommands;
+            }
+
+            if (IsButtonClicked(GetBotDeviceCloseButtonRect()))
+            {
+                return BotDeviceAction.CloseDevice;
+            }
+
+            return BotDeviceAction.None;
+        }
+
+        if (_botDevice.Screen == BotWristDeviceScreen.GatherResource)
+        {
+            if (IsButtonClicked(GetBotDeviceBackButtonRect()))
+            {
+                return BotDeviceAction.BackToMain;
+            }
+
+            if (IsButtonClicked(GetBotDeviceWoodButtonRect()))
+            {
+                return BotDeviceAction.SelectWood;
+            }
+
+            if (IsButtonClicked(GetBotDeviceStoneButtonRect()))
+            {
+                return BotDeviceAction.SelectStone;
+            }
+
+            if (IsButtonClicked(GetBotDeviceDirtButtonRect()))
+            {
+                return BotDeviceAction.SelectDirt;
+            }
+
+            if (IsButtonClicked(GetBotDeviceLeavesButtonRect()))
+            {
+                return BotDeviceAction.SelectLeaves;
+            }
+
+            if (IsButtonClicked(GetBotDeviceConfirmButtonRect()))
+            {
+                return BotDeviceAction.QueueGather;
+            }
+
+            return BotDeviceAction.None;
+        }
+
+        if (IsButtonClicked(GetBotDeviceBackButtonRect()))
+        {
+            return BotDeviceAction.BackToMain;
+        }
+
+        if (IsButtonClicked(GetBotDeviceConfirmButtonRect()))
+        {
+            return BotDeviceAction.QueueBuildHouse;
+        }
+
+        return BotDeviceAction.None;
+    }
+
     private PlayerInput ReadAutoBotInput(float deltaTime, ref AutoBotState state)
     {
         var forward = ToHorizontalForward(_player.LookDirection);
@@ -628,34 +908,6 @@ public class GameApp : IGameRunner
             return MenuAction.ToggleReliefContours;
         }
 
-        if (_state != AppState.MainMenu)
-        {
-            if (IsButtonClicked(GetBotResourceButtonRect()))
-            {
-                return MenuAction.CycleBotResource;
-            }
-
-            if (IsButtonClicked(GetBotAmountButtonRect()))
-            {
-                return MenuAction.CycleBotAmount;
-            }
-
-            if (IsButtonClicked(GetBotGatherButtonRect()))
-            {
-                return MenuAction.QueueBotGather;
-            }
-
-            if (IsButtonClicked(GetBotBuildButtonRect()))
-            {
-                return MenuAction.QueueBotBuildHouse;
-            }
-
-            if (IsButtonClicked(GetBotCancelButtonRect()))
-            {
-                return MenuAction.CancelBotCommands;
-            }
-        }
-
         return MenuAction.None;
     }
 
@@ -690,8 +942,12 @@ public class GameApp : IGameRunner
             _platform.EndMode3D();
             DrawScreenFogOverlay(view);
 
-            DrawHud(_state == AppState.Playing);
+            DrawHud(_state == AppState.Playing && !_botDevice.IsOpen);
             DrawHotbar();
+            if (_state == AppState.Playing && _botDevice.IsOpen)
+            {
+                DrawBotDeviceOverlay();
+            }
         }
 
         if (_state != AppState.Playing)
@@ -1603,7 +1859,8 @@ public class GameApp : IGameRunner
             new Color(88, 145, 205, 255),
             new Color(64, 112, 176, 255),
             new Color(74, 87, 122, 255),
-            new Color(232, 200, 170, 255));
+            new Color(232, 200, 170, 255),
+            _botDevice.IsOpen ? new WristDevicePose(_botDeviceVisual.RaiseBlend, _botDeviceVisual.TapBlend) : null);
     }
 
     private void DrawCompanionAvatar()
@@ -1620,10 +1877,19 @@ public class GameApp : IGameRunner
             new Color(110, 171, 96, 255),
             new Color(84, 141, 74, 255),
             new Color(86, 92, 74, 255),
-            new Color(228, 196, 164, 255));
+            new Color(228, 196, 164, 255),
+            null);
     }
 
-    private void DrawHumanoidAvatar(Vector3 root, float yaw, PlayerVisualState visual, Color torsoColor, Color armColor, Color legColor, Color skinColor)
+    private void DrawHumanoidAvatar(
+        Vector3 root,
+        float yaw,
+        PlayerVisualState visual,
+        Color torsoColor,
+        Color armColor,
+        Color legColor,
+        Color skinColor,
+        WristDevicePose? devicePose)
     {
         var forward = new Vector3(MathF.Sin(yaw), 0f, MathF.Cos(yaw));
         forward = Vector3.Normalize(forward);
@@ -1638,6 +1904,14 @@ public class GameApp : IGameRunner
         var rightArm = root + Vector3.UnitY * (1.12f + armLift) + right * 0.38f - forward * walkSwing;
         var leftLeg = root + Vector3.UnitY * 0.44f - right * 0.16f - forward * walkSwing;
         var rightLeg = root + Vector3.UnitY * 0.44f + right * 0.16f + forward * walkSwing;
+        Vector3? wristDevice = null;
+
+        if (devicePose is WristDevicePose pose)
+        {
+            leftArm = root + Vector3.UnitY * (1.16f + 0.18f * pose.RaiseBlend) - right * (0.34f - 0.16f * pose.RaiseBlend) + forward * (0.04f + 0.32f * pose.RaiseBlend);
+            rightArm = root + Vector3.UnitY * (1.08f + 0.08f * pose.RaiseBlend) + right * (0.34f - 0.10f * pose.TapBlend) + forward * (0.02f + 0.10f * pose.RaiseBlend + 0.34f * pose.TapBlend);
+            wristDevice = leftArm + forward * 0.18f + right * 0.10f + Vector3.UnitY * 0.02f;
+        }
 
         _platform.DrawCube(torso, 0.6f, 0.9f, 0.36f, torsoColor);
         _platform.DrawCube(head, 0.46f, 0.46f, 0.46f, skinColor);
@@ -1645,6 +1919,11 @@ public class GameApp : IGameRunner
         _platform.DrawCube(rightArm, 0.2f, 0.72f, 0.2f, armColor);
         _platform.DrawCube(leftLeg, 0.24f, 0.74f, 0.24f, legColor);
         _platform.DrawCube(rightLeg, 0.24f, 0.74f, 0.24f, legColor);
+        if (wristDevice is Vector3 devicePosition)
+        {
+            _platform.DrawCube(devicePosition, 0.26f, 0.18f, 0.18f, new Color(46, 62, 70, 255));
+            _platform.DrawCube(devicePosition + forward * 0.08f, 0.02f, 0.20f, 0.18f, new Color(118, 255, 228, 155));
+        }
         _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.74f, 0.02f, 0.74f, new Color(0, 0, 0, 35));
     }
 
@@ -1663,6 +1942,22 @@ public class GameApp : IGameRunner
         var up = Vector3.Normalize(Vector3.Cross(right, forward));
 
         var bob = MathF.Sin(_playerVisual.WalkPhase * 2f) * 0.03f * _playerVisual.WalkBlend * _graphics.ViewBobScale;
+        if (_botDevice.IsOpen)
+        {
+            var raise = _botDeviceVisual.RaiseBlend;
+            var tap = _botDeviceVisual.TapBlend;
+            var deviceHand = camera.Position + forward * (0.46f + 0.08f * raise) - right * (0.12f - 0.22f * raise) - up * (0.42f - 0.20f * raise) + up * bob;
+            var deviceBody = deviceHand + forward * 0.18f + right * 0.09f;
+            var hologram = deviceBody + forward * 0.10f + up * 0.06f;
+            var tapHand = camera.Position + forward * (0.56f + 0.10f * raise + 0.08f * tap) + right * (0.22f - 0.18f * tap) - up * (0.36f - 0.08f * raise) + up * bob;
+
+            _platform.DrawCube(deviceHand, 0.16f, 0.28f, 0.18f, new Color(232, 202, 172, 255));
+            _platform.DrawCube(deviceBody, 0.24f, 0.17f, 0.16f, new Color(50, 68, 76, 255));
+            _platform.DrawCube(hologram, 0.02f, 0.22f, 0.18f, new Color(118, 255, 228, 150));
+            _platform.DrawCube(tapHand, 0.15f, 0.24f, 0.17f, new Color(232, 202, 172, 255));
+            return;
+        }
+
         var hand = camera.Position + forward * 0.72f + right * 0.34f - up * 0.28f + up * bob;
         var held = hand + forward * 0.16f + right * 0.08f;
 
@@ -1921,10 +2216,6 @@ public class GameApp : IGameRunner
         _platform.DrawUiText(fogLabel, new Vector2(fog.X + 30, fog.Y + 16), 26, 1f, Color.Black);
         _platform.DrawUiText(reliefLabel, new Vector2(relief.X + 30, relief.Y + 16), 26, 1f, Color.Black);
 
-        if (_state != AppState.MainMenu && _companion is not null)
-        {
-            DrawBotCommandsPanel();
-        }
     }
 
     private (int X, int Y, int W, int H) GetStartButtonRect()
@@ -1969,75 +2260,149 @@ public class GameApp : IGameRunner
         return (x, y, MenuButtonWidth, MenuButtonHeight);
     }
 
-    private void DrawBotCommandsPanel()
+    private void DrawBotDeviceOverlay()
     {
-        var panel = GetBotPanelRect();
-        var resource = GetBotResourceButtonRect();
-        var amount = GetBotAmountButtonRect();
-        var gather = GetBotGatherButtonRect();
-        var build = GetBotBuildButtonRect();
-        var cancel = GetBotCancelButtonRect();
-
-        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(245, 246, 249, 236));
-        _platform.DrawUiText("Бот-команды", new Vector2(panel.X + 26, panel.Y + 20), 34, 1f, Color.Black);
-        _platform.DrawUiText($"Статус: {_companion!.Status.GetLabel()}", new Vector2(panel.X + 26, panel.Y + 62), 20, 1f, Color.DarkGray);
-        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 26, panel.Y + 88), 18, 1f, Color.DarkGray);
-        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 26, panel.Y + 110), 18, 1f, Color.DarkGray);
-        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 26, panel.Y + 132), 18, 1f, Color.DarkGray);
-
-        _platform.DrawRectangle(resource.X, resource.Y, resource.W, resource.H, new Color(228, 233, 241, 245));
-        _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(228, 233, 241, 245));
-        _platform.DrawRectangle(gather.X, gather.Y, gather.W, gather.H, new Color(210, 232, 210, 245));
-        _platform.DrawRectangle(build.X, build.Y, build.W, build.H, new Color(194, 220, 255, 245));
-        _platform.DrawRectangle(cancel.X, cancel.Y, cancel.W, cancel.H, new Color(220, 98, 98, 235));
-
-        _platform.DrawUiText($"Ресурс: {_botMenuSelection.SelectedResource.GetLabel()}", new Vector2(resource.X + 18, resource.Y + 12), 24, 1f, Color.Black);
-        _platform.DrawUiText($"Количество: {_botMenuSelection.SelectedAmount}", new Vector2(amount.X + 18, amount.Y + 12), 24, 1f, Color.Black);
-        _platform.DrawUiText("Собрать", new Vector2(gather.X + 120, gather.Y + 12), 24, 1f, Color.Black);
-        _platform.DrawUiText("Построить дом S", new Vector2(build.X + 74, build.Y + 12), 24, 1f, Color.Black);
-        _platform.DrawUiText("Отменить команды", new Vector2(cancel.X + 54, cancel.Y + 12), 24, 1f, Color.White);
-
-        if (!string.IsNullOrWhiteSpace(_botMenuMessage))
+        if (_companion is null || !_botDevice.IsOpen)
         {
-            _platform.DrawUiText(_botMenuMessage, new Vector2(panel.X + 26, panel.Y + panel.H - 34), 18, 1f, Color.DarkGray);
+            return;
+        }
+
+        var panel = GetBotDevicePanelRect();
+        var accent = new Color(118, 255, 228, 190);
+        var glow = new Color(66, 126, 140, 210);
+        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(8, 28, 36, 208));
+        _platform.DrawRectangle(panel.X + 4, panel.Y + 4, panel.W - 8, 56, new Color(17, 49, 58, 220));
+        _platform.DrawUiText("Наручный модуль бота", new Vector2(panel.X + 20, panel.Y + 18), 28, 1f, accent);
+        _platform.DrawUiText("Проекция активна", new Vector2(panel.X + 22, panel.Y + 58), 18, 1f, new Color(170, 224, 235, 255));
+        _platform.DrawUiText($"Статус: {_companion.Status.GetLabel()}", new Vector2(panel.X + 22, panel.Y + 88), 18, 1f, Color.White);
+        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 22, panel.Y + 112), 18, 1f, new Color(210, 240, 246, 255));
+        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 22, panel.Y + 134), 18, 1f, new Color(210, 240, 246, 255));
+        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 22, panel.Y + 156), 18, 1f, new Color(210, 240, 246, 255));
+
+        switch (_botDevice.Screen)
+        {
+            case BotWristDeviceScreen.Main:
+                DrawBotDeviceButton(GetBotDeviceGatherButtonRect(), "Сбор ресурсов", glow, Color.White);
+                DrawBotDeviceButton(GetBotDeviceBuildButtonRect(), "Построить Дом S", new Color(76, 121, 173, 220), Color.White);
+                DrawBotDeviceButton(GetBotDeviceCancelButtonRect(), "Сбросить команды", new Color(168, 80, 80, 220), Color.White);
+                DrawBotDeviceButton(GetBotDeviceCloseButtonRect(), "Убрать устройство", new Color(48, 73, 79, 220), Color.White);
+                _platform.DrawUiText("Клавиша B: открыть/убрать модуль", new Vector2(panel.X + 22, panel.Y + 352), 18, 1f, accent);
+                break;
+            case BotWristDeviceScreen.GatherResource:
+                _platform.DrawUiText("Сбор ресурсов", new Vector2(panel.X + 22, panel.Y + 188), 26, 1f, accent);
+                DrawBotDeviceResourceButton(GetBotDeviceWoodButtonRect(), "Дерево", BotResourceType.Wood);
+                DrawBotDeviceResourceButton(GetBotDeviceStoneButtonRect(), "Камень", BotResourceType.Stone);
+                DrawBotDeviceResourceButton(GetBotDeviceDirtButtonRect(), "Земля", BotResourceType.Dirt);
+                DrawBotDeviceResourceButton(GetBotDeviceLeavesButtonRect(), "Листва", BotResourceType.Leaves);
+                var amount = GetBotDeviceAmountRect();
+                _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(14, 42, 50, 230));
+                _platform.DrawUiText($"Количество: {_botDevice.AmountText}", new Vector2(amount.X + 18, amount.Y + 12), 24, 1f, Color.White);
+                _platform.DrawUiText("Цифры: 0-9, Backspace, Enter", new Vector2(amount.X + 18, amount.Y + 44), 16, 1f, accent);
+                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Подтвердить сбор", glow, Color.White);
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 220), Color.White);
+                break;
+            case BotWristDeviceScreen.BuildHouse:
+                _platform.DrawUiText("Строительство", new Vector2(panel.X + 22, panel.Y + 188), 26, 1f, accent);
+                _platform.DrawUiText("Шаблон: Дом S", new Vector2(panel.X + 22, panel.Y + 224), 22, 1f, Color.White);
+                _platform.DrawUiText("Бот сам подготовит площадку, доберет ресурсы и начнет стройку.", new Vector2(panel.X + 22, panel.Y + 258), 18, 1f, new Color(210, 240, 246, 255));
+                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Запустить стройку", new Color(76, 121, 173, 220), Color.White);
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 220), Color.White);
+                break;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_botDevice.Message))
+        {
+            _platform.DrawUiText(_botDevice.Message, new Vector2(panel.X + 22, panel.Y + panel.H - 30), 18, 1f, accent);
         }
     }
 
-    private (int X, int Y, int W, int H) GetBotPanelRect()
+    private void DrawBotDeviceButton((int X, int Y, int W, int H) rect, string label, Color background, Color text)
     {
-        var x = _platform.GetScreenWidth() - BotPanelWidth - 36;
-        var y = 96;
-        return (x, y, BotPanelWidth, 382);
+        _platform.DrawRectangle(rect.X, rect.Y, rect.W, rect.H, background);
+        _platform.DrawUiText(label, new Vector2(rect.X + 18, rect.Y + 13), 24, 1f, text);
     }
 
-    private (int X, int Y, int W, int H) GetBotResourceButtonRect()
+    private void DrawBotDeviceResourceButton((int X, int Y, int W, int H) rect, string label, BotResourceType resource)
     {
-        var panel = GetBotPanelRect();
-        return (panel.X + 20, panel.Y + 166, panel.W - 40, BotButtonHeight);
+        var isSelected = _botDevice.SelectedResource == resource;
+        var fill = isSelected
+            ? new Color(118, 255, 228, 225)
+            : new Color(15, 55, 65, 225);
+        var text = isSelected ? Color.Black : Color.White;
+        DrawBotDeviceButton(rect, label, fill, text);
     }
 
-    private (int X, int Y, int W, int H) GetBotAmountButtonRect()
+    private (int X, int Y, int W, int H) GetBotDevicePanelRect()
     {
-        var resource = GetBotResourceButtonRect();
-        return (resource.X, resource.Y + BotButtonHeight + BotButtonsGap, resource.W, BotButtonHeight);
+        var x = _platform.GetScreenWidth() - BotDevicePanelWidth - 52;
+        var y = 84;
+        return (x, y, BotDevicePanelWidth, 418);
     }
 
-    private (int X, int Y, int W, int H) GetBotGatherButtonRect()
+    private (int X, int Y, int W, int H) GetBotDeviceGatherButtonRect()
     {
-        var amount = GetBotAmountButtonRect();
-        return (amount.X, amount.Y + BotButtonHeight + BotButtonsGap, amount.W, BotButtonHeight);
+        var panel = GetBotDevicePanelRect();
+        return (panel.X + 20, panel.Y + 188, panel.W - 40, BotDeviceButtonHeight);
     }
 
-    private (int X, int Y, int W, int H) GetBotBuildButtonRect()
+    private (int X, int Y, int W, int H) GetBotDeviceBuildButtonRect()
     {
-        var gather = GetBotGatherButtonRect();
-        return (gather.X, gather.Y + BotButtonHeight + BotButtonsGap, gather.W, BotButtonHeight);
+        var gather = GetBotDeviceGatherButtonRect();
+        return (gather.X, gather.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, gather.W, BotDeviceButtonHeight);
     }
 
-    private (int X, int Y, int W, int H) GetBotCancelButtonRect()
+    private (int X, int Y, int W, int H) GetBotDeviceCancelButtonRect()
     {
-        var build = GetBotBuildButtonRect();
-        return (build.X, build.Y + BotButtonHeight + BotButtonsGap, build.W, BotButtonHeight);
+        var build = GetBotDeviceBuildButtonRect();
+        return (build.X, build.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, build.W, BotDeviceButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceCloseButtonRect()
+    {
+        var cancel = GetBotDeviceCancelButtonRect();
+        return (cancel.X, cancel.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, cancel.W, BotDeviceButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceWoodButtonRect()
+    {
+        var panel = GetBotDevicePanelRect();
+        return (panel.X + 20, panel.Y + 226, 184, BotDeviceButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceStoneButtonRect()
+    {
+        var wood = GetBotDeviceWoodButtonRect();
+        return (wood.X + wood.W + 12, wood.Y, wood.W, wood.H);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceDirtButtonRect()
+    {
+        var wood = GetBotDeviceWoodButtonRect();
+        return (wood.X, wood.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, wood.W, wood.H);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceLeavesButtonRect()
+    {
+        var dirt = GetBotDeviceDirtButtonRect();
+        return (dirt.X + dirt.W + 12, dirt.Y, dirt.W, dirt.H);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceAmountRect()
+    {
+        var dirt = GetBotDeviceDirtButtonRect();
+        return (dirt.X, dirt.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, BotDevicePanelWidth - 40, 74);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceConfirmButtonRect()
+    {
+        var amount = GetBotDeviceAmountRect();
+        return (amount.X, amount.Y + amount.H + BotDeviceButtonsGap, amount.W, BotDeviceButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceBackButtonRect()
+    {
+        var confirm = GetBotDeviceConfirmButtonRect();
+        return (confirm.X, confirm.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, confirm.W, BotDeviceButtonHeight);
     }
 
     private bool BlockCenterIntersectsPlayer(Vector3 blockCenter)
@@ -2077,11 +2442,6 @@ public class GameApp : IGameRunner
         CycleGraphicsQuality,
         ToggleFog,
         ToggleReliefContours,
-        CycleBotResource,
-        CycleBotAmount,
-        QueueBotGather,
-        QueueBotBuildHouse,
-        CancelBotCommands,
         Exit
     }
 

@@ -17,6 +17,7 @@ internal sealed class CompanionBot
     private const float RouteProgressThreshold = 0.015f;
     private const float RouteMicroMoveThreshold = 0.05f;
     private const int BuildReachableLookahead = 256;
+    private const int BuildReachableRouteProbeLimit = 12;
 
     private readonly record struct ResourceTarget(int X, int Y, int Z, BotResourceType Resource);
     private readonly record struct NavigationGoal(
@@ -26,6 +27,7 @@ internal sealed class CompanionBot
         int Z,
         int Radius,
         HouseBlueprint? Blueprint);
+    private readonly record struct ScoredBuildCandidate(int Index, HouseBuildStep Step, float Score, bool HasResources);
 
     private readonly GameConfig _config;
     private readonly Action<string> _diagnostics;
@@ -223,6 +225,13 @@ internal sealed class CompanionBot
 
     private void UpdateGatherCommand(WorldMap world, BotResourceType resource, int amount, float deltaTime)
     {
+        if (_noPathTimer > 0f)
+        {
+            Status = BotStatus.NoPath;
+            StepIdle(world, deltaTime);
+            return;
+        }
+
         if (_activeGatheredAmount >= amount)
         {
             CompleteActiveCommand();
@@ -236,6 +245,13 @@ internal sealed class CompanionBot
 
     private void UpdateBuildCommand(WorldMap world, float deltaTime)
     {
+        if (_noPathTimer > 0f)
+        {
+            Status = BotStatus.NoPath;
+            StepIdle(world, deltaTime);
+            return;
+        }
+
         var blueprint = _activeCommand?.Blueprint;
         if (blueprint is null)
         {
@@ -1071,13 +1087,22 @@ internal sealed class CompanionBot
             }
         }
 
-        if (TryFindActionPoseNear(world, targetX, targetY, targetZ, searchRadius, blueprint, out var localPose, out _)
-            && Vector3.DistanceSquared(Position, localPose) <= 36f)
+        if (TryFindActionPoseNear(world, targetX, targetY, targetZ, searchRadius, blueprint, out var localPose, out _))
         {
-            if (!HasArrivedAtPose(localPose, ActionArrivalDistance, ActionVerticalArrivalTolerance))
+            var localDistanceSq = Vector3.DistanceSquared(Position, localPose);
+            if (localDistanceSq <= 36f)
             {
-                ApplyNavigationRoute(goal, [localPose]);
-                Trace($"action-route-local purpose={purpose} target={FormatCell(targetX, targetY, targetZ)} waypoints=1 pose={FormatVector(localPose)}");
+                if (!HasArrivedAtPose(localPose, ActionArrivalDistance, ActionVerticalArrivalTolerance))
+                {
+                    ApplyNavigationRoute(goal, [localPose]);
+                    Trace($"action-route-local purpose={purpose} target={FormatCell(targetX, targetY, targetZ)} waypoints=1 pose={FormatVector(localPose)}");
+                    return true;
+                }
+            }
+            else if (BotNavigator.TryBuildStandRoute(world, GetNavigationSettings(), Position, localPose, goalRadius: 1, out var stageWaypoints))
+            {
+                ApplyNavigationRoute(goal, stageWaypoints);
+                Trace($"action-route-stage purpose={purpose} target={FormatCell(targetX, targetY, targetZ)} waypoints={stageWaypoints.Length} pose={FormatVector(localPose)}");
                 return true;
             }
         }
@@ -1110,6 +1135,7 @@ internal sealed class CompanionBot
         step = blueprint.Steps[_buildStepIndex];
         var settings = GetNavigationSettings();
         var lookaheadEnd = Math.Min(blueprint.Steps.Count, _buildStepIndex + BuildReachableLookahead);
+        var routeCandidates = new List<ScoredBuildCandidate>(Math.Min(BuildReachableRouteProbeLimit * 2, lookaheadEnd - _buildStepIndex));
 
         var bestIndex = -1;
         var bestStep = default(HouseBuildStep);
@@ -1140,6 +1166,16 @@ internal sealed class CompanionBot
                 return true;
             }
 
+            routeCandidates.Add(new ScoredBuildCandidate(candidateIndex, candidate, ScoreBuildRerouteCandidate(candidateIndex, candidate, hasResources), hasResources));
+        }
+
+        foreach (var routeCandidate in routeCandidates
+                     .OrderBy(candidate => candidate.Score)
+                     .Take(BuildReachableRouteProbeLimit))
+        {
+            var candidateIndex = routeCandidate.Index;
+            var candidate = routeCandidate.Step;
+            var hasResources = routeCandidate.HasResources;
             if (!BotNavigator.TryBuildActionRoute(
                     world,
                     settings,
@@ -1155,11 +1191,7 @@ internal sealed class CompanionBot
                 continue;
             }
 
-            var routeScore = waypoints.Length + (candidateIndex - _buildStepIndex) * 0.35f;
-            if (!hasResources)
-            {
-                routeScore += 50f;
-            }
+            var routeScore = waypoints.Length + routeCandidate.Score;
 
             if (routeScore >= bestScore)
             {
@@ -1183,6 +1215,15 @@ internal sealed class CompanionBot
         step = bestStep;
         Trace($"build-step-reroute index={bestIndex} step={FormatBuildStep(bestStep)} waypoints={bestWaypoints.Length}");
         return true;
+    }
+
+    private float ScoreBuildRerouteCandidate(int candidateIndex, HouseBuildStep candidate, bool hasResources)
+    {
+        var center = new Vector3(candidate.X + 0.5f, candidate.Y + 0.5f, candidate.Z + 0.5f);
+        var distancePenalty = Vector3.DistanceSquared(Position, center) * 0.04f;
+        var orderPenalty = (candidateIndex - _buildStepIndex) * 0.35f;
+        var resourcePenalty = hasResources ? 0f : 50f;
+        return distancePenalty + orderPenalty + resourcePenalty;
     }
 
     private MoveResult MoveAlongNavigationRoute(WorldMap world, float deltaTime, float arrivalDistance)
