@@ -48,6 +48,7 @@ public class GameApp : IGameRunner
     private readonly PlayerVisualState _companionVisual = new();
     private readonly BotWristDeviceState _botDevice = new();
     private readonly BotWristDeviceVisualState _botDeviceVisual = new();
+    private readonly GameCaptureManager _captureManager;
 
     private PlayerController _player = null!;
     private CompanionBot? _companion;
@@ -69,18 +70,23 @@ public class GameApp : IGameRunner
     private bool _sceneMetricsEnabled;
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
+    private string? _pendingScreenshotPath;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
     {
     }
 
-    internal GameApp(GameConfig config, IGamePlatform platform, WorldMap world)
+    internal GameApp(GameConfig config, IGamePlatform platform, WorldMap world, GameCaptureManager? captureManager = null)
     {
         _config = config;
         _platform = platform;
         _world = world;
         _graphics = new GraphicsSettings(config);
+        _captureManager = captureManager ?? new GameCaptureManager(
+            config.ScreenshotDirectory,
+            config.VideoDirectory,
+            config.VideoCaptureFps);
     }
 
     private enum AppState
@@ -149,6 +155,7 @@ public class GameApp : IGameRunner
                 _lastFrameMs = delta * 1000f;
                 AdvanceRuntime(delta);
                 var cameraBob = 0f;
+                _ = HandleCaptureHotkeys();
                 _botDeviceVisual.Update(_state == AppState.Playing && _botDevice.IsOpen, delta);
 
                 if (_state == AppState.Playing)
@@ -242,6 +249,7 @@ public class GameApp : IGameRunner
                 }
 
                 DrawFrame(currentHit, currentView);
+                FlushCaptureOutputs(delta);
             }
         }
         finally
@@ -250,6 +258,11 @@ public class GameApp : IGameRunner
             diagnostics?.Dispose();
             if (platformInitialized)
             {
+                if (_captureManager.IsRecording)
+                {
+                    _ = _captureManager.StopRecording();
+                }
+
                 ShutdownPlatform();
             }
         }
@@ -529,6 +542,47 @@ public class GameApp : IGameRunner
     private void HandleHotbarInput()
     {
         _selectedHotbarIndex = SelectHotbarIndex(_selectedHotbarIndex, _platform, _hotbar.Length);
+    }
+
+    internal bool HandleCaptureHotkeys()
+    {
+        var handled = false;
+
+        if (_platform.IsKeyPressed(KeyboardKey.F12))
+        {
+            _pendingScreenshotPath = _captureManager.CreateScreenshotPath();
+            handled = true;
+        }
+
+        if (_platform.IsKeyPressed(KeyboardKey.F10))
+        {
+            if (_captureManager.IsRecording)
+            {
+                _ = _captureManager.StopRecording();
+            }
+            else
+            {
+                _captureManager.StartRecording();
+            }
+
+            handled = true;
+        }
+
+        return handled;
+    }
+
+    internal void FlushCaptureOutputs(float deltaTime)
+    {
+        if (_pendingScreenshotPath is not null)
+        {
+            _platform.TakeScreenshot(_pendingScreenshotPath);
+            _pendingScreenshotPath = null;
+        }
+
+        if (_captureManager.TryGetNextRecordingFramePath(deltaTime, out var framePath))
+        {
+            _platform.TakeScreenshot(framePath);
+        }
     }
 
     private bool HandlePlayingModeHotkeys()
@@ -955,6 +1009,7 @@ public class GameApp : IGameRunner
             DrawMenu();
         }
 
+        DrawCaptureIndicator();
         _platform.EndDrawing();
     }
 
@@ -2160,6 +2215,18 @@ public class GameApp : IGameRunner
             _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(16, 152), 18, 1f, Color.DarkGray);
             _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(16, 174), 18, 1f, Color.DarkGray);
         }
+    }
+
+    private void DrawCaptureIndicator()
+    {
+        var label = _captureManager.RecordingIndicatorText;
+        if (string.IsNullOrWhiteSpace(label))
+        {
+            return;
+        }
+
+        var x = Math.Max(16, _platform.GetScreenWidth() - 220);
+        _platform.DrawUiText(label, new Vector2(x, 16), 24, 1f, new Color(228, 44, 44, 255));
     }
 
     private void DrawHotbar()

@@ -6,7 +6,7 @@ public sealed class GameConfig
 {
     public int WindowWidth { get; init; } = 1280;
     public int WindowHeight { get; init; } = 720;
-    public string Title { get; init; } = "AIG 0.008";
+    public string Title { get; init; } = "AIG 0.010";
     public float MouseSensitivity { get; init; } = 0.0025f;
     public float MoveSpeed { get; init; } = 5.5f;
     public float JumpSpeed { get; init; } = 6.2f;
@@ -23,4 +23,7 @@ public sealed class GameConfig
     public bool ReliefContoursEnabled { get; init; } = true;
     public bool BotDiagnosticsEnabled { get; init; }
     public string BotDiagnosticsDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "botlogs");
+    public string ScreenshotDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "captures", "screenshots");
+    public string VideoDirectory { get; init; } = Path.Combine(Directory.GetCurrentDirectory(), "captures", "videos");
+    public int VideoCaptureFps { get; init; } = 30;
 }
