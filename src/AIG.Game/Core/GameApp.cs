@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.IO;
 using System.Collections.Generic;
+using AIG.Game.Bot;
 using AIG.Game.Config;
 using AIG.Game.Gameplay;
 using AIG.Game.Player;
@@ -14,6 +15,9 @@ public class GameApp : IGameRunner
     private const int MenuButtonWidth = 360;
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
+    private const int BotPanelWidth = 390;
+    private const int BotButtonHeight = 46;
+    private const int BotButtonsGap = 12;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
     private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
     private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
@@ -40,8 +44,11 @@ public class GameApp : IGameRunner
     private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone, BlockType.Wood, BlockType.Leaves];
     private readonly GraphicsSettings _graphics;
     private readonly PlayerVisualState _playerVisual = new();
+    private readonly PlayerVisualState _companionVisual = new();
+    private readonly BotCommandSelection _botMenuSelection = new();
 
     private PlayerController _player = null!;
+    private CompanionBot? _companion;
     private AppState _state = AppState.MainMenu;
     private CameraMode _cameraMode = CameraMode.FirstPerson;
     private int _selectedHotbarIndex;
@@ -60,6 +67,7 @@ public class GameApp : IGameRunner
     private bool _sceneMetricsEnabled;
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
+    private string _botMenuMessage = string.Empty;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -83,110 +91,169 @@ public class GameApp : IGameRunner
 
     public void Run()
     {
-        InitializePlatform(enableFullscreen: true);
-        _sceneMetricsEnabled = false;
+        BotDiagnosticsLog? diagnostics = null;
+        var platformInitialized = false;
 
-        _player = new PlayerController(_config, CreateSpawnPosition());
-        if (_world.Seed != 0)
+        try
         {
-            ClearSpawnCanopy(_player.Position, horizontalRadius: 10, verticalSpan: 14);
-            var startLook = BuildGroundLookDirection(_player.Position, new Vector3(0f, 0f, -1f));
-            _player.SetPose(_player.Position, startLook);
+            diagnostics = BotDiagnosticsLog.Create(_config);
+            diagnostics?.Write("app", $"run-start world={_world.Width}x{_world.Height}x{_world.Depth} seed={_world.Seed}");
+
+            InitializePlatform(enableFullscreen: true);
+            platformInitialized = true;
+            _sceneMetricsEnabled = false;
+
+            _player = new PlayerController(_config, CreateSpawnPosition());
+            if (_world.Seed != 0)
+            {
+                ClearSpawnCanopy(_player.Position, horizontalRadius: 10, verticalSpan: 14);
+                var startLook = BuildGroundLookDirection(_player.Position, new Vector3(0f, 0f, -1f));
+                _player.SetPose(_player.Position, startLook);
+            }
+
+            _playerVisual.Reset(_player.Position);
+            _companion = new CompanionBot(
+                _config,
+                CreateCompanionSpawnPosition(_player.Position),
+                message => diagnostics?.Write("bot", message));
+            _companionVisual.Reset(_companion.Position);
+            diagnostics?.Write("app", $"player-spawn pos={_player.Position.X:0.00},{_player.Position.Y:0.00},{_player.Position.Z:0.00}");
+            diagnostics?.Write("app", $"bot-log-file path={diagnostics.FilePath}");
+            ResetAdaptiveTracking(_player.Position);
+            UpdateWorldStreaming(force: true);
+
+            var shouldExit = false;
+            var currentHit = (BlockRaycastHit?)null;
+            var currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, 0f);
+
+            while (!shouldExit && !_platform.WindowShouldClose())
+            {
+                if (_state == AppState.Playing && _platform.IsKeyPressed(KeyboardKey.Escape))
+                {
+                    _state = AppState.PauseMenu;
+                    _platform.EnableCursor();
+                }
+
+                var delta = _platform.GetFrameTime();
+                _lastFrameMs = delta * 1000f;
+                AdvanceRuntime(delta);
+                var cameraBob = 0f;
+
+                if (_state == AppState.Playing)
+                {
+                    if (_platform.IsKeyPressed(KeyboardKey.V) || _platform.IsKeyPressed(KeyboardKey.F5))
+                    {
+                        _cameraMode = CameraViewBuilder.Toggle(_cameraMode);
+                    }
+
+                    HandleHotbarInput();
+
+                    var input = ReadInput(_platform);
+                    _player.Update(_world, input, delta);
+                    _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
+                    UpdateWorldStreaming(force: false);
+                    if (_companion is not null)
+                    {
+                        _companion.Update(_world, _player.Position, _player.LookDirection, delta);
+                        _companionVisual.Update(_companion.Position, delta, _config.MoveSpeed);
+                    }
+
+                    var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
+                    _cameraBobPhase += delta * (7f + walkBob * 6f);
+                    cameraBob = MathF.Sin(_cameraBobPhase) * 0.06f * walkBob;
+
+                    currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
+
+                    currentHit = VoxelRaycaster.Raycast(_world, currentView.RayOrigin, currentView.RayDirection, _config.InteractionDistance);
+                    if (_platform.IsMouseButtonPressed(MouseButton.Left))
+                    {
+                        BlockInteraction.TryBreak(_world, currentHit);
+                    }
+
+                    if (_platform.IsMouseButtonPressed(MouseButton.Right))
+                    {
+                        BlockInteraction.TryPlace(_world, currentHit, _hotbar[_selectedHotbarIndex], BlockCenterIntersectsPlayer);
+                    }
+                }
+                else
+                {
+                    currentHit = null;
+                    var menuAction = ReadMenuAction();
+                    switch (menuAction)
+                    {
+                        case MenuAction.Start:
+                            _state = AppState.Playing;
+                            UpdateWorldStreaming(force: true);
+                            _platform.DisableCursor();
+                            break;
+                        case MenuAction.ToggleFullscreen:
+                            _platform.ToggleFullscreen();
+                            break;
+                        case MenuAction.CycleGraphicsQuality:
+                            _graphics.CycleQuality();
+                            _adaptiveRenderDistance = -1f;
+                            _adaptiveMovementFreezeTimer = 0f;
+                            _hasAdaptiveProbe = false;
+                            _chunkRevealStartedAt.Clear();
+                            break;
+                        case MenuAction.ToggleFog:
+                            _graphics.ToggleFog();
+                            break;
+                        case MenuAction.ToggleReliefContours:
+                            _graphics.ToggleReliefContours();
+                            break;
+                        case MenuAction.CycleBotResource:
+                            _botMenuSelection.CycleResource();
+                            _botMenuMessage = $"Ресурс: {_botMenuSelection.SelectedResource.GetLabel()}";
+                            break;
+                        case MenuAction.CycleBotAmount:
+                            _botMenuSelection.CycleAmount();
+                            _botMenuMessage = $"Количество: {_botMenuSelection.SelectedAmount}";
+                            break;
+                        case MenuAction.QueueBotGather:
+                            if (_companion is not null)
+                            {
+                                _botMenuMessage = _companion.Enqueue(BotCommand.Gather(_botMenuSelection.SelectedResource, _botMenuSelection.SelectedAmount))
+                                    ? "Команда на сбор добавлена."
+                                    : "Очередь бота заполнена.";
+                            }
+                            break;
+                        case MenuAction.QueueBotBuildHouse:
+                            if (_companion is not null)
+                            {
+                                var blueprint = HouseBlueprint.CreateCabinS(_world, _player.Position, _player.LookDirection);
+                                _botMenuMessage = _companion.Enqueue(BotCommand.BuildHouse(blueprint))
+                                    ? $"Строю: {blueprint.Name}"
+                                    : "Очередь бота заполнена.";
+                            }
+                            break;
+                        case MenuAction.CancelBotCommands:
+                            _companion!.CancelAll();
+                            _botMenuMessage = "Команды бота сброшены.";
+                            break;
+                        case MenuAction.Exit:
+                            shouldExit = true;
+                            break;
+                    }
+                }
+
+                if (_state != AppState.Playing)
+                {
+                    currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
+                }
+
+                DrawFrame(currentHit, currentView);
+            }
         }
-        _playerVisual.Reset(_player.Position);
-        ResetAdaptiveTracking(_player.Position);
-        UpdateWorldStreaming(force: true);
-
-        var shouldExit = false;
-        var currentHit = (BlockRaycastHit?)null;
-        var currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, 0f);
-
-        while (!shouldExit && !_platform.WindowShouldClose())
+        finally
         {
-            if (_state == AppState.Playing && _platform.IsKeyPressed(KeyboardKey.Escape))
+            diagnostics?.Write("app", "run-stop");
+            diagnostics?.Dispose();
+            if (platformInitialized)
             {
-                _state = AppState.PauseMenu;
-                _platform.EnableCursor();
+                ShutdownPlatform();
             }
-
-            var delta = _platform.GetFrameTime();
-            _lastFrameMs = delta * 1000f;
-            AdvanceRuntime(delta);
-            var cameraBob = 0f;
-
-            if (_state == AppState.Playing)
-            {
-                if (_platform.IsKeyPressed(KeyboardKey.V) || _platform.IsKeyPressed(KeyboardKey.F5))
-                {
-                    _cameraMode = CameraViewBuilder.Toggle(_cameraMode);
-                }
-
-                HandleHotbarInput();
-
-                var input = ReadInput(_platform);
-                _player.Update(_world, input, delta);
-                _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
-                UpdateWorldStreaming(force: false);
-
-                var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
-                _cameraBobPhase += delta * (7f + walkBob * 6f);
-                cameraBob = MathF.Sin(_cameraBobPhase) * 0.06f * walkBob;
-
-                currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
-
-                currentHit = VoxelRaycaster.Raycast(_world, currentView.RayOrigin, currentView.RayDirection, _config.InteractionDistance);
-                if (_platform.IsMouseButtonPressed(MouseButton.Left))
-                {
-                    BlockInteraction.TryBreak(_world, currentHit);
-                }
-
-                if (_platform.IsMouseButtonPressed(MouseButton.Right))
-                {
-                    BlockInteraction.TryPlace(_world, currentHit, _hotbar[_selectedHotbarIndex], BlockCenterIntersectsPlayer);
-                }
-            }
-            else
-            {
-                currentHit = null;
-                var menuAction = ReadMenuAction();
-                switch (menuAction)
-                {
-                    case MenuAction.Start:
-                        _state = AppState.Playing;
-                        UpdateWorldStreaming(force: true);
-                        _platform.DisableCursor();
-                        break;
-                    case MenuAction.ToggleFullscreen:
-                        _platform.ToggleFullscreen();
-                        break;
-                    case MenuAction.CycleGraphicsQuality:
-                        _graphics.CycleQuality();
-                        _adaptiveRenderDistance = -1f;
-                        _adaptiveMovementFreezeTimer = 0f;
-                        _hasAdaptiveProbe = false;
-                        _chunkRevealStartedAt.Clear();
-                        break;
-                    case MenuAction.ToggleFog:
-                        _graphics.ToggleFog();
-                        break;
-                    case MenuAction.ToggleReliefContours:
-                        _graphics.ToggleReliefContours();
-                        break;
-                    case MenuAction.Exit:
-                        shouldExit = true;
-                        break;
-                }
-            }
-
-            if (_state != AppState.Playing)
-            {
-                currentView = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob);
-            }
-
-            DrawFrame(currentHit, currentView);
         }
-
-        ShutdownPlatform();
     }
 
     internal void RunAutoCapture(string outputDirectory)
@@ -561,6 +628,34 @@ public class GameApp : IGameRunner
             return MenuAction.ToggleReliefContours;
         }
 
+        if (_state != AppState.MainMenu)
+        {
+            if (IsButtonClicked(GetBotResourceButtonRect()))
+            {
+                return MenuAction.CycleBotResource;
+            }
+
+            if (IsButtonClicked(GetBotAmountButtonRect()))
+            {
+                return MenuAction.CycleBotAmount;
+            }
+
+            if (IsButtonClicked(GetBotGatherButtonRect()))
+            {
+                return MenuAction.QueueBotGather;
+            }
+
+            if (IsButtonClicked(GetBotBuildButtonRect()))
+            {
+                return MenuAction.QueueBotBuildHouse;
+            }
+
+            if (IsButtonClicked(GetBotCancelButtonRect()))
+            {
+                return MenuAction.CancelBotCommands;
+            }
+        }
+
         return MenuAction.None;
     }
 
@@ -589,6 +684,7 @@ public class GameApp : IGameRunner
             _platform.BeginMode3D(view.Camera);
             DrawWorld();
             DrawPlayerAvatar();
+            DrawCompanionAvatar();
             DrawBlockHighlight(hit, view.RayOrigin, view.RayDirection);
             DrawFirstPersonHand(view.Camera);
             _platform.EndMode3D();
@@ -1500,14 +1596,41 @@ public class GameApp : IGameRunner
             return;
         }
 
-        var yaw = _player.Yaw;
+        DrawHumanoidAvatar(
+            _player.Position + new Vector3(0f, 0.04f, 0f),
+            _player.Yaw,
+            _playerVisual,
+            new Color(88, 145, 205, 255),
+            new Color(64, 112, 176, 255),
+            new Color(74, 87, 122, 255),
+            new Color(232, 200, 170, 255));
+    }
+
+    private void DrawCompanionAvatar()
+    {
+        if (_companion is null)
+        {
+            return;
+        }
+
+        DrawHumanoidAvatar(
+            _companion.Position + new Vector3(0f, 0.04f, 0f),
+            _companion.Yaw,
+            _companionVisual,
+            new Color(110, 171, 96, 255),
+            new Color(84, 141, 74, 255),
+            new Color(86, 92, 74, 255),
+            new Color(228, 196, 164, 255));
+    }
+
+    private void DrawHumanoidAvatar(Vector3 root, float yaw, PlayerVisualState visual, Color torsoColor, Color armColor, Color legColor, Color skinColor)
+    {
         var forward = new Vector3(MathF.Sin(yaw), 0f, MathF.Cos(yaw));
         forward = Vector3.Normalize(forward);
 
         var right = new Vector3(-forward.Z, 0f, forward.X);
-        var walkSwing = MathF.Sin(_playerVisual.WalkPhase) * 0.22f * _playerVisual.WalkBlend;
-        var armLift = _playerVisual.IsJumping ? 0.08f : _playerVisual.IsFalling ? -0.05f : 0f;
-        var root = _player.Position + new Vector3(0f, 0.04f, 0f);
+        var walkSwing = MathF.Sin(visual.WalkPhase) * 0.22f * visual.WalkBlend;
+        var armLift = visual.IsJumping ? 0.08f : visual.IsFalling ? -0.05f : 0f;
 
         var torso = root + new Vector3(0f, 1.08f, 0f);
         var head = root + new Vector3(0f, 1.82f, 0f) + forward * 0.04f;
@@ -1516,12 +1639,12 @@ public class GameApp : IGameRunner
         var leftLeg = root + Vector3.UnitY * 0.44f - right * 0.16f - forward * walkSwing;
         var rightLeg = root + Vector3.UnitY * 0.44f + right * 0.16f + forward * walkSwing;
 
-        _platform.DrawCube(torso, 0.6f, 0.9f, 0.36f, new Color(88, 145, 205, 255));
-        _platform.DrawCube(head, 0.46f, 0.46f, 0.46f, new Color(232, 200, 170, 255));
-        _platform.DrawCube(leftArm, 0.2f, 0.72f, 0.2f, new Color(64, 112, 176, 255));
-        _platform.DrawCube(rightArm, 0.2f, 0.72f, 0.2f, new Color(64, 112, 176, 255));
-        _platform.DrawCube(leftLeg, 0.24f, 0.74f, 0.24f, new Color(74, 87, 122, 255));
-        _platform.DrawCube(rightLeg, 0.24f, 0.74f, 0.24f, new Color(74, 87, 122, 255));
+        _platform.DrawCube(torso, 0.6f, 0.9f, 0.36f, torsoColor);
+        _platform.DrawCube(head, 0.46f, 0.46f, 0.46f, skinColor);
+        _platform.DrawCube(leftArm, 0.2f, 0.72f, 0.2f, armColor);
+        _platform.DrawCube(rightArm, 0.2f, 0.72f, 0.2f, armColor);
+        _platform.DrawCube(leftLeg, 0.24f, 0.74f, 0.24f, legColor);
+        _platform.DrawCube(rightLeg, 0.24f, 0.74f, 0.24f, legColor);
         _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.74f, 0.02f, 0.74f, new Color(0, 0, 0, 35));
     }
 
@@ -1729,11 +1852,19 @@ public class GameApp : IGameRunner
             _platform.DrawLine(centerX, centerY - 8, centerX, centerY + 8, Color.Black);
         }
 
-        _platform.DrawRectangle(8, 8, 460, 112, new Color(255, 255, 255, 190));
+        var hudHeight = _companion is null ? 112 : 186;
+        _platform.DrawRectangle(8, 8, 500, hudHeight, new Color(255, 255, 255, 190));
         _platform.DrawUiText($"FPS: {_platform.GetFps()}", new Vector2(16, 14), 20, 1f, Color.Black);
         _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(16, 38), 20, 1f, Color.DarkGray);
         _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(16, 62), 18, 1f, Color.DarkGray);
         _platform.DrawUiText($"Камера: {GetCameraModeName(_cameraMode)}", new Vector2(16, 84), 18, 1f, Color.DarkGray);
+        if (_companion is not null)
+        {
+            _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(16, 108), 18, 1f, Color.Black);
+            _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(16, 130), 18, 1f, Color.DarkGray);
+            _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(16, 152), 18, 1f, Color.DarkGray);
+            _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(16, 174), 18, 1f, Color.DarkGray);
+        }
     }
 
     private void DrawHotbar()
@@ -1789,6 +1920,11 @@ public class GameApp : IGameRunner
         _platform.DrawUiText(graphicsLabel, new Vector2(graphics.X + 30, graphics.Y + 16), 28, 1f, Color.Black);
         _platform.DrawUiText(fogLabel, new Vector2(fog.X + 30, fog.Y + 16), 26, 1f, Color.Black);
         _platform.DrawUiText(reliefLabel, new Vector2(relief.X + 30, relief.Y + 16), 26, 1f, Color.Black);
+
+        if (_state != AppState.MainMenu && _companion is not null)
+        {
+            DrawBotCommandsPanel();
+        }
     }
 
     private (int X, int Y, int W, int H) GetStartButtonRect()
@@ -1833,6 +1969,77 @@ public class GameApp : IGameRunner
         return (x, y, MenuButtonWidth, MenuButtonHeight);
     }
 
+    private void DrawBotCommandsPanel()
+    {
+        var panel = GetBotPanelRect();
+        var resource = GetBotResourceButtonRect();
+        var amount = GetBotAmountButtonRect();
+        var gather = GetBotGatherButtonRect();
+        var build = GetBotBuildButtonRect();
+        var cancel = GetBotCancelButtonRect();
+
+        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(245, 246, 249, 236));
+        _platform.DrawUiText("Бот-команды", new Vector2(panel.X + 26, panel.Y + 20), 34, 1f, Color.Black);
+        _platform.DrawUiText($"Статус: {_companion!.Status.GetLabel()}", new Vector2(panel.X + 26, panel.Y + 62), 20, 1f, Color.DarkGray);
+        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 26, panel.Y + 88), 18, 1f, Color.DarkGray);
+        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 26, panel.Y + 110), 18, 1f, Color.DarkGray);
+        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 26, panel.Y + 132), 18, 1f, Color.DarkGray);
+
+        _platform.DrawRectangle(resource.X, resource.Y, resource.W, resource.H, new Color(228, 233, 241, 245));
+        _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(228, 233, 241, 245));
+        _platform.DrawRectangle(gather.X, gather.Y, gather.W, gather.H, new Color(210, 232, 210, 245));
+        _platform.DrawRectangle(build.X, build.Y, build.W, build.H, new Color(194, 220, 255, 245));
+        _platform.DrawRectangle(cancel.X, cancel.Y, cancel.W, cancel.H, new Color(220, 98, 98, 235));
+
+        _platform.DrawUiText($"Ресурс: {_botMenuSelection.SelectedResource.GetLabel()}", new Vector2(resource.X + 18, resource.Y + 12), 24, 1f, Color.Black);
+        _platform.DrawUiText($"Количество: {_botMenuSelection.SelectedAmount}", new Vector2(amount.X + 18, amount.Y + 12), 24, 1f, Color.Black);
+        _platform.DrawUiText("Собрать", new Vector2(gather.X + 120, gather.Y + 12), 24, 1f, Color.Black);
+        _platform.DrawUiText("Построить дом S", new Vector2(build.X + 74, build.Y + 12), 24, 1f, Color.Black);
+        _platform.DrawUiText("Отменить команды", new Vector2(cancel.X + 54, cancel.Y + 12), 24, 1f, Color.White);
+
+        if (!string.IsNullOrWhiteSpace(_botMenuMessage))
+        {
+            _platform.DrawUiText(_botMenuMessage, new Vector2(panel.X + 26, panel.Y + panel.H - 34), 18, 1f, Color.DarkGray);
+        }
+    }
+
+    private (int X, int Y, int W, int H) GetBotPanelRect()
+    {
+        var x = _platform.GetScreenWidth() - BotPanelWidth - 36;
+        var y = 96;
+        return (x, y, BotPanelWidth, 382);
+    }
+
+    private (int X, int Y, int W, int H) GetBotResourceButtonRect()
+    {
+        var panel = GetBotPanelRect();
+        return (panel.X + 20, panel.Y + 166, panel.W - 40, BotButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotAmountButtonRect()
+    {
+        var resource = GetBotResourceButtonRect();
+        return (resource.X, resource.Y + BotButtonHeight + BotButtonsGap, resource.W, BotButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotGatherButtonRect()
+    {
+        var amount = GetBotAmountButtonRect();
+        return (amount.X, amount.Y + BotButtonHeight + BotButtonsGap, amount.W, BotButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotBuildButtonRect()
+    {
+        var gather = GetBotGatherButtonRect();
+        return (gather.X, gather.Y + BotButtonHeight + BotButtonsGap, gather.W, BotButtonHeight);
+    }
+
+    private (int X, int Y, int W, int H) GetBotCancelButtonRect()
+    {
+        var build = GetBotBuildButtonRect();
+        return (build.X, build.Y + BotButtonHeight + BotButtonsGap, build.W, BotButtonHeight);
+    }
+
     private bool BlockCenterIntersectsPlayer(Vector3 blockCenter)
     {
         var half = _player.ColliderHalfWidth;
@@ -1870,6 +2077,11 @@ public class GameApp : IGameRunner
         CycleGraphicsQuality,
         ToggleFog,
         ToggleReliefContours,
+        CycleBotResource,
+        CycleBotAmount,
+        QueueBotGather,
+        QueueBotBuildHouse,
+        CancelBotCommands,
         Exit
     }
 
@@ -1970,7 +2182,10 @@ public class GameApp : IGameRunner
 
     private static GameConfig CreateDefaultConfig()
     {
-        return new GameConfig();
+        return new GameConfig
+        {
+            BotDiagnosticsEnabled = true
+        };
     }
 
     private static WorldMap CreateDefaultWorld(GameConfig config)
@@ -1983,6 +2198,13 @@ public class GameApp : IGameRunner
         var centerX = Math.Clamp(_world.Width / 2, 0, _world.Width - 1);
         var centerZ = Math.Clamp(_world.Depth / 2, 0, _world.Depth - 1);
         return FindClearSpawnPose(centerX, centerZ, searchRadius: 48);
+    }
+
+    private Vector3 CreateCompanionSpawnPosition(Vector3 playerPosition)
+    {
+        var centerX = Math.Clamp((int)MathF.Floor(playerPosition.X + 3f), 0, Math.Max(0, _world.Width - 1));
+        var centerZ = Math.Clamp((int)MathF.Floor(playerPosition.Z + 3f), 0, Math.Max(0, _world.Depth - 1));
+        return FindClearSpawnPose(centerX, centerZ, searchRadius: 12);
     }
 
     private Vector3 LiftPoseAboveTerrain(Vector3 position)
@@ -2220,6 +2442,7 @@ public class GameApp : IGameRunner
         var unloadRadius = chunkRadius + GetUnloadHysteresisChunks() + holdExtraRadius;
         _world.UnloadFarChunks(center, unloadRadius);
         CleanupChunkRevealCache(chunkX, chunkZ, unloadRadius + 2);
+        StreamCompanionWorkArea(useBackgroundStreaming, underPressure);
 
         if (!force
             && chunkX == _lastStreamChunkX
@@ -2256,6 +2479,29 @@ public class GameApp : IGameRunner
         _lastStreamChunkX = chunkX;
         _lastStreamChunkZ = chunkZ;
         _lastStreamRadius = chunkRadius;
+    }
+
+    private void StreamCompanionWorkArea(bool useBackgroundStreaming, bool underPressure)
+    {
+        if (_companion is null || _companion.ActiveCommand is null)
+        {
+            return;
+        }
+
+        var chunkBudget = underPressure ? 1 : 2;
+        var surfaceBudget = underPressure ? 1 : 2;
+        var chunkRadius = 2;
+        var center = _companion.Position;
+        if (useBackgroundStreaming)
+        {
+            _world.EnsureChunksAroundBudgetedAsync(center, chunkRadius, chunkBudget);
+            _world.QueueDirtyChunkSurfacesAsync(center, surfaceBudget);
+            _ = _world.ApplyBackgroundStreamingResults(chunkBudget, surfaceBudget);
+            return;
+        }
+
+        _world.EnsureChunksAroundBudgeted(center, chunkRadius, chunkBudget);
+        _world.RebuildDirtyChunkSurfaces(center, surfaceBudget);
     }
 
     private int ResolveStreamingRenderDistance(int measuredFps, Vector3 center, bool force)

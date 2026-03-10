@@ -1,5 +1,6 @@
 using System.Numerics;
 using AIG.Game;
+using AIG.Game.Bot;
 using AIG.Game.Config;
 using AIG.Game.Core;
 using AIG.Game.Gameplay;
@@ -257,6 +258,164 @@ public sealed class CoreFlowTests
 
         Assert.Equal(3, platform.SavedScreenshots.Count);
         Assert.All(platform.SavedScreenshots, screenshot => Assert.StartsWith(outputDir, screenshot, StringComparison.Ordinal));
+    }
+
+    [Fact(DisplayName = "CreateDefaultConfig включает диагностику бота по умолчанию")]
+    public void GameApp_CreateDefaultConfig_EnablesBotDiagnostics()
+    {
+        var method = typeof(GameApp).GetMethod("CreateDefaultConfig", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var config = Assert.IsType<GameConfig>(method.Invoke(null, null));
+        Assert.True(config.BotDiagnosticsEnabled);
+        Assert.EndsWith("botlogs", config.BotDiagnosticsDirectory, StringComparison.Ordinal);
+    }
+
+    [Fact(DisplayName = "BotDiagnosticsLog не создается когда диагностика отключена")]
+    public void BotDiagnosticsLog_Create_ReturnsNull_WhenDisabled()
+    {
+        var log = BotDiagnosticsLog.Create(new GameConfig());
+        Assert.Null(log);
+    }
+
+    [Fact(DisplayName = "Обычный запуск GameApp пишет bot log файл")]
+    public void GameApp_Run_WritesBotDiagnosticsFile()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"aig-botlog-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var platform = new FakeGamePlatform();
+            platform.EnqueueWindowShouldClose(false, true);
+
+            var config = new GameConfig
+            {
+                FullscreenByDefault = false,
+                BotDiagnosticsEnabled = true,
+                BotDiagnosticsDirectory = tempDir
+            };
+
+            var world = new WorldMap(width: 48, height: 24, depth: 48, chunkSize: config.ChunkSize, seed: 0);
+            var app = new GameApp(config, platform, world);
+            app.Run();
+
+            var files = Directory.GetFiles(tempDir, "bot-*.log");
+            Assert.Single(files);
+
+            var text = File.ReadAllText(files[0]);
+            Assert.Contains("[diag] session-start", text, StringComparison.Ordinal);
+            Assert.Contains("[app] run-start", text, StringComparison.Ordinal);
+            Assert.Contains("[bot] spawn", text, StringComparison.Ordinal);
+            Assert.Contains("[app] run-stop", text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact(DisplayName = "Обычный запуск GameApp не пишет bot log файл при отключенной диагностике")]
+    public void GameApp_Run_DoesNotWriteBotDiagnosticsFile_WhenDisabled()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"aig-botlog-off-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var platform = new FakeGamePlatform();
+            platform.EnqueueWindowShouldClose(false, true);
+
+            var config = new GameConfig
+            {
+                FullscreenByDefault = false,
+                BotDiagnosticsEnabled = false,
+                BotDiagnosticsDirectory = tempDir
+            };
+
+            var world = new WorldMap(width: 48, height: 24, depth: 48, chunkSize: config.ChunkSize, seed: 0);
+            var app = new GameApp(config, platform, world);
+            app.Run();
+
+            Assert.Empty(Directory.GetFiles(tempDir, "bot-*.log"));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact(DisplayName = "BotDiagnosticsLog гасит IOException и помечает лог как failed")]
+    public void BotDiagnosticsLog_Write_SwallowsIoException()
+    {
+        var writer = new StreamWriter(new ThrowingWriteStream())
+        {
+            AutoFlush = true
+        };
+        using var log = CreateBotDiagnosticsLog(writer, "io.log");
+
+        log.Write("bot", "broken");
+        log.Write("bot", "ignored");
+
+        Assert.True(GetPrivateField<bool>(log, "_failed"));
+    }
+
+    [Fact(DisplayName = "BotDiagnosticsLog гасит ObjectDisposedException и повторный Dispose безопасен")]
+    public void BotDiagnosticsLog_Write_SwallowsObjectDisposedException_AndDisposeIsIdempotent()
+    {
+        using var writer = new StreamWriter(new MemoryStream());
+        var log = CreateBotDiagnosticsLog(writer, "disposed.log");
+        writer.Dispose();
+
+        log.Write("bot", "disposed");
+        Assert.True(GetPrivateField<bool>(log, "_failed"));
+
+        log.Dispose();
+        log.Dispose();
+        log.Write("bot", "after-dispose");
+
+        Assert.True(GetPrivateField<bool>(log, "_disposed"));
+    }
+
+    [Fact(DisplayName = "BotDiagnosticsLog гасит IOException при Dispose")]
+    public void BotDiagnosticsLog_Dispose_SwallowsIoException()
+    {
+        var writer = new StreamWriter(new ThrowingDisposeStream(objectDisposed: false));
+        var log = CreateBotDiagnosticsLog(writer, "dispose-io.log");
+
+        log.Dispose();
+
+        Assert.True(GetPrivateField<bool>(log, "_failed"));
+        Assert.True(GetPrivateField<bool>(log, "_disposed"));
+    }
+
+    [Fact(DisplayName = "BotDiagnosticsLog гасит ObjectDisposedException при Dispose")]
+    public void BotDiagnosticsLog_Dispose_SwallowsObjectDisposedException()
+    {
+        var writer = new StreamWriter(new ThrowingDisposeStream(objectDisposed: true));
+        var log = CreateBotDiagnosticsLog(writer, "dispose-od.log");
+
+        log.Dispose();
+
+        Assert.True(GetPrivateField<bool>(log, "_failed"));
+        Assert.True(GetPrivateField<bool>(log, "_disposed"));
+    }
+
+    [Fact(DisplayName = "FormatCommand возвращает fallback для неизвестного вида команды")]
+    public void CompanionBot_FormatCommand_ReturnsFallback_ForUnknownKind()
+    {
+        var method = typeof(CompanionBot).GetMethod("FormatCommand", BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var command = (BotCommand?)new BotCommand((BotCommandKind)999, BotResourceType.Wood, 3, null);
+        var result = Assert.IsType<string>(method.Invoke(null, new object?[] { command }));
+        Assert.Equal("999", result);
     }
 
     [Fact(DisplayName = "TryRunAutoPerf c default AutoPerfRunner пишет лог FPS")]
@@ -2435,6 +2594,24 @@ public sealed class CoreFlowTests
         field!.SetValue(target, value);
     }
 
+    private static T GetPrivateField<T>(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        return Assert.IsType<T>(field!.GetValue(target));
+    }
+
+    private static BotDiagnosticsLog CreateBotDiagnosticsLog(StreamWriter writer, string fileName)
+    {
+        var constructor = typeof(BotDiagnosticsLog).GetConstructor(
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(string), typeof(StreamWriter)],
+            modifiers: null);
+        Assert.NotNull(constructor);
+        return Assert.IsType<BotDiagnosticsLog>(constructor.Invoke([fileName, writer]));
+    }
+
     private static object CreateAutoBotState(Vector3 lastPosition, float stuckTime, int turnSign, float turnLockTime, float wanderPhase)
     {
         var stateType = typeof(GameApp).GetNestedType("AutoBotState", BindingFlags.NonPublic);
@@ -2461,5 +2638,84 @@ public sealed class CoreFlowTests
         var field = state.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.NotNull(field);
         return field!.GetValue(state)!;
+    }
+
+    private sealed class ThrowingWriteStream : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => 0;
+        public override long Position
+        {
+            get => 0;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            throw new IOException("broken stream");
+        }
+    }
+
+    private sealed class ThrowingDisposeStream(bool objectDisposed) : Stream
+    {
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => 0;
+        public override long Position
+        {
+            get => 0;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+            if (objectDisposed)
+            {
+                throw new ObjectDisposedException(nameof(ThrowingDisposeStream));
+            }
+
+            throw new IOException("dispose flush failed");
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void SetLength(long value)
+        {
+            throw new NotSupportedException();
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+        }
     }
 }
