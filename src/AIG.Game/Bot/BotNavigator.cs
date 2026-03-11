@@ -84,7 +84,8 @@ internal static class BotNavigator
                 targetCenter,
                 bounds,
                 cell => CanActFromCell(settings, cell, targetX, targetY, targetZ)
-                    && !DoesPoseOverlapBlock(settings, cell.ToPose(), targetX, targetY, targetZ),
+                    && !DoesPoseOverlapBlock(settings, cell.ToPose(), targetX, targetY, targetZ)
+                    && !IsSupportingPoseBlock(settings, cell.ToPose(), targetX, targetY, targetZ),
                 cell => GetActionTraversalPenalty(world, blueprint, targetY, cell),
                 canVisitCell: null,
                 out var goalCell,
@@ -388,6 +389,21 @@ internal static class BotNavigator
         var eye = pose + new Vector3(0f, settings.ColliderHeight * 0.92f, 0f);
         var center = new Vector3(targetX + 0.5f, targetY + 0.5f, targetZ + 0.5f);
         return Vector3.DistanceSquared(eye, center) <= settings.ReachDistance * settings.ReachDistance;
+    }
+
+    internal static bool IsSupportingPoseBlock(BotNavigationSettings settings, Vector3 pose, int x, int y, int z)
+    {
+        var supportY = (int)MathF.Floor(pose.Y - 0.05f);
+        if (y != supportY)
+        {
+            return false;
+        }
+
+        var minX = (int)MathF.Floor(pose.X - settings.ColliderHalfWidth + 0.03f);
+        var maxX = (int)MathF.Floor(pose.X + settings.ColliderHalfWidth - 0.03f);
+        var minZ = (int)MathF.Floor(pose.Z - settings.ColliderHalfWidth + 0.03f);
+        var maxZ = (int)MathF.Floor(pose.Z + settings.ColliderHalfWidth - 0.03f);
+        return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
     }
 
     private static bool DoesPoseOverlapBlock(BotNavigationSettings settings, Vector3 pose, int x, int y, int z)

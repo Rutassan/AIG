@@ -11,11 +11,11 @@ internal readonly record struct HouseBuildStep(int X, int Y, int Z, BlockType Bl
 internal sealed class HouseBlueprint
 {
     private const int FootprintSize = 7;
-    private const int PadMargin = 1;
-    private const int SearchRadius = 12;
-    private const int WallHeight = 3;
-    private const int RoofBaseOffset = 4;
-    private const int RoofPeakOffset = 7;
+    private const int PadMargin = 2;
+    private const int SearchRadius = 14;
+    private const int WallHeight = 4;
+    private const int RoofBaseOffset = 5;
+    private const int RoofPeakOffset = 8;
 
     private readonly record struct BuildSite(int OriginX, int FloorY, int OriginZ);
 
@@ -82,13 +82,33 @@ internal sealed class HouseBlueprint
         var remaining = 0;
         for (var i = Math.Clamp(fromIndex, 0, _steps.Length); i < _steps.Length; i++)
         {
-            if (_steps[i].Block == block)
+            if (_steps[i].Block == block && !IsSupersededStep(i))
             {
                 remaining++;
             }
         }
 
         return remaining;
+    }
+
+    internal bool IsSupersededStep(int stepIndex)
+    {
+        if ((uint)stepIndex >= (uint)_steps.Length)
+        {
+            return false;
+        }
+
+        var step = _steps[stepIndex];
+        for (var i = stepIndex + 1; i < _steps.Length; i++)
+        {
+            var next = _steps[i];
+            if (next.X == step.X && next.Y == step.Y && next.Z == step.Z)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static HouseBlueprint CreateCabinS(WorldMap world, Vector3 playerPosition, Vector3 lookDirection)
@@ -118,14 +138,22 @@ internal sealed class HouseBlueprint
 
     private static HouseBuildStep[] BuildCabinSteps(WorldMap world, int originX, int floorY, int originZ)
     {
-        var steps = new List<HouseBuildStep>(384);
+        var steps = new List<HouseBuildStep>(512);
         var footprintMaxX = originX + FootprintSize - 1;
         var footprintMaxZ = originZ + FootprintSize - 1;
         var padMinX = Math.Max(0, originX - PadMargin);
         var padMaxX = Math.Min(world.Width - 1, footprintMaxX + PadMargin);
         var padMinZ = Math.Max(0, originZ - PadMargin);
         var padMaxZ = Math.Min(world.Depth - 1, footprintMaxZ + PadMargin);
-        var clearTopY = Math.Min(world.Height - 1, floorY + RoofPeakOffset + 1);
+        var clearTopY = Math.Min(world.Height - 1, floorY + RoofPeakOffset + 2);
+        var centerX = originX + 3;
+        var wallTopY = floorY + WallHeight;
+        var roofMinX = Math.Max(0, originX - 1);
+        var roofMaxX = Math.Min(world.Width - 1, footprintMaxX + 1);
+        var roofMinZ = Math.Max(0, originZ - 1);
+        var roofMaxZ = Math.Min(world.Depth - 1, footprintMaxZ + 1);
+        var chimneyX = footprintMaxX - 1;
+        var chimneyZ = footprintMaxZ - 1;
 
         void AddStep(int x, int y, int z, BlockType block)
         {
@@ -142,16 +170,45 @@ internal sealed class HouseBlueprint
             return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
         }
 
-        static bool IsWallOpening(int x, int y, int z, int minX, int floorY, int minZ, int maxX)
+        static bool IsCorner(int x, int z, int minX, int maxX, int minZ, int maxZ)
         {
-            var isDoor = x == minX + 3 && z == minZ && y >= floorY + 1 && y <= floorY + 2;
-            var isLeftWindow = x == minX && z == minZ + 2 && y == floorY + 2;
-            var isRightWindow = x == maxX && z == minZ + 4 && y == floorY + 2;
-            return isDoor || isLeftWindow || isRightWindow;
+            return (x == minX || x == maxX) && (z == minZ || z == maxZ);
         }
 
-        // 1. Готовим полянку по колонкам: очищаем и сразу выравниваем каждую ячейку.
-        // Так бот не получает временную "канаву" вокруг дома в середине стройки.
+        static bool IsPorchDeck(int x, int z, int minX, int minZ)
+        {
+            return z == minZ - 1 && x >= minX + 2 && x <= minX + 4;
+        }
+
+        static bool IsPathColumn(int x, int z, int centerX, int minZ)
+        {
+            return x == centerX && z >= minZ - 2 && z < minZ - 1;
+        }
+
+        static bool IsDecorShrub(int x, int z, int padMinX, int padMaxX, int minZ, int maxZ)
+        {
+            return (x == padMinX + 1 || x == padMaxX - 1)
+                && (z == minZ + 1 || z == maxZ - 1);
+        }
+
+        static bool IsWallOpening(int x, int y, int z, int minX, int floorY, int minZ, int maxX, int maxZ)
+        {
+            var isDoor = x == minX + 3 && z == minZ && y >= floorY + 1 && y <= floorY + 2;
+            var isFrontWindowLeft = x == minX + 1 && z == minZ && y == floorY + 2;
+            var isFrontWindowRight = x == maxX - 1 && z == minZ && y == floorY + 2;
+            var isLeftWindow = x == minX && z == minZ + 2 && y == floorY + 2;
+            var isRightWindow = x == maxX && z == minZ + 4 && y == floorY + 2;
+            var isBackWindow = x == minX + 3 && z == maxZ && y == floorY + 2;
+            return isDoor || isFrontWindowLeft || isFrontWindowRight || isLeftWindow || isRightWindow || isBackWindow;
+        }
+
+        bool IsFoundationPerimeter(int x, int z)
+        {
+            return IsFootprintColumn(x, z, originX, footprintMaxX, originZ, footprintMaxZ)
+                && (x == originX || x == footprintMaxX || z == originZ || z == footprintMaxZ);
+        }
+
+        // 1. Готовим площадку, крыльцо и двор по колонкам: очищаем и сразу выравниваем каждую ячейку.
         for (var x = padMinX; x <= padMaxX; x++)
         {
             for (var z = padMinZ; z <= padMaxZ; z++)
@@ -172,50 +229,120 @@ internal sealed class HouseBlueprint
                     AddStep(x, y, z, BlockType.Dirt);
                 }
 
-                var surfaceBlock = IsFootprintColumn(x, z, originX, footprintMaxX, originZ, footprintMaxZ)
-                    ? BlockType.Wood
-                    : BlockType.Dirt;
+                var surfaceBlock = BlockType.Dirt;
+                if (IsFoundationPerimeter(x, z))
+                {
+                    surfaceBlock = BlockType.Stone;
+                }
+                else if (IsFootprintColumn(x, z, originX, footprintMaxX, originZ, footprintMaxZ))
+                {
+                    surfaceBlock = BlockType.Wood;
+                }
+                else if (IsPorchDeck(x, z, originX, originZ))
+                {
+                    surfaceBlock = BlockType.Wood;
+                }
+                else if (IsPathColumn(x, z, centerX, originZ) || (z == originZ - 1 && x == centerX))
+                {
+                    surfaceBlock = BlockType.Stone;
+                }
+
                 AddStep(x, floorY, z, surfaceBlock);
             }
         }
 
-        // 3. Стены без последующего "вырезания": проемы просто не строим.
-        for (var y = floorY + 1; y <= floorY + WallHeight; y++)
+        // 2. Цоколь и стены без последующего "вырезания": проёмы просто не строим.
+        for (var y = floorY + 1; y <= wallTopY; y++)
         {
             for (var x = originX; x <= footprintMaxX; x++)
             {
                 for (var z = originZ; z <= footprintMaxZ; z++)
                 {
                     var isPerimeter = x == originX || x == footprintMaxX || z == originZ || z == footprintMaxZ;
-                    if (!isPerimeter || IsWallOpening(x, y, z, originX, floorY, originZ, footprintMaxX))
+                    if (!isPerimeter || IsWallOpening(x, y, z, originX, floorY, originZ, footprintMaxX, footprintMaxZ))
                     {
                         continue;
                     }
 
-                    AddStep(x, y, z, BlockType.Wood);
+                    var isCornerBeam = IsCorner(x, z, originX, footprintMaxX, originZ, footprintMaxZ);
+                    var block = y == floorY + 1 && !isCornerBeam
+                        ? BlockType.Stone
+                        : BlockType.Wood;
+                    AddStep(x, y, z, block);
                 }
+            }
+        }
+
+        // 3. Декоративные балки и крыльцо.
+        for (var y = floorY + 1; y <= wallTopY; y++)
+        {
+            AddStep(originX + 2, y, originZ, BlockType.Wood);
+            AddStep(originX + 4, y, originZ, BlockType.Wood);
+        }
+
+        for (var y = floorY + 1; y <= floorY + 3; y++)
+        {
+            AddStep(originX + 2, y, originZ - 1, BlockType.Wood);
+            AddStep(originX + 4, y, originZ - 1, BlockType.Wood);
+        }
+
+        for (var x = originX + 2; x <= originX + 4; x++)
+        {
+            for (var z = originZ - 1; z <= originZ; z++)
+            {
+                AddStep(x, floorY + 4, z, BlockType.Wood);
             }
         }
 
         // 4. Фронтоны на передней и задней стене.
         for (var x = originX + 1; x < footprintMaxX; x++)
         {
-            var roofY = floorY + RoofBaseOffset + (3 - Math.Abs((originX + 3) - x));
-            for (var y = floorY + WallHeight + 1; y < roofY; y++)
+            var roofY = floorY + RoofBaseOffset + (4 - Math.Abs(centerX - x));
+            for (var y = wallTopY + 1; y < roofY; y++)
             {
                 AddStep(x, y, originZ, BlockType.Wood);
                 AddStep(x, y, footprintMaxZ, BlockType.Wood);
             }
         }
 
-        // 5. Крыша из дерева. Так дом выглядит как дом, а не как куст.
-        for (var x = originX; x <= footprintMaxX; x++)
+        // 5. Крыша с навесами.
+        for (var x = roofMinX; x <= roofMaxX; x++)
         {
-            var roofRise = 3 - Math.Abs((originX + 3) - x);
+            var roofRise = Math.Max(0, 4 - Math.Abs(centerX - x));
             var roofY = floorY + RoofBaseOffset + roofRise;
-            for (var z = originZ; z <= footprintMaxZ; z++)
+            for (var z = roofMinZ; z <= roofMaxZ; z++)
             {
+                if (x == chimneyX && z == chimneyZ && roofY >= floorY + RoofBaseOffset)
+                {
+                    continue;
+                }
+
                 AddStep(x, roofY, z, BlockType.Wood);
+            }
+        }
+
+        // 6. Дымоход из камня.
+        for (var y = floorY + 2; y <= Math.Min(world.Height - 1, floorY + RoofPeakOffset + 1); y++)
+        {
+            AddStep(chimneyX, y, chimneyZ, BlockType.Stone);
+        }
+
+        // 7. Декор вокруг дома: входная дорожка, стояки и кусты.
+        AddStep(centerX - 1, floorY, originZ - 2, BlockType.Stone);
+        AddStep(centerX + 1, floorY, originZ - 2, BlockType.Stone);
+        AddStep(originX + 2, floorY + 1, padMinZ, BlockType.Wood);
+        AddStep(originX + 4, floorY + 1, padMinZ, BlockType.Wood);
+
+        for (var x = padMinX; x <= padMaxX; x++)
+        {
+            for (var z = padMinZ; z <= padMaxZ; z++)
+            {
+                if (!IsDecorShrub(x, z, padMinX, padMaxX, originZ, footprintMaxZ))
+                {
+                    continue;
+                }
+
+                AddStep(x, floorY + 1, z, BlockType.Leaves);
             }
         }
 

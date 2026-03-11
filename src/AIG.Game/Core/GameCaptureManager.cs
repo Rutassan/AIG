@@ -87,6 +87,7 @@ internal static class FfmpegVideoEncoder
 internal sealed class GameCaptureManager
 {
     private const string RecordingFrameExtension = ".bmp";
+    private const string LegacyScreenshotPattern = "screenshot*.png";
     private sealed record RecordingSession(string FramesDirectory, string OutputFilePath);
 
     private readonly string _screenshotsDirectory;
@@ -94,6 +95,7 @@ internal sealed class GameCaptureManager
     private readonly int _videoFramesPerSecond;
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<VideoEncodingRequest, VideoEncodingResult> _encoder;
+    private readonly string _workingDirectory;
 
     private RecordingSession? _recordingSession;
     private float _recordingAccumulator;
@@ -104,13 +106,17 @@ internal sealed class GameCaptureManager
         string videosDirectory,
         int videoFramesPerSecond,
         Func<VideoEncodingRequest, VideoEncodingResult>? encoder = null,
-        Func<DateTimeOffset>? clock = null)
+        Func<DateTimeOffset>? clock = null,
+        string? workingDirectory = null)
     {
         _screenshotsDirectory = screenshotsDirectory;
         _videosDirectory = videosDirectory;
         _videoFramesPerSecond = Math.Max(1, videoFramesPerSecond);
         _encoder = encoder ?? (request => FfmpegVideoEncoder.Encode(request));
         _clock = clock ?? (() => DateTimeOffset.Now);
+        _workingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
+            ? Directory.GetCurrentDirectory()
+            : workingDirectory;
     }
 
     internal bool IsRecording => _recordingSession is not null;
@@ -194,6 +200,32 @@ internal sealed class GameCaptureManager
         framePath = Path.Combine(_recordingSession.FramesDirectory, $"frame-{_recordingFrameIndex:D06}{RecordingFrameExtension}");
         _recordingFrameIndex++;
         return true;
+    }
+
+    internal int CleanupLegacyRootScreenshots()
+    {
+        if (string.IsNullOrWhiteSpace(_workingDirectory) || !Directory.Exists(_workingDirectory))
+        {
+            return 0;
+        }
+
+        var removed = 0;
+        foreach (var path in Directory.GetFiles(_workingDirectory, LegacyScreenshotPattern, SearchOption.TopDirectoryOnly))
+        {
+            try
+            {
+                File.Delete(path);
+                removed++;
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        return removed;
     }
 
     private string BuildTimestamp()

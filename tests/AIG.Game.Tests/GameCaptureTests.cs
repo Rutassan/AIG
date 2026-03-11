@@ -163,6 +163,40 @@ public sealed class GameCaptureTests
         }
     }
 
+    [Fact(DisplayName = "GameCaptureManager удаляет лишние screenshotXXX из корня проекта")]
+    public void GameCaptureManager_CleanupLegacyRootScreenshots_RemovesRootDuplicates()
+    {
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var screenshots = Path.Combine(tempRoot, "captures", "screens");
+            Directory.CreateDirectory(screenshots);
+            var legacyA = Path.Combine(tempRoot, "screenshot000.png");
+            var legacyB = Path.Combine(tempRoot, "screenshot001.png");
+            var keep = Path.Combine(tempRoot, "not-a-screenshot.png");
+            File.WriteAllText(legacyA, "a");
+            File.WriteAllText(legacyB, "b");
+            File.WriteAllText(keep, "keep");
+
+            var manager = new GameCaptureManager(
+                screenshots,
+                Path.Combine(tempRoot, "captures", "videos"),
+                30,
+                workingDirectory: tempRoot);
+
+            var removed = manager.CleanupLegacyRootScreenshots();
+
+            Assert.Equal(2, removed);
+            Assert.False(File.Exists(legacyA));
+            Assert.False(File.Exists(legacyB));
+            Assert.True(File.Exists(keep));
+        }
+        finally
+        {
+            DeleteDirectoryIfExists(tempRoot);
+        }
+    }
+
     [Fact(DisplayName = "GameCaptureManager записывает BMP-кадры и очищает временные кадры после успешной сборки видео")]
     public void GameCaptureManager_StartAndStopRecording_CleansFramesDirectoryOnSuccess()
     {
@@ -290,6 +324,47 @@ public sealed class GameCaptureTests
         }
         finally
         {
+            DeleteDirectoryIfExists(tempRoot);
+        }
+    }
+
+    [Fact(DisplayName = "GameApp после снимка очищает лишние screenshotXXX из корня проекта")]
+    public void GameApp_FlushCaptureOutputs_CleansLegacyRootScreenshots()
+    {
+        var tempRoot = CreateTempDirectory();
+        var previousDirectory = Directory.GetCurrentDirectory();
+        try
+        {
+            Directory.SetCurrentDirectory(tempRoot);
+            var platform = new FakeGamePlatform();
+            var captureManager = new GameCaptureManager(
+                Path.Combine(tempRoot, "captures", "screenshots"),
+                Path.Combine(tempRoot, "captures", "videos"),
+                30,
+                request =>
+                {
+                    File.WriteAllText(request.OutputFilePath, "video");
+                    return new VideoEncodingResult(true, request.OutputFilePath, string.Empty);
+                },
+                () => new DateTimeOffset(2026, 3, 10, 12, 0, 0, 555, TimeSpan.Zero),
+                tempRoot);
+            var config = new GameConfig { FullscreenByDefault = false };
+            var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: config.ChunkSize, seed: 0);
+            var app = new GameApp(config, platform, world, captureManager);
+
+            File.WriteAllText(Path.Combine(tempRoot, "screenshot000.png"), "legacy");
+            platform.SetPressedKeys(KeyboardKey.F12);
+            Assert.True(app.HandleCaptureHotkeys());
+
+            app.FlushCaptureOutputs(0f);
+
+            Assert.Single(platform.SavedScreenshots);
+            Assert.StartsWith(Path.Combine(tempRoot, "captures", "screenshots"), platform.SavedScreenshots[0], StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(tempRoot, "screenshot000.png")));
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(previousDirectory);
             DeleteDirectoryIfExists(tempRoot);
         }
     }

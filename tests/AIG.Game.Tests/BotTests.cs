@@ -101,10 +101,16 @@ public sealed class BotTests
         Assert.Equal("Дом S", blueprint.Name);
         Assert.True(blueprint.RequiredResources[BlockType.Wood] > 0);
         Assert.True(blueprint.RequiredResources[BlockType.Dirt] > 0);
-        Assert.DoesNotContain(BlockType.Stone, blueprint.RequiredResources.Keys);
-        Assert.DoesNotContain(BlockType.Leaves, blueprint.RequiredResources.Keys);
+        Assert.True(blueprint.RequiredResources[BlockType.Stone] > 0);
+        Assert.True(blueprint.RequiredResources[BlockType.Leaves] > 0);
         Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX + 3 && step.Y == blueprint.FloorY && step.Z == blueprint.OriginZ + 3 && step.Block == BlockType.Wood);
+        Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX && step.Y == blueprint.FloorY && step.Z == blueprint.OriginZ && step.Block == BlockType.Stone);
+        Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX + 3 && step.Y == blueprint.FloorY && step.Z == blueprint.OriginZ - 1 && step.Block == BlockType.Wood);
+        Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX + 3 && step.Y == blueprint.FloorY && step.Z == blueprint.OriginZ - 2 && step.Block == BlockType.Stone);
+        Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX + 5 && step.Y == blueprint.FloorY + 2 && step.Z == blueprint.OriginZ + 5 && step.Block == BlockType.Stone);
+        Assert.Contains(blueprint.Steps, step => step.X == blueprint.OriginX - 1 && step.Y == blueprint.FloorY + 1 && step.Z == blueprint.OriginZ + 1 && step.Block == BlockType.Leaves);
         Assert.True(blueprint.IsPlannedSolidBlock(blueprint.OriginX + 3, blueprint.FloorY, blueprint.OriginZ + 3, BlockType.Wood));
+        Assert.True(blueprint.IsPlannedSolidBlock(blueprint.OriginX, blueprint.FloorY, blueprint.OriginZ, BlockType.Stone));
         Assert.True(blueprint.IsInsideFootprint(blueprint.OriginX + 3, blueprint.OriginZ + 3));
         Assert.True(blueprint.IsInsideInterior(blueprint.OriginX + 3, blueprint.OriginZ + 3));
         Assert.False(blueprint.IsInsideInterior(blueprint.OriginX, blueprint.OriginZ));
@@ -113,8 +119,36 @@ public sealed class BotTests
         Assert.False(blueprint.IsPlannedSolidBlock(blueprint.OriginX, blueprint.FloorY + 2, blueprint.OriginZ + 2, BlockType.Wood));
         Assert.False(blueprint.IsPlannedSolidBlock(blueprint.OriginX + 6, blueprint.FloorY + 2, blueprint.OriginZ + 4, BlockType.Wood));
         Assert.True(blueprint.CountRemaining(BlockType.Wood, fromIndex: -5) > 0);
+        Assert.True(blueprint.CountRemaining(BlockType.Stone, fromIndex: 0) > 0);
+        Assert.True(blueprint.CountRemaining(BlockType.Leaves, fromIndex: 0) > 0);
         Assert.Equal(0, blueprint.CountRemaining(BlockType.Wood, fromIndex: 99_999));
         Assert.InRange(blueprint.Center.X, blueprint.OriginX + 3f, blueprint.OriginX + 4f);
+    }
+
+    [Fact(DisplayName = "House blueprint не считает перекрытые шаги реальным остатком ресурсов")]
+    public void HouseBlueprint_CountRemaining_SkipsSupersededSteps()
+    {
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Перекрытые-шаги",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(8, 2, 8, BlockType.Stone),
+                new HouseBuildStep(8, 2, 8, BlockType.Air),
+                new HouseBuildStep(9, 2, 8, BlockType.Stone)
+            ]);
+
+        Assert.True(blueprint.IsSupersededStep(0));
+        Assert.False(blueprint.IsSupersededStep(1));
+        Assert.False(blueprint.IsSupersededStep(2));
+        Assert.False(blueprint.IsSupersededStep(99));
+        Assert.Equal(1, blueprint.CountRemaining(BlockType.Stone, 0));
+        Assert.Equal(1, blueprint.CountRemaining(BlockType.Stone, 2));
+        Assert.Equal(0, blueprint.CountRemaining(BlockType.Stone, 3));
+        Assert.Equal(1, blueprint.CountRemaining(BlockType.Air, 0));
     }
 
     [Fact(DisplayName = "House blueprint готовит колонку площадки целиком, без временной канавы вокруг дома")]
@@ -135,14 +169,14 @@ public sealed class BotTests
             }
         }
 
-        world.SetBlock(3, 1, 3, BlockType.Air);
-        world.SetBlock(3, 4, 3, BlockType.Wood);
-        world.SetBlock(3, 5, 3, BlockType.Leaves);
+        world.SetBlock(2, 1, 2, BlockType.Air);
+        world.SetBlock(2, 4, 2, BlockType.Wood);
+        world.SetBlock(2, 5, 2, BlockType.Leaves);
 
         var steps = Assert.IsType<HouseBuildStep[]>(InvokePrivateStatic(typeof(HouseBlueprint), "BuildCabinSteps", world, 4, 3, 4)!);
         var columnSteps = steps
             .Select((step, index) => (step, index))
-            .Where(entry => entry.step.X == 3 && entry.step.Z == 3)
+            .Where(entry => entry.step.X == 2 && entry.step.Z == 2)
             .ToArray();
 
         Assert.True(columnSteps.Length >= 4);
@@ -151,7 +185,7 @@ public sealed class BotTests
         Assert.Contains(columnSteps, entry => entry.step.Y == 4 && entry.step.Block == BlockType.Air);
         Assert.Contains(columnSteps, entry => entry.step.Y == 5 && entry.step.Block == BlockType.Air);
         Assert.Contains(columnSteps, entry => entry.step.Y == 2 && entry.step.Block == BlockType.Dirt);
-        Assert.Equal(new HouseBuildStep(3, 3, 3, BlockType.Dirt), columnSteps[^1].step);
+        Assert.Equal(new HouseBuildStep(2, 3, 2, BlockType.Dirt), columnSteps[^1].step);
     }
 
     [Fact(DisplayName = "CompanionBot не выбирает позу внутри самого строящегося блока")]
@@ -170,6 +204,24 @@ public sealed class BotTests
         Assert.True(found);
         var pose = Assert.IsType<Vector3>(args[6]!);
         Assert.False((int)MathF.Floor(pose.X) == 10 && (int)MathF.Floor(pose.Z) == 10);
+    }
+
+    [Fact(DisplayName = "CompanionBot при добыче не выбирает позу на опоре самого целевого блока")]
+    public void CompanionBot_TryFindActionPoseNear_ForGather_DoesNotStandOnTargetSupport()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(2.5f, 2.02f, 10.5f));
+        var method = typeof(CompanionBot).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(candidate => candidate.Name == "TryFindActionPoseNear" && candidate.GetParameters().Length == 8);
+        var args = new object?[] { world, 10, 2, 10, 2, null, null, null };
+
+        var found = (bool)method.Invoke(bot, args)!;
+
+        Assert.True(found);
+        var pose = Assert.IsType<Vector3>(args[6]!);
+        Assert.False((int)MathF.Floor(pose.X) == 10 && (int)MathF.Floor(pose.Z) == 10, $"Pose={pose}");
     }
 
     [Fact(DisplayName = "CompanionBot при стройке предпочитает рабочую точку на уровне площадки, а не яму рядом со стеной")]
@@ -264,8 +316,10 @@ public sealed class BotTests
 
         var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 8.5f));
         var blueprint = HouseBlueprint.CreateCabinS(world, playerPosition, new Vector3(1f, 0f, 0f));
-        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 320);
-        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 96);
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 480);
+        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 128);
+        InvokePrivate(bot, "AddStockpile", BlockType.Stone, 160);
+        InvokePrivate(bot, "AddStockpile", BlockType.Leaves, 96);
 
         Assert.True(bot.Enqueue(BotCommand.BuildHouse(blueprint)));
 
@@ -274,7 +328,10 @@ public sealed class BotTests
         Assert.Null(bot.ActiveCommand);
         Assert.Equal(BlockType.Wood, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY, blueprint.OriginZ + 3));
         Assert.Equal(BlockType.Wood, world.GetBlock(blueprint.OriginX, blueprint.FloorY + 1, blueprint.OriginZ));
-        Assert.Equal(BlockType.Wood, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY + 7, blueprint.OriginZ + 3));
+        Assert.Equal(BlockType.Wood, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY + 9, blueprint.OriginZ + 3));
+        Assert.Equal(BlockType.Stone, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY, blueprint.OriginZ - 2));
+        Assert.Equal(BlockType.Leaves, world.GetBlock(blueprint.OriginX - 1, blueprint.FloorY + 1, blueprint.OriginZ + 1));
+        Assert.Equal(BlockType.Stone, world.GetBlock(blueprint.OriginX + 5, blueprint.FloorY + 2, blueprint.OriginZ + 5));
         Assert.Equal(BlockType.Air, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY + 1, blueprint.OriginZ));
     }
 
@@ -364,7 +421,7 @@ public sealed class BotTests
     {
         var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
         world.SetBlock(8, 2, 8, BlockType.Wood);
-        world.SetBlock(4, 2, 4, BlockType.Wood);
+        world.SetBlock(2, 2, 2, BlockType.Wood);
         WarmWorld(world, new Vector3(6.5f, 2f, 6.5f));
 
         var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 6.5f));
@@ -383,9 +440,9 @@ public sealed class BotTests
 
         var target = nearest.Args[2]!;
         var targetType = target.GetType();
-        Assert.Equal(4, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
         Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
-        Assert.Equal(4, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
     }
 
     [Fact(DisplayName = "CompanionBot не выбирает ресурс под собой, под игроком и внутри защищенной зоны стройки")]
@@ -512,6 +569,71 @@ public sealed class BotTests
         Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
         Assert.Equal(18, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
         Assert.Null(GetPrivateField(bot, "_resourceFocusTarget"));
+    }
+
+    [Fact(DisplayName = "CompanionBot для глубокой цели умеет выбирать рабочую позу выше уровня самого блока")]
+    public void CompanionBot_TryFindActionPoseNear_ForDeepTarget_AllowsHigherReachablePose()
+    {
+        var world = CreateFlatWorld(24, 16);
+        for (var x = 9; x <= 11; x++)
+        {
+            for (var z = 9; z <= 11; z++)
+            {
+                if (x == 10 && z == 10)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(10, 0, 10, BlockType.Stone);
+        world.SetBlock(10, 1, 10, BlockType.Air);
+        world.SetBlock(11, 4, 10, BlockType.Dirt);
+        WarmWorld(world, new Vector3(12.5f, 5.02f, 10.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(12.5f, 5.02f, 10.5f));
+        var method = typeof(CompanionBot).GetMethods(BindingFlags.Instance | BindingFlags.NonPublic)
+            .Single(candidate => candidate.Name == "TryFindActionPoseNear" && candidate.GetParameters().Length == 8);
+        var args = new object?[] { world, 10, 0, 10, 2, null, null, null };
+
+        var found = (bool)method.Invoke(bot, args)!;
+
+        Assert.True(found);
+        var pose = Assert.IsType<Vector3>(args[6]!);
+        Assert.True(pose.Y >= 5f, $"Pose={pose}");
+        Assert.True((bool)InvokePrivate(bot, "CanActOnBlockFromPose", pose, 10, 0, 10)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при добыче камня предпочитает достижимую цель вместо ближнего недостижимого дна карьера")]
+    public void CompanionBot_TryFindNearestResource_PrefersReachableStoneOverDeepPitTarget()
+    {
+        var world = CreateFlatWorld(32, 16);
+        for (var x = 12; x <= 18; x++)
+        {
+            for (var z = 14; z <= 18; z++)
+            {
+                world.SetBlock(x, 5, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(19, 1, 16, BlockType.Air);
+        world.SetBlock(19, 0, 16, BlockType.Stone);
+        world.SetBlock(22, 4, 16, BlockType.Stone);
+        WarmWorld(world, new Vector3(16.5f, 6.02f, 16.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(16.5f, 6.02f, 16.5f));
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+        Assert.True((bool)nearest.Result!);
+
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(22, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(4, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(16, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
     }
 
     [Fact(DisplayName = "CompanionBot в focused-поиске пропускает blocked/keepout цели и выбирает лучший оставшийся вариант")]
@@ -1059,8 +1181,7 @@ public sealed class BotTests
         WarmWorld(blockedGatherWorld, new Vector3(10.5f, 2f, 10.5f));
         var gatherBot = new CompanionBot(new GameConfig(), new Vector3(3.5f, 2.02f, 3.5f));
         var gatherTarget = InvokePrivateWithArgs(gatherBot, "TryFindNearestResource", blockedGatherWorld, BotResourceType.Wood, null!);
-        Assert.True((bool)gatherTarget.Result!);
-        SetPrivateField(gatherBot, "_currentTarget", gatherTarget.Args[2]);
+        Assert.False((bool)gatherTarget.Result!);
         _ = InvokePrivate(gatherBot, "ExecuteGatherObjective", blockedGatherWorld, BotResourceType.Wood, 1, 1f / 30f, false);
         Assert.Equal(BotStatus.NoPath, gatherBot.Status);
 
@@ -1115,6 +1236,17 @@ public sealed class BotTests
         SetPrivateField(bot, "_stuckTime", 0.4f);
         InvokePrivate(bot, "UpdateRouteProgress", 0.25f, 0.01f, 0.45f, 0.43f);
         Assert.Equal(0f, (float)GetPrivateField(bot, "_stuckTime")!);
+    }
+
+    [Fact(DisplayName = "CompanionBot рядом с waypoint всё равно накапливает stuck-time, если прогресса к цели нет")]
+    public void CompanionBot_UpdateRouteProgress_CloseWithoutProgress_StillTracksStuck()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+
+        SetPrivateField(bot, "_stuckTime", 0.4f);
+        InvokePrivate(bot, "UpdateRouteProgress", 0.25f, 0.01f, 0.45f, 0.449f);
+
+        Assert.Equal(0.65f, (float)GetPrivateField(bot, "_stuckTime")!, 0.001f);
     }
 
     [Fact(DisplayName = "CompanionBot использует точный arrival для финальной action-точки и мягкий для follow")]
@@ -1541,6 +1673,41 @@ public sealed class BotTests
         Assert.NotEmpty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
     }
 
+    [Fact(DisplayName = "CompanionBot считает почти вертикальный спуск к рабочей точке сценарием только для stage-route")]
+    public void CompanionBot_RequiresStagedLocalActionRoute_DetectsVerticalDrop()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 5.02f, 10.5f));
+        Assert.True((bool)InvokePrivate(bot, "RequiresStagedLocalActionRoute", new Vector3(10.5f, 3.02f, 10.5f))!);
+        Assert.False((bool)InvokePrivate(bot, "RequiresStagedLocalActionRoute", new Vector3(10.92f, 3.02f, 10.5f))!);
+        Assert.False((bool)InvokePrivate(bot, "RequiresStagedLocalActionRoute", new Vector3(10.5f, 4.60f, 10.5f))!);
+    }
+
+    [Fact(DisplayName = "CompanionBot сбрасывает stale action-route, если его единственный waypoint требует почти вертикальный спуск")]
+    public void CompanionBot_TryEnsureActionRoute_ResetsStaleVerticalDropWaypoint()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 10.02f, 10.5f));
+        var purpose = ParseNestedEnum(typeof(CompanionBot), "NavigationPurpose", "GatherAction");
+        var verticalWaypoint = new Vector3(10.5f, 3.02f, 10.5f);
+        SetPrivateField(bot, "_navigationGoal", CreateNavigationGoal("GatherAction", 10, 2, 10, 2, null));
+        SetPrivateField(bot, "_navigationWaypoints", new[] { verticalWaypoint });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+
+        Assert.False((bool)InvokePrivate(bot, "TryEnsureActionRoute", world, purpose, 10, 2, 10, 2, null)!);
+        Assert.Empty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
     [Fact(DisplayName = "CompanionBot повторно использует ту же рабочую цель, если блок уже в досягаемости")]
     public void CompanionBot_TryEnsureActionRoute_ReusesReachableCurrentGoal()
     {
@@ -1630,7 +1797,7 @@ public sealed class BotTests
     public void CompanionBot_UpdateBuildCommand_ContinuesGatheringWhileStockIsStillShort()
     {
         var world = CreateFlatWorld(24, 12);
-        world.SetBlock(13, 2, 4, BlockType.Wood);
+        world.SetBlock(15, 2, 4, BlockType.Wood);
         WarmWorld(world, new Vector3(11.5f, 2.02f, 4.5f));
 
         var blueprint = new HouseBlueprint(
@@ -1712,6 +1879,35 @@ public sealed class BotTests
         Assert.NotEqual(BotStatus.Gathering, bot.Status);
     }
 
+    [Fact(DisplayName = "CompanionBot при build-no-path использует альтернативный Air-шаг без перехода в сбор")]
+    public void CompanionBot_UpdateBuildCommand_UsesAlternateAirStepAfterRouteFailure()
+    {
+        var world = CreateFlatWorld(32, 12);
+        world.SetBlock(8, 2, 5, BlockType.Wood);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Fallback-air-route-failed",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(999, 2, 999, BlockType.Wood),
+                new HouseBuildStep(8, 2, 5, BlockType.Air)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BlockType.Air, world.GetBlock(8, 2, 5));
+        Assert.NotEqual(BotStatus.Gathering, bot.Status);
+        Assert.NotEqual(BotStatus.NoPath, bot.Status);
+    }
+
     [Fact(DisplayName = "CompanionBot при недоступном текущем шаге может сразу поставить достижимый альтернативный блок")]
     public void CompanionBot_UpdateBuildCommand_UsesReachableFallbackForImmediateBuild()
     {
@@ -1790,6 +1986,168 @@ public sealed class BotTests
 
         Assert.True((bool)selection.Result!);
         Assert.Equal(new HouseBuildStep(8, 2, 5, BlockType.Air), Assert.IsType<HouseBuildStep>(selection.Args[3]!));
+    }
+
+    [Fact(DisplayName = "CompanionBot при fallback стройки пропускает перекрытый шаг для той же клетки")]
+    public void CompanionBot_TrySelectReachableBuildStep_SkipsSupersededCandidate()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 5, BlockType.Wood);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Перекрытый-кандидат",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(999, 2, 999, BlockType.Wood),
+                new HouseBuildStep(8, 2, 5, BlockType.Stone),
+                new HouseBuildStep(8, 2, 5, BlockType.Air),
+                new HouseBuildStep(9, 2, 5, BlockType.Wood)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        InvokePrivate(bot, "AddStockpile", BlockType.Stone, 1);
+
+        var selection = InvokePrivateWithArgs(bot, "TrySelectReachableBuildStep", world, blueprint, 0, default(HouseBuildStep));
+
+        Assert.True((bool)selection.Result!);
+        Assert.Equal(2, Assert.IsType<int>(selection.Args[2]));
+        Assert.Equal(new HouseBuildStep(8, 2, 5, BlockType.Air), Assert.IsType<HouseBuildStep>(selection.Args[3]!));
+    }
+
+    [Fact(DisplayName = "CompanionBot после успешной добычи сразу снимает cooldown ретаргета")]
+    public void CompanionBot_TryHarvestTarget_ClearsRetargetCooldown()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 7.5f));
+        SetPrivateField(bot, "_retargetCooldown", 0.12f);
+        var resourceTargetType = typeof(CompanionBot).GetNestedType("ResourceTarget", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var target = Activator.CreateInstance(resourceTargetType, 8, 2, 8, BotResourceType.Stone)!;
+
+        var harvested = (bool)InvokePrivate(bot, "TryHarvestTarget", world, target, false)!;
+
+        Assert.True(harvested);
+        Assert.Equal(0f, Assert.IsType<float>(GetPrivateField(bot, "_retargetCooldown")!));
+    }
+
+    [Fact(DisplayName = "CompanionBot после gather-route-failed включает no-path cooldown и не спамит мгновенным ретаргетом")]
+    public void CompanionBot_ExecuteGatherObjective_RouteFailureStartsNoPathCooldown()
+    {
+        var world = CreateFlatWorld(32, 16);
+        for (var x = 12; x <= 18; x++)
+        {
+            for (var z = 14; z <= 18; z++)
+            {
+                world.SetBlock(x, 5, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(19, 1, 16, BlockType.Air);
+        world.SetBlock(19, 0, 16, BlockType.Stone);
+        WarmWorld(world, new Vector3(16.5f, 6.02f, 16.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(16.5f, 6.02f, 16.5f));
+
+        var result = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+
+        Assert.False(result);
+        Assert.Equal(BotStatus.NoPath, bot.Status);
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_noPathTimer")!) > 0f);
+    }
+
+    [Fact(DisplayName = "CompanionBot при зафиксированной недостижимой цели помечает gather-route-failed и блокирует ресурс")]
+    public void CompanionBot_ExecuteGatherObjective_WithExistingUnreachableTarget_BlocksIt()
+    {
+        var world = CreateFlatWorld(32, 12);
+        for (var x = 4; x <= 16; x++)
+        {
+            for (var y = 1; y <= 10; y++)
+            {
+                for (var z = 4; z <= 16; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        WarmWorld(world, new Vector3(1.5f, 2.02f, 1.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(1.5f, 2.02f, 1.5f));
+        var resourceTargetType = typeof(CompanionBot).GetNestedType("ResourceTarget", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var target = Activator.CreateInstance(resourceTargetType, 10, 2, 10, BotResourceType.Stone)!;
+        SetPrivateField(bot, "_currentTarget", target);
+
+        var result = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+
+        Assert.False(result);
+        Assert.Equal(BotStatus.NoPath, bot.Status);
+        Assert.Null(GetPrivateField(bot, "_currentTarget"));
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_retargetCooldown")!) > 0f);
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_noPathTimer")!) > 0f);
+        var blockedTargets = Assert.IsAssignableFrom<System.Collections.IDictionary>(GetPrivateField(bot, "_blockedResourceTargets")!);
+        Assert.Single(blockedTargets);
+    }
+
+    [Fact(DisplayName = "CompanionBot при обычной добыче строит GatherAction маршрут без перехода в NoPath")]
+    public void CompanionBot_UpdateGatherCommand_BuildsReachableGatherRoute()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(14, 2, 8, BlockType.Wood);
+        WarmWorld(world, new Vector3(6.5f, 2.02f, 8.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 8.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.Gather(BotResourceType.Wood, 1));
+
+        InvokePrivate(bot, "UpdateGatherCommand", world, BotResourceType.Wood, 1, 1f / 30f);
+
+        Assert.Equal(BotStatus.Gathering, bot.Status);
+        Assert.NotEmpty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+    }
+
+    [Fact(DisplayName = "CompanionBot route-aware выбор ресурса умеет перейти на action-route fallback, если ближайшая local-поза изолирована")]
+    public void CompanionBot_TryScoreReachableResourceCandidate_UsesActionRouteFallback()
+    {
+        var world = CreateFlatWorld(24, 16);
+        for (var x = 9; x <= 13; x++)
+        {
+            for (var z = 9; z <= 11; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(10, 0, 10, BlockType.Stone);
+        world.SetBlock(11, 4, 10, BlockType.Dirt);
+        world.SetBlock(11, 5, 9, BlockType.Stone);
+        world.SetBlock(11, 6, 9, BlockType.Stone);
+        world.SetBlock(11, 5, 11, BlockType.Stone);
+        world.SetBlock(11, 6, 11, BlockType.Stone);
+        world.SetBlock(12, 5, 10, BlockType.Stone);
+        world.SetBlock(12, 6, 10, BlockType.Stone);
+        world.SetBlock(13, 4, 10, BlockType.Dirt);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(15.5f, 5.02f, 10.5f));
+        var targetType = typeof(CompanionBot).GetNestedType("ResourceTarget", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var target = Activator.CreateInstance(targetType, 10, 0, 10, BotResourceType.Stone)!;
+        var result = InvokePrivateWithArgs(
+            bot,
+            "TryScoreReachableResourceCandidate",
+            world,
+            new BotNavigationSettings(0.3f, 1.8f, 7f),
+            target,
+            null!,
+            0f,
+            0f);
+
+        Assert.True((bool)result.Result!);
+        Assert.True(Assert.IsType<float>(result.Args[5]!) >= 0f);
     }
 
     [Fact(DisplayName = "CompanionBot не пытается заново искать маршрут стройки, пока активен no-path cooldown")]

@@ -201,6 +201,9 @@ public sealed class BotNavigatorTests
         Assert.False((bool)InvokePrivateStatic("DoesPoseOverlapBlock", Settings, new Vector3(3.1f, 2.02f, 4.5f), 4, 2, 4)!);
         Assert.False((bool)InvokePrivateStatic("DoesPoseOverlapBlock", Settings, new Vector3(4.5f, 0.1f, 4.5f), 4, 2, 4)!);
         Assert.False((bool)InvokePrivateStatic("DoesPoseOverlapBlock", Settings, new Vector3(4.5f, 2.02f, 3.1f), 4, 2, 4)!);
+        Assert.True(BotNavigator.IsSupportingPoseBlock(Settings, new Vector3(4.5f, 3.02f, 4.5f), 4, 2, 4));
+        Assert.False(BotNavigator.IsSupportingPoseBlock(Settings, new Vector3(4.5f, 3.02f, 4.5f), 5, 2, 4));
+        Assert.False(BotNavigator.IsSupportingPoseBlock(Settings, new Vector3(4.5f, 3.02f, 4.5f), 4, 1, 4));
 
         Assert.True((bool)InvokePrivateStatic("IsCloseToPose", new Vector3(4.5f, 2.02f, 4.5f), new Vector3(4.55f, 2.3f, 4.52f), 0.1f)!);
         Assert.False((bool)InvokePrivateStatic("IsCloseToPose", new Vector3(4.5f, 2.02f, 4.5f), new Vector3(5.0f, 2.02f, 4.5f), 0.1f)!);
@@ -228,6 +231,30 @@ public sealed class BotNavigatorTests
         Assert.Single(route);
         Assert.Equal(new Vector3(10.5f, 2.02f, 10.5f), destinationPose);
         Assert.Equal(destinationPose, route[0]);
+    }
+
+    [Fact(DisplayName = "BotNavigator для добычи не выбирает клетку на верхней грани самого целевого блока")]
+    public void BotNavigator_ActionRoute_DoesNotUseTargetBlockAsSupport()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+
+        var found = BotNavigator.TryBuildActionRoute(
+            world,
+            Settings,
+            new Vector3(2.5f, 2.02f, 10.5f),
+            targetX: 10,
+            targetY: 2,
+            targetZ: 10,
+            searchRadius: 6,
+            blueprint: null,
+            out var route,
+            out var destinationPose);
+
+        Assert.True(found);
+        Assert.NotEmpty(route);
+        Assert.False(BotNavigator.IsSupportingPoseBlock(Settings, destinationPose, 10, 2, 10), $"Destination={destinationPose}");
+        Assert.Equal(destinationPose, route[^1]);
     }
 
     private static WorldMap CreateFlatWorld(int size, int height)

@@ -34,6 +34,14 @@ public class GameApp : IGameRunner
         Far = 2
     }
 
+    private enum DecorativeVegetationKind : byte
+    {
+        None = 0,
+        Grass = 1,
+        Flower = 2,
+        Bush = 3
+    }
+
     private struct AutoBotState
     {
         public Vector3 LastPosition;
@@ -660,12 +668,14 @@ public class GameApp : IGameRunner
         if (_pendingScreenshotPath is not null)
         {
             _platform.TakeScreenshot(_pendingScreenshotPath);
+            _captureManager.CleanupLegacyRootScreenshots();
             _pendingScreenshotPath = null;
         }
 
         if (_captureManager.TryGetNextRecordingFramePath(deltaTime, out var framePath))
         {
             _platform.TakeScreenshot(framePath);
+            _captureManager.CleanupLegacyRootScreenshots();
         }
     }
 
@@ -1151,6 +1161,7 @@ public class GameApp : IGameRunner
             DrawFirstPersonHand(view.Camera);
             _platform.EndMode3D();
             DrawScreenFogOverlay(view);
+            DrawCinematicPostProcessOverlay(view);
 
             DrawHud(_state == AppState.Playing && !_botDevice.IsOpen);
             if (_state == AppState.Playing && !_botDevice.IsOpen)
@@ -1185,44 +1196,110 @@ public class GameApp : IGameRunner
         var mid = GetSkyMidColor();
         var horizon = GetSkyHorizonColor();
         var warmGlow = GetSkyGlowColor();
-        const int bands = 26;
+        const int bands = 30;
         for (var i = 0; i < bands; i++)
         {
             var y0 = i * height / bands;
             var y1 = (i + 1) * height / bands;
             var bandHeight = Math.Max(1, y1 - y0);
             var t = i / (float)(bands - 1);
-            var shapedT = MathF.Pow(t, 1.22f);
+            var shapedT = MathF.Pow(t, 1.12f);
             var coolColor = shapedT < 0.64f
                 ? LerpColor(top, mid, SmoothStep01(shapedT / 0.64f))
                 : LerpColor(mid, horizon, SmoothStep01((shapedT - 0.64f) / 0.36f));
-            var glowT = 1f - MathF.Abs(shapedT - 0.72f) / 0.20f;
-            glowT = SmoothStep01(Math.Clamp(glowT, 0f, 1f)) * 0.34f;
+            var glowT = 1f - MathF.Abs(shapedT - 0.70f) / 0.22f;
+            glowT = SmoothStep01(Math.Clamp(glowT, 0f, 1f)) * 0.40f;
             var color = LerpColor(coolColor, warmGlow, glowT);
             _platform.DrawRectangle(0, y0, width, bandHeight, color);
         }
+
+        DrawSunGlow(view);
 
         var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
         var horizonY = (int)MathF.Round(height * (0.56f + viewY * 0.2f));
         horizonY = Math.Clamp(horizonY, 0, height - 1);
         var fog = _graphics.FogColor;
-        DrawHorizonBand(width, height, horizonY - 42, 30, new Color(fog.R, fog.G, fog.B, (byte)28));
-        DrawHorizonBand(width, height, horizonY - 12, 20, new Color(fog.R, fog.G, fog.B, (byte)48));
-        DrawHorizonBand(width, height, horizonY + 12, 22, new Color(fog.R, fog.G, fog.B, (byte)26));
+        DrawHorizonBand(width, height, horizonY - 44, 32, new Color(fog.R, fog.G, fog.B, (byte)22));
+        DrawHorizonBand(width, height, horizonY - 10, 24, new Color(fog.R, fog.G, fog.B, (byte)40));
+        DrawHorizonBand(width, height, horizonY + 16, 26, new Color(fog.R, fog.G, fog.B, (byte)20));
     }
 
     private void DrawScreenFogOverlay(CameraViewBuilder.CameraView view)
     {
         var width = _platform.GetScreenWidth();
         var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
         var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
         var horizonY = (int)MathF.Round(height * (0.60f + viewY * 0.16f));
         var fog = _graphics.FogColor;
         var overlayAlpha = _botDevice.IsOpen ? 0.72f : 1f;
 
-        DrawHorizonBand(width, height, horizonY - 10, 34, new Color(fog.R, fog.G, fog.B, (byte)(22 * overlayAlpha)));
-        DrawHorizonBand(width, height, horizonY + 18, 46, new Color(fog.R, fog.G, fog.B, (byte)(18 * overlayAlpha)));
-        DrawHorizonBand(width, height, horizonY + 52, 68, new Color(fog.R, fog.G, fog.B, (byte)(14 * overlayAlpha)));
+        DrawHorizonBand(width, height, horizonY - 10, 34, new Color(fog.R, fog.G, fog.B, (byte)(18 * overlayAlpha)));
+        DrawHorizonBand(width, height, horizonY + 18, 46, new Color(fog.R, fog.G, fog.B, (byte)(14 * overlayAlpha)));
+        DrawHorizonBand(width, height, horizonY + 52, 68, new Color(fog.R, fog.G, fog.B, (byte)(10 * overlayAlpha)));
+    }
+
+    private void DrawCinematicPostProcessOverlay(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var strength = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.52f,
+            GraphicsQuality.Medium => 0.76f,
+            _ => 1f
+        };
+        if (_botDevice.IsOpen)
+        {
+            strength *= 0.82f;
+        }
+
+        var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
+        var horizonY = (int)MathF.Round(height * (0.60f + viewY * 0.14f));
+        horizonY = Math.Clamp(horizonY, 0, height - 1);
+        var fog = _graphics.FogColor;
+
+        DrawHorizonBand(width, height, horizonY - 26, 24, new Color((byte)255, (byte)207, (byte)156, (byte)MathF.Round(8f * strength)));
+        DrawHorizonBand(width, height, horizonY + 6, 36, new Color((byte)fog.R, (byte)fog.G, (byte)fog.B, (byte)MathF.Round(11f * strength)));
+        DrawHorizonBand(width, height, horizonY + 40, 54, new Color((byte)90, (byte)110, (byte)132, (byte)MathF.Round(8f * strength)));
+        DrawCinematicSunBloomOverlay(view, strength);
+
+        var vignetteSide = Math.Max(26, width / 12);
+        var vignetteTop = Math.Max(20, height / 12);
+        var vignetteBottom = Math.Max(28, height / 9);
+        var edgeAlpha = (byte)MathF.Round(12f * strength);
+        _platform.DrawRectangle(0, 0, vignetteSide, height, new Color((byte)8, (byte)16, (byte)24, edgeAlpha));
+        _platform.DrawRectangle(width - vignetteSide, 0, vignetteSide, height, new Color((byte)8, (byte)16, (byte)24, edgeAlpha));
+        _platform.DrawRectangle(0, 0, width, vignetteTop, new Color((byte)10, (byte)16, (byte)26, (byte)MathF.Round(10f * strength)));
+        _platform.DrawRectangle(0, height - vignetteBottom, width, vignetteBottom, new Color((byte)14, (byte)16, (byte)22, (byte)MathF.Round(15f * strength)));
+    }
+
+    private void DrawCinematicSunBloomOverlay(CameraViewBuilder.CameraView view, float strength)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        {
+            return;
+        }
+
+        DrawCenteredGlowRect(sunScreen, 360, 220, new Color((byte)255, (byte)203, (byte)150, (byte)MathF.Round(10f * strength)));
+        DrawCenteredGlowRect(sunScreen, 224, 136, new Color((byte)255, (byte)214, (byte)164, (byte)MathF.Round(13f * strength)));
+        DrawCenteredGlowRect(sunScreen, 132, 86, new Color((byte)255, (byte)226, (byte)182, (byte)MathF.Round(16f * strength)));
     }
 
     private void DrawHorizonBand(int width, int height, int y, int bandHeight, Color color)
@@ -1241,6 +1318,86 @@ public class GameApp : IGameRunner
         }
 
         _platform.DrawRectangle(0, top, width, drawHeight, color);
+    }
+
+    private void DrawSunGlow(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        {
+            return;
+        }
+
+        DrawCenteredGlowRect(sunScreen, 216, 216, new Color(255, 208, 150, 18));
+        DrawCenteredGlowRect(sunScreen, 132, 132, new Color(255, 218, 164, 22));
+        DrawCenteredGlowRect(sunScreen, 76, 76, new Color(255, 232, 186, 28));
+        DrawCenteredGlowRect(sunScreen, 28, 28, new Color(255, 245, 214, 34));
+    }
+
+    private void DrawCenteredGlowRect(Vector2 center, int width, int height, Color color)
+    {
+        _platform.DrawRectangle(
+            (int)MathF.Round(center.X - width * 0.5f),
+            (int)MathF.Round(center.Y - height * 0.5f),
+            width,
+            height,
+            color);
+    }
+
+    private static bool TryProjectDirectionToScreen(Camera3D camera, Vector3 direction, int screenWidth, int screenHeight, out Vector2 screenPoint)
+    {
+        screenPoint = default;
+        if (screenWidth <= 0 || screenHeight <= 0)
+        {
+            return false;
+        }
+
+        var viewForwardRaw = camera.Target - camera.Position;
+        if (viewForwardRaw.LengthSquared() <= 0.000001f)
+        {
+            return false;
+        }
+
+        var viewForward = Vector3.Normalize(viewForwardRaw);
+        var viewRightRaw = Vector3.Cross(viewForward, camera.Up);
+        if (viewRightRaw.LengthSquared() <= 0.000001f)
+        {
+            return false;
+        }
+
+        var viewRight = Vector3.Normalize(viewRightRaw);
+        var viewUp = Vector3.Normalize(Vector3.Cross(viewRight, viewForward));
+        var normalizedDirection = Vector3.Normalize(direction);
+        var forward = Vector3.Dot(normalizedDirection, viewForward);
+        if (forward <= 0.02f)
+        {
+            return false;
+        }
+
+        var tanHalfFov = MathF.Tan(camera.FovY * 0.5f * (MathF.PI / 180f));
+        if (tanHalfFov <= 0.000001f)
+        {
+            return false;
+        }
+
+        var aspect = screenWidth / (float)screenHeight;
+        var x = Vector3.Dot(normalizedDirection, viewRight) / (forward * tanHalfFov * aspect);
+        var y = Vector3.Dot(normalizedDirection, viewUp) / (forward * tanHalfFov);
+        if (MathF.Abs(x) > 1.35f || MathF.Abs(y) > 1.35f)
+        {
+            return false;
+        }
+
+        screenPoint = new Vector2(
+            screenWidth * (0.5f + x * 0.5f),
+            screenHeight * (0.5f - y * 0.5f));
+        return true;
     }
 
     private void DrawWorld()
@@ -1286,13 +1443,13 @@ public class GameApp : IGameRunner
         {
             GraphicsQuality.Low => Math.Min(renderDistance, 8),
             GraphicsQuality.Medium => Math.Min(renderDistance, 14),
-            _ => Math.Min(renderDistance, 24)
+            _ => Math.Min(renderDistance, 30)
         };
         var veryFarLodDistance = _graphics.Quality switch
         {
             GraphicsQuality.Low => Math.Min(renderDistance, 10),
             GraphicsQuality.Medium => Math.Min(renderDistance, 18),
-            _ => Math.Min(renderDistance, 48)
+            _ => Math.Min(renderDistance, 52)
         };
         var ultraFarLodDistance = _graphics.Quality switch
         {
@@ -1313,9 +1470,9 @@ public class GameApp : IGameRunner
         var directionalCullSq = directionalCullDistance * directionalCullDistance;
         var foliageDistance = _graphics.Quality switch
         {
-            GraphicsQuality.Low => 8,
-            GraphicsQuality.Medium => Math.Min(renderDistance, 12),
-            _ => Math.Min(renderDistance, 24)
+            GraphicsQuality.Low => 10,
+            GraphicsQuality.Medium => Math.Min(renderDistance, 16),
+            _ => Math.Min(renderDistance, 28)
         };
         var foliageDistSq = foliageDistance * foliageDistance;
         var foliageFadeBand = GetFoliageFadeBand();
@@ -1323,7 +1480,7 @@ public class GameApp : IGameRunner
         {
             GraphicsQuality.Low => 10,
             GraphicsQuality.Medium => 12,
-            _ => 12
+            _ => 14
         };
         var chunkRadius = Math.Max(1, ((int)MathF.Ceiling(softRenderDistance) + _world.ChunkSize - 1) / _world.ChunkSize);
         if (_state != AppState.Playing)
@@ -1423,7 +1580,8 @@ public class GameApp : IGameRunner
                             continue;
                         }
 
-                        if (surface.Block == BlockType.Leaves)
+                        if (surface.Block == BlockType.Leaves
+                            && (_graphics.Quality != GraphicsQuality.High || distSq > veryFarLodSq))
                         {
                             continue;
                         }
@@ -1490,11 +1648,11 @@ public class GameApp : IGameRunner
                     var center = new Vector3(surface.X + 0.5f, surface.Y + 0.5f, surface.Z + 0.5f);
                     var baseColor = surface.Block switch
                     {
-                        BlockType.Grass => new Color(110, 156, 76, 255),
-                        BlockType.Dirt => new Color(144, 102, 66, 255),
-                        BlockType.Stone => new Color(124, 121, 112, 255),
-                        BlockType.Wood => new Color(128, 94, 58, 255),
-                        BlockType.Leaves => new Color(84, 132, 68, 255),
+                        BlockType.Grass => new Color(98, 144, 82, 255),
+                        BlockType.Dirt => new Color(148, 111, 76, 255),
+                        BlockType.Stone => new Color(134, 129, 121, 255),
+                        BlockType.Wood => new Color(132, 98, 61, 255),
+                        BlockType.Leaves => new Color(82, 130, 74, 255),
                         _ => Color.White
                     };
                     var color = BuildLodBlendedColor(baseColor, surface, distance, distanceFactor, lodBlend);
@@ -1504,6 +1662,7 @@ public class GameApp : IGameRunner
                     }
 
                     QueueWorldCubeInstance(center, color, GetDominantLodTier(lodBlend));
+                    DrawDecorativeVegetationAccent(surface, distance, chunkReveal);
 
                     if (collectSceneMetrics)
                     {
@@ -1652,25 +1811,28 @@ public class GameApp : IGameRunner
         var noiseScale = _graphics.TextureNoiseStrength * 0.82f;
         var textured = ApplyBlockMaterial(baseColor, surface, noise, noiseScale, distance);
 
-        var brightness = surface.TopVisible ? 0.98f : 0.86f;
-        brightness += (surface.VisibleFaces - 2) * 0.018f;
-        var skyLight = 0.90f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.12f;
-        var aoShade = 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.13f;
-        var reliefLift = 1f + Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f) * 0.05f;
-        var brightnessFactor = brightness * skyLight * aoShade * reliefLift * _graphics.LightStrength;
+        var brightness = surface.TopVisible ? 1.00f : 0.82f;
+        brightness += (surface.VisibleFaces - 2) * 0.024f;
+        var skyLight = 0.88f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.16f;
+        var aoShade = 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.16f;
+        var reliefLift = 1f + Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f) * 0.07f;
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
+        var brightnessFactor = brightness * skyLight * aoShade * reliefLift * GetSunLightFactor(surface, litStrength: 0.18f, shadowStrength: surface.TopVisible ? 0.18f : 0.12f) * _graphics.LightStrength;
         var lit = MultiplyRgb(textured, brightnessFactor);
-        var warmTint = 0.04f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.04f;
-        var coolTint = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.05f;
+        var warmTint = 0.07f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.08f + sunVisibility * 0.07f;
+        var coolTint = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.07f + (!surface.TopVisible ? 0.02f : 0f) + shadow * 0.06f;
         var toned = ApplyLightTemperature(lit, warmTint, coolTint);
         var contrasted = ApplyContrast(toned, 1f + (_graphics.Contrast - 1f) * 0.72f);
-        if (!_graphics.FogEnabled)
+        var postColor = contrasted;
+        if (_graphics.FogEnabled)
         {
-            return contrasted;
+            var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+            fogT = SmoothStep01(fogT);
+            postColor = LerpColor(contrasted, _graphics.FogColor, fogT);
         }
 
-        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
-        fogT = SmoothStep01(fogT);
-        return LerpColor(contrasted, _graphics.FogColor, fogT);
+        return ApplyCinematicPostProcessColor(postColor, distance, surface.TopVisible);
     }
 
     private Color ApplyMidVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, int visibleFaces, int skyExposure, float distance)
@@ -1813,6 +1975,110 @@ public class GameApp : IGameRunner
         return 1f - SmoothStep01(t);
     }
 
+    private float GetDecorativeVegetationDistance()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 4.5f,
+            GraphicsQuality.Medium => 7.0f,
+            _ => 10.0f
+        };
+    }
+
+    private DecorativeVegetationKind GetDecorativeVegetationKind(WorldMap.SurfaceBlock surface, float distance)
+    {
+        if (surface.Block != BlockType.Grass || !surface.TopVisible)
+        {
+            return DecorativeVegetationKind.None;
+        }
+
+        var maxDistance = GetDecorativeVegetationDistance();
+        if (distance > maxDistance)
+        {
+            return DecorativeVegetationKind.None;
+        }
+
+        var hash = Math.Abs((surface.X * 130912063) ^ (surface.Z * 19349663) ^ (surface.Y * 83492791)) % 19;
+        var fadeStart = Math.Max(2f, maxDistance - 2.6f);
+        if (distance > fadeStart)
+        {
+            var keep = 1f - SmoothStep01((distance - fadeStart) / Math.Max(0.001f, maxDistance - fadeStart));
+            if (!PassSpatialDither(surface.X, surface.Y, surface.Z, 5441, keep))
+            {
+                return DecorativeVegetationKind.None;
+            }
+        }
+
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => hash <= 1 ? DecorativeVegetationKind.Grass : DecorativeVegetationKind.None,
+            GraphicsQuality.Medium => hash switch
+            {
+                0 => DecorativeVegetationKind.Flower,
+                >= 1 and <= 3 => DecorativeVegetationKind.Grass,
+                _ => DecorativeVegetationKind.None
+            },
+            _ => (surface.ReliefExposure >= 4 ? hash + 2 : hash) switch
+            {
+                0 => DecorativeVegetationKind.Bush,
+                1 => DecorativeVegetationKind.Flower,
+                >= 2 and <= 5 => DecorativeVegetationKind.Grass,
+                _ => DecorativeVegetationKind.None
+            }
+        };
+    }
+
+    private void DrawDecorativeVegetationAccent(WorldMap.SurfaceBlock surface, float distance, float chunkReveal)
+    {
+        var kind = GetDecorativeVegetationKind(surface, distance);
+        if (kind == DecorativeVegetationKind.None)
+        {
+            return;
+        }
+
+        var sun = GetSunVisibility01(surface);
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var fade = 1f - SmoothStep01(distance / Math.Max(0.001f, GetDecorativeVegetationDistance()));
+        var visibility = Math.Clamp(0.35f + fade * 0.65f, 0f, 1f) * chunkReveal;
+        var ground = new Vector3(surface.X + 0.5f, surface.Y + 1.02f, surface.Z + 0.5f);
+        var tint = ApplyLightTemperature(
+            new Color(92, 154, 88, 255),
+            warmTint: 0.03f + sun * 0.06f,
+            coolTint: cavity * 0.06f);
+        var stem = ScaleAlpha(ChangeRgb(tint, -8, 4, -6), visibility);
+        var leaf = ScaleAlpha(ChangeRgb(tint, -2, 8, -3), visibility);
+        var leafShade = ScaleAlpha(ChangeRgb(tint, -10, -6, 2), visibility);
+
+        switch (kind)
+        {
+            case DecorativeVegetationKind.Grass:
+                _platform.DrawCube(ground + new Vector3(-0.12f, 0.12f, 0.02f), 0.06f, 0.26f, 0.06f, stem);
+                _platform.DrawCube(ground + new Vector3(0.04f, 0.15f, -0.06f), 0.06f, 0.30f, 0.06f, leaf);
+                _platform.DrawCube(ground + new Vector3(0.13f, 0.11f, 0.08f), 0.05f, 0.22f, 0.05f, leafShade);
+                break;
+            case DecorativeVegetationKind.Flower:
+            {
+                var bloomHash = Math.Abs((surface.X * 29791) ^ (surface.Z * 8347) ^ (surface.Y * 19391)) % 4;
+                var bloom = bloomHash switch
+                {
+                    0 => new Color(244, 219, 122, 255),
+                    1 => new Color(232, 158, 154, 255),
+                    2 => new Color(182, 204, 246, 255),
+                    _ => new Color(240, 234, 228, 255)
+                };
+                bloom = ScaleAlpha(ApplyLightTemperature(bloom, 0.02f + sun * 0.04f, cavity * 0.03f), visibility);
+                _platform.DrawCube(ground + new Vector3(0.01f, 0.15f, -0.01f), 0.05f, 0.30f, 0.05f, stem);
+                _platform.DrawCube(ground + new Vector3(0.01f, 0.34f, -0.01f), 0.13f, 0.11f, 0.13f, bloom);
+                break;
+            }
+            case DecorativeVegetationKind.Bush:
+                _platform.DrawCube(ground + new Vector3(-0.10f, 0.14f, 0.01f), 0.18f, 0.20f, 0.18f, leafShade);
+                _platform.DrawCube(ground + new Vector3(0.08f, 0.16f, -0.05f), 0.20f, 0.22f, 0.20f, leaf);
+                _platform.DrawCube(ground + new Vector3(0.01f, 0.26f, 0.08f), 0.17f, 0.18f, 0.17f, leaf);
+                break;
+        }
+    }
+
     private float GetSparseFarKeepChance(BlockType block, float distance, float veryFarDistance, float ultraFarDistance, float renderDistance)
     {
         var veryBand = Math.Max(4f, Math.Min(renderDistance * 0.16f, 16f));
@@ -1822,17 +2088,17 @@ public class GameApp : IGameRunner
 
         var veryMinKeep = block switch
         {
-            BlockType.Wood => 0.48f,
-            BlockType.Leaves => 0.2f,
-            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.33f,
+            BlockType.Wood => 0.40f,
+            BlockType.Leaves => 0.14f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.40f,
             _ => 0.15f
         };
 
         var ultraMinKeep = block switch
         {
-            BlockType.Wood => 0.22f,
-            BlockType.Leaves => 0.06f,
-            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.18f,
+            BlockType.Wood => 0.14f,
+            BlockType.Leaves => 0f,
+            BlockType.Grass or BlockType.Dirt or BlockType.Stone => 0.24f,
             _ => 0f
         };
 
@@ -1921,40 +2187,44 @@ public class GameApp : IGameRunner
         }
 
         var textured = ApplyBlockMaterial(baseColor, surface, noise, noiseScale, distance);
-        var brightness = surface.TopVisible ? 1.04f : 0.89f;
+        var brightness = surface.TopVisible ? 1.08f : 0.84f;
         brightness += (surface.VisibleFaces - 2) * 0.026f;
         var nearRelief = GetNearReliefContrast(distance);
-        var skyLight = 0.86f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.16f;
+        var skyLight = 0.84f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.18f;
         var ao = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
         var relief = Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f);
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
         brightness *= skyLight;
-        brightness *= 1f - ao * (surface.TopVisible ? 0.18f : 0.12f);
-        brightness *= 1f + relief * nearRelief * 0.12f;
+        brightness *= 1f - ao * (surface.TopVisible ? 0.20f : 0.15f);
+        brightness *= 1f + relief * nearRelief * 0.15f;
+        brightness *= GetSunLightFactor(surface, litStrength: 0.24f, shadowStrength: surface.TopVisible ? 0.22f : 0.16f);
 
         if (surface.TopVisible)
         {
             var cavity = Math.Clamp((3f - surface.SkyExposure) / 3f, 0f, 1f);
-            brightness *= 1f - cavity * nearRelief * 0.10f;
+            brightness *= 1f - cavity * nearRelief * 0.11f;
         }
         else
         {
-            brightness *= 1f - nearRelief * 0.06f;
+            brightness *= 1f - nearRelief * 0.08f;
         }
 
         var lit = MultiplyRgb(textured, brightness * _graphics.LightStrength);
-        var warmTint = 0.05f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.06f;
-        var coolTint = ao * 0.06f + (!surface.TopVisible ? 0.03f : 0f);
+        var warmTint = 0.08f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.10f + sunVisibility * 0.08f;
+        var coolTint = ao * 0.08f + (!surface.TopVisible ? 0.04f : 0f) + shadow * 0.08f;
         var toned = ApplyLightTemperature(lit, warmTint, coolTint);
         var contrasted = ApplyContrast(toned, _graphics.Contrast);
 
-        if (!_graphics.FogEnabled)
+        var postColor = contrasted;
+        if (_graphics.FogEnabled)
         {
-            return contrasted;
+            var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+            fogT = SmoothStep01(fogT);
+            postColor = LerpColor(contrasted, _graphics.FogColor, fogT);
         }
 
-        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
-        fogT = SmoothStep01(fogT);
-        return LerpColor(contrasted, _graphics.FogColor, fogT);
+        return ApplyCinematicPostProcessColor(postColor, distance, surface.TopVisible);
     }
 
     private Color ApplyVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, int visibleFaces, int skyExposure, float distance)
@@ -1979,28 +2249,53 @@ public class GameApp : IGameRunner
         return 1f - SmoothStep01(distance / nearRange);
     }
 
+    private static float GetSunVisibility01(WorldMap.SurfaceBlock surface)
+    {
+        return Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+    }
+
+    private static float GetSunLightFactor(WorldMap.SurfaceBlock surface, float litStrength, float shadowStrength)
+    {
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
+        var topBias = surface.TopVisible ? 1f : 0.78f;
+        var visibleFaceBias = 1f + Math.Clamp((surface.VisibleFaces - 3) * 0.04f, -0.06f, 0.10f);
+        var factor = (1f + sunVisibility * litStrength * topBias - shadow * shadowStrength) * visibleFaceBias;
+        return Math.Max(0.56f, factor);
+    }
+
+    private static int GetSignedNoise(int x, int y, int z, int primeX, int primeY, int primeZ, int modulus)
+    {
+        var centered = Math.Max(1, modulus / 2);
+        return (Math.Abs((x * primeX) ^ (y * primeY) ^ (z * primeZ)) % modulus) - centered;
+    }
+
     private Color ApplyFarSurfaceStyle(Color baseColor, WorldMap.SurfaceBlock surface, float distance)
     {
         var noise = (Math.Abs((surface.X * 73856093) ^ (surface.Y * 19349663) ^ (surface.Z * 83492791)) % 11) - 5;
         var noiseScale = _graphics.TextureNoiseStrength * 0.7f;
         var textured = ApplyBlockMaterial(baseColor, surface, noise, noiseScale, distance);
-        var brightness = (surface.TopVisible ? 0.96f : 0.84f) * _graphics.LightStrength;
-        brightness *= 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.09f;
-        brightness *= 1f + Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f) * 0.03f;
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
+        var brightness = (surface.TopVisible ? 0.98f : 0.80f) * _graphics.LightStrength;
+        brightness *= 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.10f;
+        brightness *= 1f + Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f) * 0.04f;
+        brightness *= GetSunLightFactor(surface, litStrength: 0.12f, shadowStrength: surface.TopVisible ? 0.14f : 0.10f);
         var lit = MultiplyRgb(textured, brightness);
         var toned = ApplyLightTemperature(
             lit,
-            warmTint: 0.03f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.03f,
-            coolTint: Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.03f);
+            warmTint: 0.05f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.05f + sunVisibility * 0.05f,
+            coolTint: Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.04f + shadow * 0.05f);
         var contrasted = ApplyContrast(toned, 1f + (_graphics.Contrast - 1f) * 0.55f);
-        if (!_graphics.FogEnabled)
+        var postColor = contrasted;
+        if (_graphics.FogEnabled)
         {
-            return contrasted;
+            var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+            fogT = SmoothStep01(fogT);
+            postColor = LerpColor(contrasted, _graphics.FogColor, fogT);
         }
 
-        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
-        fogT = SmoothStep01(fogT);
-        return LerpColor(contrasted, _graphics.FogColor, fogT);
+        return ApplyCinematicPostProcessColor(postColor, distance, surface.TopVisible);
     }
 
     private Color ApplyFarVisualStyle(Color baseColor, BlockType block, int x, int y, int z, bool topVisible, float distance)
@@ -2010,27 +2305,40 @@ public class GameApp : IGameRunner
 
     private Color ApplyLeafSurfaceStyle(Color baseColor, WorldMap.SurfaceBlock surface, int noise, float noiseScale, float distance)
     {
-        var variation = (int)(noise * 0.6f * noiseScale);
-        var textured = ChangeRgb(baseColor, variation / 4, variation + GetLeafDensityDelta(surface, distance), variation / 5);
+        var variation = (int)(noise * 0.54f * noiseScale);
+        var tintNoise = (Math.Abs((surface.X * 29791) ^ (surface.Z * 19391) ^ (surface.Y * 8347)) % 5) - 2;
+        var canopyPatch = GetSignedNoise(surface.X, surface.Y, surface.Z, 46237, 18979, 9157, 9);
+        var canopyShade = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var canopySun = GetSunVisibility01(surface);
+        var textured = ChangeRgb(
+            baseColor,
+            variation / 5 + tintNoise + canopyPatch / 2 - (int)MathF.Round(canopyShade * 3f),
+            variation + GetLeafDensityDelta(surface, distance) + canopyPatch * 2 + (int)MathF.Round(canopySun * 4f),
+            variation / 6 - tintNoise + canopyPatch / 3 + (int)MathF.Round(canopyShade * 3f) - (int)MathF.Round(canopySun * 2f));
         textured = ApplyHeightTint(textured, surface.Block, surface.Y);
-        var brightness = (surface.TopVisible ? 0.98f : 0.90f) * _graphics.LightStrength;
-        brightness *= 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.11f;
-        brightness *= 0.92f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.10f;
+        textured = ApplyMaterialTopographyTint(textured, surface, distance);
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
+        var brightness = (surface.TopVisible ? 1.00f : 0.88f) * _graphics.LightStrength;
+        brightness *= 1f - Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.12f;
+        brightness *= 0.90f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.12f;
+        brightness *= GetSunLightFactor(surface, litStrength: 0.10f, shadowStrength: 0.08f);
         var lit = MultiplyRgb(textured, brightness);
         var toned = ApplyLightTemperature(
             lit,
-            warmTint: 0.03f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.04f,
-            coolTint: Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.05f);
+            warmTint: 0.05f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.05f + sunVisibility * 0.05f,
+            coolTint: Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 0.06f + shadow * 0.04f);
         var contrasted = ApplyContrast(toned, 1f + (_graphics.Contrast - 1f) * 0.45f);
 
-        if (!_graphics.FogEnabled)
+        var postColor = contrasted;
+        if (_graphics.FogEnabled)
         {
-            return contrasted;
+            var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
+            fogT = SmoothStep01(fogT);
+            postColor = LerpColor(contrasted, _graphics.FogColor, fogT);
         }
 
-        var fogT = Math.Clamp((distance - _graphics.FogNear) / (_graphics.FogFar - _graphics.FogNear), 0f, 1f);
-        fogT = SmoothStep01(fogT);
-        return LerpColor(contrasted, _graphics.FogColor, fogT);
+        return ApplyCinematicPostProcessColor(postColor, distance, surface.TopVisible);
     }
 
     private Color ApplyLeafStyle(Color baseColor, int noise, float noiseScale, float distance)
@@ -2056,15 +2364,87 @@ public class GameApp : IGameRunner
             BlockType.Wood => (int)(noise * 0.44f * noiseScale),
             _ => (int)(noise * 0.70f * noiseScale)
         };
+        var macroNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 12582917, 741457, 4256249, 17);
+        var grainNoise = GetSignedNoise(surface.Y, surface.X, surface.Z, 92821, 19391, 68917, 7);
+        var ringNoise = GetSignedNoise(surface.X, surface.Z, surface.Y, 29791, 8347, 19391, 9);
+        var patchNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 159733, 62819, 1402021, 13);
+        var streakNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 22447, 31847, 42071, 11);
+        var layerNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 6143, 9187, 12289, 9);
+
+        switch (surface.Block)
+        {
+            case BlockType.Grass:
+                dr += macroNoise / 2 + patchNoise / 2 + layerNoise / 3 - (surface.TopVisible ? 4 : 0);
+                dg += macroNoise + patchNoise + (surface.TopVisible ? 6 : -3) + Math.Max(0, streakNoise);
+                db += streakNoise / 2 - 2 - Math.Abs(ringNoise) / 2;
+                break;
+            case BlockType.Dirt:
+                dr += 5 + macroNoise / 2 + patchNoise / 2 + layerNoise;
+                dg += ringNoise / 2 + grainNoise - Math.Abs(layerNoise) / 2;
+                db -= 6 + Math.Abs(macroNoise) / 2 + Math.Abs(streakNoise) / 2;
+                break;
+            case BlockType.Stone:
+                dr += ringNoise / 2 + patchNoise / 3;
+                dg += macroNoise / 3 + layerNoise / 2;
+                db -= 3 + Math.Abs(ringNoise) + Math.Max(0, -layerNoise);
+                break;
+            case BlockType.Wood:
+                dr += grainNoise * 3 + 6 + Math.Max(0, streakNoise);
+                dg += grainNoise + ringNoise / 2 - 2 + layerNoise / 2;
+                db -= 8 + Math.Abs(grainNoise) + Math.Max(0, patchNoise);
+                break;
+        }
 
         var textured = ChangeRgb(baseColor, dr, dg, db);
         textured = ApplyHeightTint(textured, surface.Block, surface.Y);
+        textured = ApplyMaterialTopographyTint(textured, surface, distance);
         if (surface.TopVisible)
         {
             textured = ApplyNearSurfaceAccent(textured, surface, distance);
         }
 
         return textured;
+    }
+
+    private Color ApplyMaterialTopographyTint(Color color, WorldMap.SurfaceBlock surface, float distance)
+    {
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var ridge = Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f);
+        var sunVisibility = GetSunVisibility01(surface);
+        var shadow = 1f - sunVisibility;
+        var near = 0.32f + GetNearReliefContrast(distance) * 0.68f;
+        var patchNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 29791, 8347, 19391, 9);
+        var driftNoise = GetSignedNoise(surface.X, surface.Y, surface.Z, 19391, 68917, 92821, 11);
+
+        return surface.Block switch
+        {
+            BlockType.Grass => ChangeRgb(
+                color,
+                (int)MathF.Round((ridge * 8f - cavity * 9f + patchNoise) * near),
+                (int)MathF.Round((sunVisibility * 5f - ridge * 5f - cavity * 7f + driftNoise) * near),
+                (int)MathF.Round((cavity * 4f - ridge * 3f - patchNoise * 0.5f) * near)),
+            BlockType.Dirt => ChangeRgb(
+                color,
+                (int)MathF.Round((ridge * 10f - cavity * 7f + patchNoise * 1.2f) * near),
+                (int)MathF.Round((ridge * 3f - cavity * 4f + driftNoise * 0.5f) * near),
+                (int)MathF.Round((-ridge * 6f - cavity * 3f - Math.Abs(patchNoise)) * near)),
+            BlockType.Stone => ChangeRgb(
+                color,
+                (int)MathF.Round((ridge * 5f + sunVisibility * 3f - cavity * 6f + patchNoise * 0.6f) * near),
+                (int)MathF.Round((ridge * 4f - cavity * 4f + driftNoise * 0.4f) * near),
+                (int)MathF.Round((cavity * 6f + shadow * 4f - ridge * 2f - patchNoise) * near)),
+            BlockType.Wood => ChangeRgb(
+                color,
+                (int)MathF.Round((sunVisibility * 4f + driftNoise * 0.8f - cavity * 5f) * near),
+                (int)MathF.Round((ridge * 2f - cavity * 3f - Math.Abs(patchNoise) * 0.5f) * near),
+                (int)MathF.Round((-ridge * 4f - cavity * 4f - Math.Abs(driftNoise)) * near)),
+            BlockType.Leaves => ChangeRgb(
+                color,
+                (int)MathF.Round((sunVisibility * 3f - cavity * 5f + patchNoise * 0.5f) * near),
+                (int)MathF.Round((sunVisibility * 7f - shadow * 3f - cavity * 6f + driftNoise) * near),
+                (int)MathF.Round((cavity * 5f + shadow * 2f - ridge * 2f - Math.Abs(patchNoise) * 0.5f) * near)),
+            _ => color
+        };
     }
 
     private Color ApplyNearSurfaceAccent(Color color, WorldMap.SurfaceBlock surface, float distance)
@@ -2076,13 +2456,24 @@ public class GameApp : IGameRunner
 
         var detailNoise = Math.Abs((surface.X * 1597334677) ^ (surface.Z * 1402024253) ^ (surface.Y * 9586891));
         var detail = detailNoise % 7;
+        var broadDetail = detailNoise % 11;
+        var cavity = (int)MathF.Round(Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f) * 6f);
+        var ridge = (int)MathF.Round(Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f) * 7f);
+        var sun = (int)MathF.Round(GetSunVisibility01(surface) * 5f);
         return surface.Block switch
         {
-            BlockType.Grass when detail <= 1 => ChangeRgb(color, -4, 9, -2),
-            BlockType.Grass when detail == 2 => ChangeRgb(color, 6, -2, -5),
-            BlockType.Dirt when detail <= 1 => ChangeRgb(color, 8, 2, -4),
-            BlockType.Stone when detail <= 1 => ChangeRgb(color, 7, 6, 4),
-            BlockType.Stone when detail == 2 => ChangeRgb(color, -8, -6, -4),
+            BlockType.Grass when detail <= 1 => ChangeRgb(color, -5 + ridge / 2 - cavity, 11 - ridge + sun / 2, -3 + cavity / 2),
+            BlockType.Grass when detail == 2 => ChangeRgb(color, 7 + ridge - cavity / 2, -2 - ridge / 2, -6 + cavity),
+            BlockType.Grass when broadDetail >= 9 => ChangeRgb(color, -4 + ridge, 6 - cavity + sun / 2, 3 + cavity / 2),
+            BlockType.Dirt when detail <= 1 => ChangeRgb(color, 10 + ridge, 3 + ridge / 2 - cavity / 2, -5 - cavity),
+            BlockType.Dirt when detail == 2 => ChangeRgb(color, -6 - cavity / 2, 2 + ridge / 2, -4 - ridge / 2),
+            BlockType.Stone when detail <= 1 => ChangeRgb(color, 7 + ridge / 2, 6 + ridge / 2, 4 - cavity),
+            BlockType.Stone when detail == 2 => ChangeRgb(color, -8 - cavity / 2, -6 - cavity / 2, -4 + cavity),
+            BlockType.Stone when broadDetail >= 9 => ChangeRgb(color, 4 + ridge / 2, 2, 1 - cavity / 2),
+            BlockType.Wood when broadDetail <= 2 => ChangeRgb(color, 12 + sun / 2, 5 - cavity / 2, -9 - ridge / 2),
+            BlockType.Wood when broadDetail == 3 => ChangeRgb(color, -8 - cavity / 2, -2, -10 - ridge / 2),
+            BlockType.Leaves when broadDetail <= 1 => ChangeRgb(color, -3 - cavity / 2, 6 + sun / 2, -1 + cavity / 2),
+            BlockType.Leaves when broadDetail == 2 => ChangeRgb(color, 4 + sun / 2, -1 - cavity / 2, 3 + cavity / 2),
             _ => color
         };
     }
@@ -2099,6 +2490,11 @@ public class GameApp : IGameRunner
             BlockType.Leaves => ChangeRgb(color, (int)(heightFactor * -3f), (int)(heightFactor * 6f), (int)(heightFactor * -2f)),
             _ => color
         };
+    }
+
+    private static Color ScaleAlpha(Color color, float factor)
+    {
+        return new Color(color.R, color.G, color.B, (byte)Math.Clamp((int)MathF.Round(color.A * Math.Clamp(factor, 0f, 1f)), 0, 255));
     }
 
     private int GetLeafDensityDelta(WorldMap.SurfaceBlock surface, float distance)
@@ -2127,12 +2523,12 @@ public class GameApp : IGameRunner
         var toned = color;
         if (coolTint > 0.001f)
         {
-            toned = LerpColor(toned, new Color(154, 180, 210, 255), Math.Clamp(coolTint, 0f, 0.25f));
+            toned = LerpColor(toned, new Color(148, 174, 204, 255), Math.Clamp(coolTint, 0f, 0.25f));
         }
 
         if (warmTint > 0.001f)
         {
-            toned = LerpColor(toned, new Color(228, 211, 182, 255), Math.Clamp(warmTint, 0f, 0.25f));
+            toned = LerpColor(toned, new Color(236, 210, 176, 255), Math.Clamp(warmTint, 0f, 0.25f));
         }
 
         return toned;
@@ -2162,6 +2558,82 @@ public class GameApp : IGameRunner
         return new Color((byte)C(color.R), (byte)C(color.G), (byte)C(color.B), color.A);
     }
 
+    private Color ApplyCinematicPostProcessColor(Color color, float distance, bool topVisible)
+    {
+        var qualityStrength = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.72f,
+            GraphicsQuality.Medium => 0.88f,
+            _ => 1f
+        };
+        var nearFactor = 1f - SmoothStep01(distance / Math.Max(18f, _graphics.FogFar * 0.55f));
+        var exposure = 1.02f + qualityStrength * (0.06f + nearFactor * 0.06f) + (topVisible ? 0.01f : 0f);
+        var tonemapped = ApplyFilmicTonemap(color, exposure);
+        var highlightBoost = qualityStrength * (0.05f + nearFactor * 0.05f + (topVisible ? 0.02f : 0f));
+        var shadowBoost = qualityStrength * (0.06f + (1f - nearFactor) * 0.02f + (topVisible ? 0f : 0.02f));
+        var saturationBoost = 1.03f + qualityStrength * (0.03f + nearFactor * 0.03f);
+        return ApplySceneColorGrade(tonemapped, highlightBoost, shadowBoost, saturationBoost);
+    }
+
+    private static Color ApplyFilmicTonemap(Color color, float exposure)
+    {
+        static byte Tone(byte channel, float exposure)
+        {
+            var x = channel / 255f * Math.Max(0.1f, exposure);
+            const float a = 2.51f;
+            const float b = 0.03f;
+            const float c = 2.43f;
+            const float d = 0.59f;
+            const float e = 0.14f;
+            var mapped = (x * (a * x + b)) / (x * (c * x + d) + e);
+            return (byte)Math.Clamp((int)MathF.Round(Math.Clamp(mapped, 0f, 1f) * 255f), 0, 255);
+        }
+
+        return new Color(
+            Tone(color.R, exposure),
+            Tone(color.G, exposure),
+            Tone(color.B, exposure),
+            color.A);
+    }
+
+    private static Color ApplySceneColorGrade(Color color, float highlightBoost, float shadowBoost, float saturationBoost)
+    {
+        var r = color.R / 255f;
+        var g = color.G / 255f;
+        var b = color.B / 255f;
+        var luma = r * 0.2126f + g * 0.7152f + b * 0.0722f;
+        var shadow = SmoothStep01((0.52f - luma) / 0.52f);
+        var highlight = SmoothStep01((luma - 0.40f) / 0.60f);
+
+        var coolT = Math.Clamp(shadow * shadowBoost, 0f, 0.24f);
+        var warmT = Math.Clamp(highlight * highlightBoost, 0f, 0.24f);
+        var graded = color;
+        if (coolT > 0.001f)
+        {
+            graded = LerpColor(graded, new Color(142, 168, 196, 255), coolT);
+        }
+
+        if (warmT > 0.001f)
+        {
+            graded = LerpColor(graded, new Color(238, 210, 176, 255), warmT);
+        }
+
+        var sr = graded.R / 255f;
+        var sg = graded.G / 255f;
+        var sb = graded.B / 255f;
+        var grey = sr * 0.2126f + sg * 0.7152f + sb * 0.0722f;
+        var sat = Math.Max(0f, saturationBoost);
+        sr = grey + (sr - grey) * sat;
+        sg = grey + (sg - grey) * sat;
+        sb = grey + (sb - grey) * sat;
+
+        return new Color(
+            (byte)Math.Clamp((int)MathF.Round(Math.Clamp(sr, 0f, 1f) * 255f), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(Math.Clamp(sg, 0f, 1f) * 255f), 0, 255),
+            (byte)Math.Clamp((int)MathF.Round(Math.Clamp(sb, 0f, 1f) * 255f), 0, 255),
+            color.A);
+    }
+
     private static Color LerpColor(Color from, Color to, float t)
     {
         byte Lerp(byte a, byte b) => (byte)Math.Clamp((int)(a + (b - a) * t), 0, 255);
@@ -2174,22 +2646,22 @@ public class GameApp : IGameRunner
 
     private static Color GetSkyTopColor()
     {
-        return new Color(84, 146, 214, 255);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(66, 122, 196, 255), 1.05f), 0.05f, 0.08f, 1.06f);
     }
 
     private static Color GetSkyMidColor()
     {
-        return new Color(136, 186, 224, 255);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(136, 186, 226, 255), 1.04f), 0.06f, 0.05f, 1.05f);
     }
 
     private static Color GetSkyHorizonColor()
     {
-        return new Color(224, 214, 192, 255);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(246, 216, 186, 255), 1.02f), 0.10f, 0.02f, 1.04f);
     }
 
     private static Color GetSkyGlowColor()
     {
-        return new Color(238, 205, 166, 255);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 190, 128, 255), 1.06f), 0.12f, 0f, 1.06f);
     }
 
     private void DrawPlayerAvatar()
@@ -2285,6 +2757,8 @@ public class GameApp : IGameRunner
             _platform.DrawCube(devicePosition + forward * 0.07f, 0.03f, 0.10f, 0.14f, new Color(118, 255, 228, 165));
         }
 
+        var sunShadowDirection = Vector3.Normalize(new Vector3(-WorldMap.GetSunLightDirection().X, 0f, -WorldMap.GetSunLightDirection().Z));
+        _platform.DrawCube(root + sunShadowDirection * 0.22f + new Vector3(0f, -0.03f, 0f), 1.00f, 0.02f, 0.62f, new Color(0, 0, 0, 18));
         _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.82f, 0.02f, 0.82f, new Color(0, 0, 0, 28));
         _platform.DrawCube(root + new Vector3(0f, -0.01f, 0f), 0.48f, 0.02f, 0.48f, new Color(0, 0, 0, 42));
     }
@@ -2311,12 +2785,12 @@ public class GameApp : IGameRunner
             var tap = _botDeviceVisual.TapBlend;
             var layout = BuildBotDeviceLayout(camera);
 
-            var deviceForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.28f + 0.08f * raise, -0.60f + 0.08f * raise, -0.54f + 0.14f * raise) + bobOffset;
-            var deviceWrist = ComposeViewPoint(camera.Position, forward, right, up, 0.46f + 0.10f * raise, -0.45f + 0.08f * raise, -0.40f + 0.13f * raise) + bobOffset;
-            var devicePalm = ComposeViewPoint(camera.Position, forward, right, up, 0.60f + 0.10f * raise, -0.34f + 0.07f * raise, -0.30f + 0.08f * raise) + bobOffset;
+            var deviceForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.28f + 0.08f * raise, -0.64f + 0.08f * raise, -0.58f + 0.14f * raise) + bobOffset;
+            var deviceWrist = ComposeViewPoint(camera.Position, forward, right, up, 0.44f + 0.10f * raise, -0.49f + 0.08f * raise, -0.44f + 0.13f * raise) + bobOffset;
+            var devicePalm = ComposeViewPoint(camera.Position, forward, right, up, 0.58f + 0.10f * raise, -0.38f + 0.07f * raise, -0.34f + 0.08f * raise) + bobOffset;
             var deviceModule = devicePalm + forward * 0.12f + right * 0.03f + up * 0.02f;
 
-            DrawFirstPersonArm(deviceForearm, deviceWrist, devicePalm, skinColor: new Color(232, 202, 172, 255), sleeveColor: new Color(198, 170, 144, 255));
+            DrawFirstPersonArm(deviceForearm, deviceWrist, devicePalm, skinColor: new Color(226, 196, 168, 255), sleeveColor: new Color(154, 132, 120, 255));
 
             _platform.DrawCube(deviceModule, 0.20f, 0.11f, 0.16f, new Color(34, 48, 56, 255));
             _platform.DrawCube(deviceModule - right * 0.11f, 0.06f, 0.13f, 0.18f, new Color(26, 36, 44, 255));
@@ -2327,13 +2801,13 @@ public class GameApp : IGameRunner
             return;
         }
 
-        var forearm = ComposeViewPoint(camera.Position, forward, right, up, 0.42f, 0.42f, -0.38f) + bobOffset;
-        var wrist = ComposeViewPoint(camera.Position, forward, right, up, 0.58f, 0.32f, -0.28f) + bobOffset;
-        var palm = ComposeViewPoint(camera.Position, forward, right, up, 0.72f, 0.26f, -0.22f) + bobOffset;
-        var held = palm + forward * 0.16f + right * 0.04f;
+        var forearm = ComposeViewPoint(camera.Position, forward, right, up, 0.40f, 0.50f, -0.44f) + bobOffset;
+        var wrist = ComposeViewPoint(camera.Position, forward, right, up, 0.56f, 0.38f, -0.34f) + bobOffset;
+        var palm = ComposeViewPoint(camera.Position, forward, right, up, 0.68f, 0.31f, -0.27f) + bobOffset;
+        var held = palm + forward * 0.14f + right * 0.05f;
 
-        DrawFirstPersonArm(forearm, wrist, palm, skinColor: new Color(232, 202, 172, 255), sleeveColor: new Color(198, 170, 144, 255));
-        _platform.DrawCube(held, 0.18f, 0.18f, 0.18f, GetHeldBlockColor(_hotbar[_selectedHotbarIndex]));
+        DrawFirstPersonArm(forearm, wrist, palm, skinColor: new Color(226, 196, 168, 255), sleeveColor: new Color(154, 132, 120, 255));
+        DrawHeldBlock(held, _hotbar[_selectedHotbarIndex]);
         if (_graphics.DrawBlockWires)
         {
             _platform.DrawCubeWires(held, 0.18f, 0.18f, 0.18f, new Color(0, 0, 0, 35));
@@ -2353,10 +2827,18 @@ public class GameApp : IGameRunner
 
     private void DrawFirstPersonArm(Vector3 forearm, Vector3 wrist, Vector3 palm, Color skinColor, Color sleeveColor)
     {
-        _platform.DrawCube(Vector3.Lerp(forearm, wrist, 0.45f), 0.18f, 0.22f, 0.18f, sleeveColor);
-        _platform.DrawCube(Vector3.Lerp(wrist, palm, 0.50f), 0.17f, 0.18f, 0.17f, skinColor);
-        _platform.DrawCube(palm, 0.15f, 0.12f, 0.14f, skinColor);
-        _platform.DrawCube(palm + new Vector3(0.02f, -0.01f, 0.02f), 0.08f, 0.05f, 0.10f, skinColor);
+        var sleeveShadow = MultiplyRgb(sleeveColor, 0.82f);
+        var sleeveHighlight = LerpColor(sleeveColor, new Color(212, 196, 182, 255), 0.18f);
+        var skinShadow = MultiplyRgb(skinColor, 0.88f);
+        var skinHighlight = LerpColor(skinColor, new Color(244, 224, 206, 255), 0.14f);
+
+        _platform.DrawCube(Vector3.Lerp(forearm, wrist, 0.26f) + new Vector3(-0.012f, -0.016f, 0.012f), 0.18f, 0.20f, 0.20f, sleeveShadow);
+        _platform.DrawCube(Vector3.Lerp(forearm, wrist, 0.56f) + new Vector3(-0.004f, -0.016f, 0.010f), 0.15f, 0.15f, 0.16f, sleeveColor);
+        _platform.DrawCube(Vector3.Lerp(forearm, wrist, 0.82f) + new Vector3(0.008f, -0.012f, 0.008f), 0.11f, 0.08f, 0.12f, sleeveHighlight);
+        _platform.DrawCube(Vector3.Lerp(wrist, palm, 0.28f) + new Vector3(0.018f, -0.013f, 0.010f), 0.14f, 0.10f, 0.12f, skinShadow);
+        _platform.DrawCube(Vector3.Lerp(wrist, palm, 0.64f) + new Vector3(0.030f, -0.015f, 0.012f), 0.12f, 0.08f, 0.11f, skinColor);
+        _platform.DrawCube(palm + new Vector3(0.040f, -0.016f, 0.020f), 0.082f, 0.040f, 0.092f, skinHighlight);
+        _platform.DrawCube(palm + new Vector3(0.074f, -0.012f, 0.030f), 0.034f, 0.024f, 0.052f, skinHighlight);
     }
 
     private void DrawWristHologram(BotWristDeviceLayout layout, float tapBlend)
@@ -2382,13 +2864,27 @@ public class GameApp : IGameRunner
     {
         return block switch
         {
-            BlockType.Grass => new Color(112, 166, 84, 255),
-            BlockType.Dirt => new Color(150, 108, 70, 255),
-            BlockType.Stone => new Color(132, 128, 118, 255),
-            BlockType.Wood => new Color(136, 98, 58, 255),
-            BlockType.Leaves => new Color(88, 142, 72, 255),
+            BlockType.Grass => new Color(100, 154, 84, 255),
+            BlockType.Dirt => new Color(148, 108, 74, 255),
+            BlockType.Stone => new Color(144, 138, 128, 255),
+            BlockType.Wood => new Color(146, 108, 68, 255),
+            BlockType.Leaves => new Color(88, 144, 80, 255),
             _ => new Color(220, 220, 220, 255)
         };
+    }
+
+    private void DrawHeldBlock(Vector3 held, BlockType block)
+    {
+        var baseColor = GetHeldBlockColor(block);
+        var shadowColor = MultiplyRgb(baseColor, 0.68f);
+        var accentColor = LerpColor(baseColor, new Color(244, 236, 214, 255), 0.18f);
+        var edgeColor = LerpColor(baseColor, new Color(26, 30, 38, 255), 0.10f);
+
+        _platform.DrawCube(held - new Vector3(0.034f, 0.026f, 0.028f), 0.21f, 0.21f, 0.21f, new Color(18, 20, 26, 72));
+        _platform.DrawCube(held - new Vector3(0.016f, 0.012f, 0.012f), 0.19f, 0.19f, 0.19f, shadowColor);
+        _platform.DrawCube(held, 0.17f, 0.17f, 0.17f, baseColor);
+        _platform.DrawCube(held + new Vector3(0.028f, 0.026f, 0.028f), 0.082f, 0.082f, 0.082f, accentColor);
+        _platform.DrawCube(held + new Vector3(-0.020f, -0.020f, -0.020f), 0.050f, 0.050f, 0.050f, edgeColor);
     }
 
     private void DrawBlockHighlight(BlockRaycastHit? hit, Vector3 rayOrigin, Vector3 rayDirection)
@@ -2422,7 +2918,6 @@ public class GameApp : IGameRunner
         var height = MathF.Abs(faceNormal.Y) > 0.5f ? faceThickness : faceSize;
         var length = MathF.Abs(faceNormal.Z) > 0.5f ? faceThickness : faceSize;
 
-        _platform.DrawCube(faceCenter, width, height, length, new Color(255, 232, 87, 110));
         _platform.DrawCubeWires(faceCenter, width, height, length, Color.Yellow);
     }
 
@@ -2558,32 +3053,38 @@ public class GameApp : IGameRunner
 
         if (_debugHudEnabled)
         {
-            var hudHeight = _companion is null ? 112 : 186;
-            _platform.DrawRectangle(10, 10, 484, hudHeight, new Color(12, 24, 31, 185));
-            _platform.DrawRectangle(14, 14, 476, 30, new Color(31, 62, 74, 210));
-            _platform.DrawUiText($"DEBUG HUD  |  FPS: {_platform.GetFps()}", new Vector2(22, 18), 18, 1f, new Color(166, 241, 227, 255));
-            _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(22, 52), 18, 1f, new Color(225, 235, 239, 255));
-            _platform.DrawUiText($"Render: {_lastFrameMs:0.0} ms  |  Графика: {GetQualityName(_graphics.Quality)}", new Vector2(22, 76), 17, 1f, new Color(191, 214, 220, 255));
-            _platform.DrawUiText($"Камера: {GetCameraModeName(_cameraMode)}", new Vector2(22, 98), 17, 1f, new Color(191, 214, 220, 255));
+            var hudHeight = _companion is null ? 110 : 184;
+            _platform.DrawRectangle(12, 12, 432, hudHeight, new Color(8, 18, 26, 166));
+            _platform.DrawRectangle(16, 16, 112, 26, new Color(32, 98, 92, 188));
+            _platform.DrawUiText("DEBUG HUD", new Vector2(24, 20), 16, 1f, new Color(168, 244, 226, 255));
+            _platform.DrawUiText($"FPS {_platform.GetFps()}  |  Render {_lastFrameMs:0.0} ms", new Vector2(24, 50), 17, 1f, new Color(225, 235, 239, 255));
+            _platform.DrawUiText($"Pos: {_player.Position.X:0.00}, {_player.Position.Y:0.00}, {_player.Position.Z:0.00}", new Vector2(24, 72), 16, 1f, new Color(201, 220, 225, 255));
+            _platform.DrawUiText($"Графика: {GetQualityName(_graphics.Quality)}  |  Камера: {GetCameraModeName(_cameraMode)}", new Vector2(24, 94), 16, 1f, new Color(191, 214, 220, 255));
             if (_companion is not null)
             {
-                _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(22, 122), 17, 1f, Color.White);
-                _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(22, 144), 17, 1f, new Color(191, 214, 220, 255));
-                _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(22, 166), 17, 1f, new Color(191, 214, 220, 255));
-                _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(22, 188), 17, 1f, new Color(191, 214, 220, 255));
+                _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(24, 120), 16, 1f, Color.White);
+                _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(24, 142), 16, 1f, new Color(191, 214, 220, 255));
+                _platform.DrawUiText($"Далее: {_companion.GetQueuedSummary()}", new Vector2(24, 164), 16, 1f, new Color(191, 214, 220, 255));
+                _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(24, 186), 16, 1f, new Color(191, 214, 220, 255));
             }
 
             return;
         }
 
-        var compactHeight = _companion is null ? 58 : 86;
-        _platform.DrawRectangle(14, 14, 268, compactHeight, new Color(10, 22, 30, 132));
-        _platform.DrawRectangle(18, 18, 260, 24, new Color(40, 84, 92, 176));
-        _platform.DrawUiText($"FPS {_platform.GetFps()}  |  {GetCameraModeName(_cameraMode)}", new Vector2(28, 22), 16, 1f, new Color(181, 246, 235, 255));
+        var compactWidth = _companion is null ? 250 : 340;
+        var compactHeight = _companion is null ? 62 : 92;
+        _platform.DrawRectangle(14, 14, compactWidth, compactHeight, new Color(10, 18, 26, 112));
+        _platform.DrawRectangle(14, 14, compactWidth, 3, new Color(112, 232, 220, 145));
+        _platform.DrawRectangle(22, 22, 78, 24, new Color(28, 78, 80, 156));
+        _platform.DrawRectangle(108, 22, 108, 24, new Color(20, 34, 44, 144));
+        _platform.DrawUiText($"FPS {_platform.GetFps()}", new Vector2(34, 26), 16, 1f, new Color(190, 248, 236, 255));
+        _platform.DrawUiText(GetCameraModeName(_cameraMode), new Vector2(122, 26), 16, 1f, new Color(214, 230, 236, 255));
         if (_companion is not null)
         {
-            _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(28, 48), 17, 1f, Color.White);
-            _platform.DrawUiText(_companion.GetActiveSummary(), new Vector2(28, 68), 15, 1f, new Color(194, 221, 226, 255));
+            _platform.DrawRectangle(22, 54, compactWidth - 16, 28, new Color(14, 24, 32, 126));
+            _platform.DrawRectangle(22, 54, 6, 28, GetBotStatusAccent(_companion.Status));
+            _platform.DrawUiText($"Бот: {_companion.Status.GetLabel()}", new Vector2(38, 58), 16, 1f, Color.White);
+            _platform.DrawUiText(_companion.GetActiveSummary(), new Vector2(178, 58), 14, 1f, new Color(198, 220, 228, 255));
         }
     }
 
@@ -2595,30 +3096,49 @@ public class GameApp : IGameRunner
             return;
         }
 
-        var x = Math.Max(16, _platform.GetScreenWidth() - 192);
-        _platform.DrawRectangle(x - 12, 10, 176, 34, new Color(28, 10, 10, 140));
-        _platform.DrawUiText(label, new Vector2(x, 16), 22, 1f, new Color(244, 84, 84, 255));
+        var x = Math.Max(16, _platform.GetScreenWidth() - 212);
+        _platform.DrawRectangle(x - 16, 10, 196, 34, new Color(20, 12, 16, 148));
+        _platform.DrawRectangle(x - 6, 20, 10, 10, new Color(244, 84, 84, 255));
+        _platform.DrawUiText(label, new Vector2(x + 16, 15), 20, 1f, new Color(248, 110, 110, 255));
     }
 
     private void DrawHotbar()
     {
-        var slotWidth = 120;
-        var slotHeight = 42;
+        var slotWidth = 110;
+        var slotHeight = 46;
         var spacing = 8;
         var totalWidth = _hotbar.Length * slotWidth + (_hotbar.Length - 1) * spacing;
 
         var startX = _platform.GetScreenWidth() / 2 - totalWidth / 2;
-        var y = _platform.GetScreenHeight() - slotHeight - 18;
+        var y = _platform.GetScreenHeight() - slotHeight - 20;
+
+        _platform.DrawRectangle(startX - 16, y - 10, totalWidth + 32, slotHeight + 20, new Color(12, 18, 24, 108));
 
         for (var i = 0; i < _hotbar.Length; i++)
         {
             var x = startX + i * (slotWidth + spacing);
             var isSelected = i == _selectedHotbarIndex;
 
-            _platform.DrawRectangle(x, y, slotWidth, slotHeight, isSelected ? new Color(255, 245, 163, 235) : new Color(245, 245, 245, 210));
-            var label = $"{i + 1}: {GetBlockName(_hotbar[i])}";
-            _platform.DrawUiText(label, new Vector2(x + 8, y + 12), 18, 1f, Color.Black);
+            var baseColor = isSelected ? new Color(246, 226, 164, 228) : new Color(16, 24, 32, 188);
+            var textColor = isSelected ? new Color(26, 24, 18, 255) : new Color(228, 236, 240, 255);
+            _platform.DrawRectangle(x, y, slotWidth, slotHeight, baseColor);
+            _platform.DrawRectangle(x, y, slotWidth, 4, isSelected ? new Color(255, 247, 190, 255) : new Color(96, 140, 152, 188));
+            _platform.DrawRectangle(x + 8, y + 11, 18, 18, GetHeldBlockColor(_hotbar[i]));
+            var label = $"{i + 1}. {GetBlockName(_hotbar[i])}";
+            _platform.DrawUiText(label, new Vector2(x + 32, y + 12), 16, 1f, textColor);
         }
+    }
+
+    private static Color GetBotStatusAccent(BotStatus status)
+    {
+        return status switch
+        {
+            BotStatus.Idle => new Color(120, 206, 214, 255),
+            BotStatus.Moving => new Color(122, 194, 255, 255),
+            BotStatus.Gathering => new Color(158, 222, 126, 255),
+            BotStatus.Building => new Color(244, 198, 116, 255),
+            _ => new Color(244, 108, 108, 255)
+        };
     }
 
     private void DrawMenu()

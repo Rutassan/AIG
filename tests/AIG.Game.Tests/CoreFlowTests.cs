@@ -2156,6 +2156,25 @@ public sealed class CoreFlowTests
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);
     }
 
+    [Fact(DisplayName = "DrawHitFaceHighlight ограничивается только контуром грани без полупрозрачной заливки")]
+    public void DrawHitFaceHighlight_DoesNotDrawFaceFill()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            platform,
+            new WorldMap(width: 4, height: 4, depth: 4, chunkSize: 4, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawHitFaceHighlight", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hit = new BlockRaycastHit(1, 1, 1, 1, 1, 2);
+        method!.Invoke(app, [hit, new Vector3(0f, 0f, 1f)]);
+
+        Assert.Empty(platform.DrawnCubes);
+        Assert.Single(platform.DrawnCubeWires);
+    }
+
     [Fact(DisplayName = "TryGetHitFaceNormal отклоняет скачок previous более чем на 1 блок по любой оси")]
     public void TryGetHitFaceNormal_RejectsOutOfRangePreviousDelta()
     {

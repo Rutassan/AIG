@@ -9,7 +9,10 @@ public sealed class WorldMap
 {
     private const int MaxChunkGenerationsInFlight = 2;
     private const int MaxSurfaceRebuildsInFlight = 2;
-    private const int TreeVariantCount = 3;
+    private const int TreeVariantCount = 5;
+    public const int MaxSunVisibility = 6;
+    private static readonly Vector3 SunLightDirection = Vector3.Normalize(new Vector3(-0.62f, -0.74f, -0.24f));
+    private static readonly Vector3 SunTraceDirection = -SunLightDirection;
 
     public readonly record struct SurfaceBlock(
         int X,
@@ -20,7 +23,8 @@ public sealed class WorldMap
         bool TopVisible,
         int SkyExposure,
         int AmbientOcclusion = 0,
-        int ReliefExposure = 0);
+        int ReliefExposure = 0,
+        int SunVisibility = MaxSunVisibility);
 
     private static readonly IReadOnlyList<SurfaceBlock> EmptySurfaceBlocks = Array.Empty<SurfaceBlock>();
     private readonly record struct GeneratedChunkResult(int ChunkX, int ChunkZ, Chunk Chunk);
@@ -59,6 +63,7 @@ public sealed class WorldMap
     public int LoadedChunkCount => _chunks.Count;
     public int ChunkCountX => _chunkCountX;
     public int ChunkCountZ => _chunkCountZ;
+    internal static Vector3 GetSunLightDirection() => SunLightDirection;
 
     public BlockType GetBlock(int x, int y, int z)
     {
@@ -540,7 +545,8 @@ public sealed class WorldMap
                     var skyExposure = CountSkyExposureNoLoad(worldX, y, worldZ);
                     var ambientOcclusion = CountAmbientOcclusionNoLoad(worldX, y, worldZ, topVisible);
                     var reliefExposure = CountReliefExposureNoLoad(worldX, y, worldZ, topVisible);
-                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure));
+                    var sunVisibility = CountSunVisibilityNoLoad(worldX, y, worldZ);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility));
                 }
             }
         }
@@ -631,6 +637,11 @@ public sealed class WorldMap
         return count;
     }
 
+    private int CountSunVisibilityNoLoad(int x, int y, int z)
+    {
+        return CountSunVisibilityCore(x, y, z, IsSolidNoLoad);
+    }
+
     private int GetSurfaceRevision((int ChunkX, int ChunkZ) key)
     {
         return _surfaceRevisions.TryGetValue(key, out var revision) ? revision : 0;
@@ -702,7 +713,7 @@ public sealed class WorldMap
             return;
         }
 
-        const int treeReach = 3;
+        const int treeReach = 4;
         var chunkMinX = chunkX * ChunkSize;
         var chunkMaxX = Math.Min(Width - 1, chunkMinX + ChunkSize - 1);
         var chunkMinZ = chunkZ * ChunkSize;
@@ -769,14 +780,14 @@ public sealed class WorldMap
         }
 
         var signal = signalAt(x, z);
-        if (signal < 0.58f)
+        if (signal < 0.52f)
         {
             return false;
         }
 
-        // Keep forest dense but avoid merged mega-canopies:
-        // place one trunk per small neighborhood based on local max signal.
-        if (!IsLocalTreePeak(x, z, signal, signalAt))
+        var peakRadius = signal >= 0.74f ? 1 : 2;
+        // Keep the forest dense inside groves, but still prevent fully merged canopies.
+        if (!IsLocalTreePeak(x, z, signal, signalAt, peakRadius))
         {
             return false;
         }
@@ -785,19 +796,19 @@ public sealed class WorldMap
         var hX = topAt(Math.Min(Width - 1, x + 1), z);
         var hZ = topAt(x, Math.Min(Depth - 1, z + 1));
         var slope = Math.Abs(h - hX) + Math.Abs(h - hZ);
-        return slope <= 3;
+        return slope <= 4;
     }
 
     private float EvaluateTreeSignal(int x, int z)
     {
         var biome = FractalNoise((x + Seed * 0.19f) / 72f, (z - Seed * 0.13f) / 72f, octaves: 3, lacunarity: 2f, gain: 0.5f);
-        var localChance = ValueNoise((x + Seed * 0.51f) / 9f, (z - Seed * 0.47f) / 9f);
-        return biome * 0.62f + localChance * 0.38f;
+        var grove = FractalNoise((x - Seed * 0.09f) / 34f, (z + Seed * 0.17f) / 34f, octaves: 2, lacunarity: 2f, gain: 0.54f);
+        var localChance = ValueNoise((x + Seed * 0.51f) / 8f, (z - Seed * 0.47f) / 8f);
+        return biome * 0.44f + grove * 0.34f + localChance * 0.22f;
     }
 
-    private bool IsLocalTreePeak(int x, int z, float signal, Func<int, int, float> signalAt)
+    private bool IsLocalTreePeak(int x, int z, float signal, Func<int, int, float> signalAt, int radius)
     {
-        const int radius = 2;
         for (var nx = x - radius; nx <= x + radius; nx++)
         {
             for (var nz = z - radius; nz <= z + radius; nz++)
@@ -835,19 +846,26 @@ public sealed class WorldMap
         }
 
         PlaceLowerCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
-        if (variant == 0)
+        switch (variant)
         {
-            PlaceBroadCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
-            return;
+            case 0:
+                PlaceBroadCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+                break;
+            case 1:
+                PlaceLayeredCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+                break;
+            case 2:
+                PlaceAsymmetricCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+                break;
+            case 3:
+                PlaceTallCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+                break;
+            default:
+                PlaceWideCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+                break;
         }
 
-        if (variant == 1)
-        {
-            PlaceLayeredCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
-            return;
-        }
-
-        PlaceAsymmetricCanopy(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ);
+        PruneSparseLeaves(chunk, chunkX, chunkZ, rootX, rootY, rootZ, trunkTopY);
     }
 
     private int GetTreeVariant(int rootX, int rootZ)
@@ -862,7 +880,9 @@ public sealed class WorldMap
         {
             0 => 4 + baseHeight % 2, // 4..5
             1 => 5 + baseHeight % 3, // 5..7
-            _ => 4 + baseHeight % 3  // 4..6
+            2 => 4 + baseHeight % 3, // 4..6
+            3 => 6 + baseHeight % 3, // 6..8
+            _ => 5 + baseHeight % 2  // 5..6
         };
     }
 
@@ -907,10 +927,31 @@ public sealed class WorldMap
         };
 
         PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY - 1, rootZ, radius: 1, manhattanPadding: 0, keepCenter: true);
-        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY, rootZ + offsetZ, radius: 2, manhattanPadding: 0, keepCenter: false);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ, radius: 1, manhattanPadding: 0, keepCenter: true);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY, rootZ + offsetZ, radius: 2, manhattanPadding: 1, keepCenter: false);
         PlaceLeafLayer(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY + 1, rootZ + offsetZ, radius: 1, manhattanPadding: 0, keepCenter: false);
-        PlaceLeafCross(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY, rootZ + offsetZ, armLength: 2);
+        PlaceLeafCross(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY, rootZ + offsetZ, armLength: 1);
         SetBlockInChunk(chunk, chunkX, chunkZ, rootX + offsetX, trunkTopY + 2, rootZ + offsetZ, BlockType.Leaves, onlyIfAir: true);
+    }
+
+    private void PlaceTallCanopy(Chunk chunk, int chunkX, int chunkZ, int rootX, int trunkTopY, int rootZ)
+    {
+        PlaceLeafCross(chunk, chunkX, chunkZ, rootX, trunkTopY - 2, rootZ, armLength: 1);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY - 1, rootZ, radius: 1, manhattanPadding: 0, keepCenter: true);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ, radius: 1, manhattanPadding: 0, keepCenter: true);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY + 1, rootZ, radius: 1, manhattanPadding: -1, keepCenter: false);
+        PlaceLeafCross(chunk, chunkX, chunkZ, rootX, trunkTopY + 1, rootZ, armLength: 1);
+        SetBlockInChunk(chunk, chunkX, chunkZ, rootX, trunkTopY + 2, rootZ, BlockType.Leaves, onlyIfAir: true);
+        SetBlockInChunk(chunk, chunkX, chunkZ, rootX, trunkTopY + 3, rootZ, BlockType.Leaves, onlyIfAir: true);
+    }
+
+    private void PlaceWideCanopy(Chunk chunk, int chunkX, int chunkZ, int rootX, int trunkTopY, int rootZ)
+    {
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY - 1, rootZ, radius: 2, manhattanPadding: 1, keepCenter: true);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY, rootZ, radius: 3, manhattanPadding: 1, keepCenter: true);
+        PlaceLeafLayer(chunk, chunkX, chunkZ, rootX, trunkTopY + 1, rootZ, radius: 2, manhattanPadding: 1, keepCenter: false);
+        PlaceLeafCross(chunk, chunkX, chunkZ, rootX, trunkTopY + 1, rootZ, armLength: 2);
+        SetBlockInChunk(chunk, chunkX, chunkZ, rootX, trunkTopY + 2, rootZ, BlockType.Leaves, onlyIfAir: true);
     }
 
     private void PlaceLeafLayer(
@@ -952,6 +993,72 @@ public sealed class WorldMap
             SetBlockInChunk(chunk, chunkX, chunkZ, centerX, centerY, centerZ + step, BlockType.Leaves, onlyIfAir: true);
             SetBlockInChunk(chunk, chunkX, chunkZ, centerX, centerY, centerZ - step, BlockType.Leaves, onlyIfAir: true);
         }
+    }
+
+    private void PruneSparseLeaves(Chunk chunk, int chunkX, int chunkZ, int rootX, int rootY, int rootZ, int trunkTopY)
+    {
+        var chunkMinX = chunkX * ChunkSize;
+        var chunkMaxX = Math.Min(Width - 1, chunkMinX + ChunkSize - 1);
+        var chunkMinZ = chunkZ * ChunkSize;
+        var chunkMaxZ = Math.Min(Depth - 1, chunkMinZ + ChunkSize - 1);
+
+        var minX = Math.Max(chunkMinX + 1, rootX - 4);
+        var maxX = Math.Min(chunkMaxX - 1, rootX + 4);
+        var minZ = Math.Max(chunkMinZ + 1, rootZ - 4);
+        var maxZ = Math.Min(chunkMaxZ - 1, rootZ + 4);
+        var minY = Math.Max(0, rootY - 1);
+        var maxY = Math.Min(Height - 1, trunkTopY + 2);
+        if (minX > maxX || minZ > maxZ || minY > maxY)
+        {
+            return;
+        }
+
+        var toClear = new List<(int X, int Y, int Z)>();
+        for (var worldX = minX; worldX <= maxX; worldX++)
+        {
+            var localX = worldX - chunkMinX;
+            for (var worldZ = minZ; worldZ <= maxZ; worldZ++)
+            {
+                var localZ = worldZ - chunkMinZ;
+                for (var y = minY; y <= maxY; y++)
+                {
+                    if (chunk.Get(localX, y, localZ) != BlockType.Leaves)
+                    {
+                        continue;
+                    }
+
+                    var neighbors = 0;
+                    if (IsLeafOrWood(chunk, localX + 1, y, localZ)) neighbors++;
+                    if (IsLeafOrWood(chunk, localX - 1, y, localZ)) neighbors++;
+                    if (IsLeafOrWood(chunk, localX, y + 1, localZ)) neighbors++;
+                    if (IsLeafOrWood(chunk, localX, y - 1, localZ)) neighbors++;
+                    if (IsLeafOrWood(chunk, localX, y, localZ + 1)) neighbors++;
+                    if (IsLeafOrWood(chunk, localX, y, localZ - 1)) neighbors++;
+
+                    if (neighbors <= 1)
+                    {
+                        toClear.Add((localX, y, localZ));
+                    }
+                }
+            }
+        }
+
+        for (var i = 0; i < toClear.Count; i++)
+        {
+            var leaf = toClear[i];
+            chunk.Set(leaf.X, leaf.Y, leaf.Z, BlockType.Air);
+        }
+    }
+
+    private static bool IsLeafOrWood(Chunk chunk, int localX, int y, int localZ)
+    {
+        if (localX < 0 || localZ < 0 || localX >= chunk.Size || localZ >= chunk.Size || y < 0 || y >= chunk.Height)
+        {
+            return false;
+        }
+
+        var block = chunk.Get(localX, y, localZ);
+        return block is BlockType.Leaves or BlockType.Wood;
     }
 
     private static int Hash(int x, int z, int seed)
@@ -1339,7 +1446,8 @@ public sealed class WorldMap
                     var skyExposure = CountSkyExposureSnapshot(worldX, y, worldZ, snapshot);
                     var ambientOcclusion = CountAmbientOcclusionSnapshot(worldX, y, worldZ, snapshot, topVisible);
                     var reliefExposure = CountReliefExposureSnapshot(worldX, y, worldZ, snapshot, topVisible);
-                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure));
+                    var sunVisibility = CountSunVisibilitySnapshot(worldX, y, worldZ, snapshot);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility));
                 }
             }
         }
@@ -1426,6 +1534,35 @@ public sealed class WorldMap
         if (!IsSolidInSnapshot(x, y - 1, z + 1, snapshot)) count++;
         if (!IsSolidInSnapshot(x, y - 1, z - 1, snapshot)) count++;
         return count;
+    }
+
+    private int CountSunVisibilitySnapshot(
+        int x,
+        int y,
+        int z,
+        IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]> snapshot)
+    {
+        return CountSunVisibilityCore(x, y, z, (sx, sy, sz) => IsSolidInSnapshot(sx, sy, sz, snapshot));
+    }
+
+    private int CountSunVisibilityCore(int x, int y, int z, Func<int, int, int, bool> isSolid)
+    {
+        var origin = new Vector3(x + 0.5f, y + 0.68f, z + 0.5f);
+
+        for (var i = 1; i <= MaxSunVisibility; i++)
+        {
+            var distance = 0.85f + i * 1.05f;
+            var sample = origin + SunTraceDirection * distance;
+            var sampleX = (int)MathF.Floor(sample.X);
+            var sampleY = (int)MathF.Floor(sample.Y);
+            var sampleZ = (int)MathF.Floor(sample.Z);
+            if (isSolid(sampleX, sampleY, sampleZ))
+            {
+                return i - 1;
+            }
+        }
+
+        return MaxSunVisibility;
     }
 
     private bool IsSolidInSnapshot(

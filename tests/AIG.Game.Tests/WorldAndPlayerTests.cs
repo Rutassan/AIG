@@ -529,22 +529,25 @@ public sealed class WorldAndPlayerTests
     public void World_PlaceTreeIntoChunk_CoversAllTreeVariants()
     {
         var world = new WorldMap(width: 64, height: 32, depth: 64, chunkSize: 16, seed: 777);
+        var variantCountField = typeof(WorldMap).GetField("TreeVariantCount", BindingFlags.Static | BindingFlags.NonPublic);
         var variantMethod = typeof(WorldMap).GetMethod("GetTreeVariant", BindingFlags.Instance | BindingFlags.NonPublic);
         var placeMethod = typeof(WorldMap).GetMethod("PlaceTreeIntoChunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(variantCountField);
         Assert.NotNull(variantMethod);
         Assert.NotNull(placeMethod);
 
+        var variantCount = (int)variantCountField!.GetRawConstantValue()!;
         var foundRoots = new Dictionary<int, (int X, int Z)>();
-        for (var x = 3; x <= 12 && foundRoots.Count < 3; x++)
+        for (var x = 3; x <= 24 && foundRoots.Count < variantCount; x++)
         {
-            for (var z = 3; z <= 12 && foundRoots.Count < 3; z++)
+            for (var z = 3; z <= 24 && foundRoots.Count < variantCount; z++)
             {
                 var variant = (int)variantMethod!.Invoke(world, [x, z])!;
                 foundRoots.TryAdd(variant, (x, z));
             }
         }
 
-        Assert.Equal(3, foundRoots.Count);
+        Assert.Equal(variantCount, foundRoots.Count);
 
         foreach (var root in foundRoots.Values)
         {
@@ -571,6 +574,66 @@ public sealed class WorldAndPlayerTests
         }
     }
 
+    [Fact(DisplayName = "PlaceTreeIntoChunk после prune не оставляет одинокие листья в безопасной зоне")]
+    public void World_PlaceTreeIntoChunk_PrunesSparseLeaves()
+    {
+        var world = new WorldMap(width: 64, height: 32, depth: 64, chunkSize: 16, seed: 777);
+        var placeMethod = typeof(WorldMap).GetMethod("PlaceTreeIntoChunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(placeMethod);
+
+        var chunk = new Chunk(size: 16, height: 32);
+        placeMethod!.Invoke(world, [chunk, 0, 0, 8, 4, 8]);
+
+        static int CountNeighbors(Chunk treeChunk, int x, int y, int z)
+        {
+            var neighbors = 0;
+            if (treeChunk.Get(x + 1, y, z) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            if (treeChunk.Get(x - 1, y, z) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            if (treeChunk.Get(x, y + 1, z) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            if (treeChunk.Get(x, y - 1, z) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            if (treeChunk.Get(x, y, z + 1) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            if (treeChunk.Get(x, y, z - 1) is BlockType.Leaves or BlockType.Wood) neighbors++;
+            return neighbors;
+        }
+
+        for (var x = 2; x < chunk.Size - 2; x++)
+        {
+            for (var y = 1; y < chunk.Height - 1; y++)
+            {
+                for (var z = 2; z < chunk.Size - 2; z++)
+                {
+                    if (chunk.Get(x, y, z) != BlockType.Leaves)
+                    {
+                        continue;
+                    }
+
+                    Assert.True(CountNeighbors(chunk, x, y, z) >= 2, $"Нашли одиночную листву в {x},{y},{z}.");
+                }
+            }
+        }
+    }
+
+    [Fact(DisplayName = "IsLeafOrWood различает границы, воздух, листву и дерево")]
+    public void World_IsLeafOrWood_CoversBoundsAndBlockTypes()
+    {
+        var method = typeof(WorldMap).GetMethod("IsLeafOrWood", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var chunk = new Chunk(size: 4, height: 4);
+        chunk.Set(1, 1, 1, BlockType.Leaves);
+        chunk.Set(2, 1, 1, BlockType.Wood);
+
+        Assert.False((bool)method!.Invoke(null, [chunk, -1, 1, 1])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 1, 1, -1])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 4, 1, 1])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 1, 1, 4])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 1, -1, 1])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 1, 4, 1])!);
+        Assert.True((bool)method.Invoke(null, [chunk, 1, 1, 1])!);
+        Assert.True((bool)method.Invoke(null, [chunk, 2, 1, 1])!);
+        Assert.False((bool)method.Invoke(null, [chunk, 0, 1, 0])!);
+    }
+
     [Fact(DisplayName = "Кэш поверхностей считает ambient occlusion и relief exposure для рельефа")]
     public void World_SurfaceCache_ComputesAmbientOcclusionAndReliefExposure()
     {
@@ -591,6 +654,29 @@ public sealed class WorldAndPlayerTests
 
         Assert.True(ambientOcclusion >= 4);
         Assert.Equal(4, reliefExposure);
+    }
+
+    [Fact(DisplayName = "Кэш поверхностей считает направленную солнечную видимость и снижает её под блокирующим блоком")]
+    public void World_SurfaceCache_ComputesSunVisibility()
+    {
+        var world = new WorldMap(width: 16, height: 10, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(4, 3, 4, BlockType.Stone);
+
+        var method = typeof(WorldMap).GetMethod("CountSunVisibilityNoLoad", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var openVisibility = (int)method!.Invoke(world, [4, 3, 4])!;
+        Assert.Equal(WorldMap.MaxSunVisibility, openVisibility);
+
+        world.SetBlock(5, 5, 4, BlockType.Stone);
+        var blockedVisibility = (int)method.Invoke(world, [4, 3, 4])!;
+        Assert.True(blockedVisibility < openVisibility);
+
+        world.EnsureChunksAround(new Vector3(4.5f, 3.5f, 4.5f), radiusInChunks: 0);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 3.5f, 4.5f), maxChunks: 1);
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var surface));
+        var block = Assert.Single(surface.Where(s => s.X == 4 && s.Y == 3 && s.Z == 4));
+        Assert.Equal(blockedVisibility, block.SunVisibility);
     }
 
     [Fact(DisplayName = "Кэш поверхностей чанка не скрывает старую картинку до пересборки и обновляется после изменения блока")]
@@ -701,7 +787,7 @@ public sealed class WorldAndPlayerTests
         Assert.NotNull(method);
 
         float SignalAt(int x, int z) => (x == 0 && z == 0) ? 0.9f : 0.1f;
-        var ok = (bool)method!.Invoke(world, [0, 0, 0.9f, (Func<int, int, float>)SignalAt])!;
+        var ok = (bool)method!.Invoke(world, [0, 0, 0.9f, (Func<int, int, float>)SignalAt, 2])!;
 
         Assert.True(ok);
     }

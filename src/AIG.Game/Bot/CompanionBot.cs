@@ -13,6 +13,8 @@ internal sealed class CompanionBot
     private const float ActionArrivalDistance = 0.08f;
     private const float PreciseActionArrivalDistance = 0.01f;
     private const float ActionVerticalArrivalTolerance = 0.18f;
+    private const float LocalActionRouteVerticalDropThreshold = 0.55f;
+    private const float LocalActionRouteHorizontalThreshold = 0.30f;
     private const float FollowDistance = 4.8f;
     private const float FollowSideOffset = 2.6f;
     private const float FollowIdleDistance = 1.65f;
@@ -33,6 +35,8 @@ internal sealed class CompanionBot
     private const float RouteMicroMoveThreshold = 0.05f;
     private const int BuildReachableLookahead = 256;
     private const int BuildReachableRouteProbeLimit = 12;
+    private const int ResourceCandidateShortlistLimit = 24;
+    private const int ResourceRouteProbeLimit = 8;
 
     private readonly record struct ResourceTarget(int X, int Y, int Z, BotResourceType Resource);
     private readonly record struct NavigationGoal(
@@ -43,6 +47,7 @@ internal sealed class CompanionBot
         int Radius,
         HouseBlueprint? Blueprint);
     private readonly record struct ScoredBuildCandidate(int Index, HouseBuildStep Step, float Score, bool HasResources);
+    private readonly record struct ScoredResourceCandidate(ResourceTarget Target, float Score);
 
     private readonly GameConfig _config;
     private readonly Action<string> _diagnostics;
@@ -294,7 +299,9 @@ internal sealed class CompanionBot
             return;
         }
 
-        while (_buildStepIndex < blueprint.Steps.Count && IsBuildStepSatisfied(world, blueprint.Steps[_buildStepIndex]))
+        while (_buildStepIndex < blueprint.Steps.Count
+               && (blueprint.IsSupersededStep(_buildStepIndex)
+                   || IsBuildStepSatisfied(world, blueprint.Steps[_buildStepIndex])))
         {
             _buildStepIndex++;
         }
@@ -467,6 +474,7 @@ internal sealed class CompanionBot
         {
             Trace($"gather-target-missing resource={resource} needed={amountNeeded}");
             Status = BotStatus.NoPath;
+            _noPathTimer = MathF.Max(_noPathTimer, 0.15f);
             StepIdle(world, deltaTime);
             return false;
         }
@@ -487,6 +495,7 @@ internal sealed class CompanionBot
             _retargetCooldown = 0.15f;
             Trace($"gather-route-failed target={FormatCell(target.X, target.Y, target.Z)} resource={resource}");
             Status = BotStatus.NoPath;
+            _noPathTimer = MathF.Max(_noPathTimer, 0.35f);
             StepIdle(world, deltaTime);
             return false;
         }
@@ -562,8 +571,7 @@ internal sealed class CompanionBot
         var chunkRadius = 2;
         var centerChunkX = centerX / Math.Max(1, world.ChunkSize);
         var centerChunkZ = centerZ / Math.Max(1, world.ChunkSize);
-        var bestScore = float.MaxValue;
-        var found = false;
+        var candidates = new List<ScoredResourceCandidate>(64);
 
         for (var chunkX = Math.Max(0, centerChunkX - chunkRadius); chunkX <= Math.Min(world.ChunkCountX - 1, centerChunkX + chunkRadius); chunkX++)
         {
@@ -598,24 +606,12 @@ internal sealed class CompanionBot
                         continue;
                     }
 
-                    var dx = surface.X + 0.5f - Position.X;
-                    var dz = surface.Z + 0.5f - Position.Z;
-                    var dy = surface.Y + 0.5f - Position.Y;
-                    var horizontal = dx * dx + dz * dz;
-                    var score = horizontal + MathF.Abs(dy) * 3.5f;
-                    if (score >= bestScore)
-                    {
-                        continue;
-                    }
-
-                    bestScore = score;
-                    target = candidate;
-                    found = true;
+                    candidates.Add(new ScoredResourceCandidate(candidate, ScoreSurfaceResourceCandidate(surface)));
                 }
             }
         }
 
-        return found;
+        return TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target);
     }
 
     private bool TryFindFocusedResourceTarget(WorldMap world, BotResourceType resource, HouseBlueprint? reservedBlueprint, out ResourceTarget target)
@@ -628,8 +624,7 @@ internal sealed class CompanionBot
 
         var horizontalRadius = GetFocusedResourceHorizontalRadius(resource);
         var verticalRadius = GetFocusedResourceVerticalRadius(resource);
-        var bestScore = float.MaxValue;
-        var found = false;
+        var candidates = new List<ScoredResourceCandidate>(32);
 
         for (var x = Math.Max(0, focus.X - horizontalRadius); x <= Math.Min(world.Width - 1, focus.X + horizontalRadius); x++)
         {
@@ -668,25 +663,123 @@ internal sealed class CompanionBot
                         + MathF.Abs(focusDy)
                         + (botDx * botDx + botDz * botDz) * 0.05f
                         + MathF.Abs(botDy) * 0.15f;
-                    if (score >= bestScore)
-                    {
-                        continue;
-                    }
-
-                    bestScore = score;
-                    target = candidate;
-                    found = true;
+                    candidates.Add(new ScoredResourceCandidate(candidate, score));
                 }
             }
         }
 
-        if (found)
+        if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
         {
             return true;
         }
 
         _resourceFocusTarget = null;
         return false;
+    }
+
+    private bool TrySelectReachableResourceCandidate(
+        WorldMap world,
+        HouseBlueprint? reservedBlueprint,
+        List<ScoredResourceCandidate> candidates,
+        out ResourceTarget target)
+    {
+        target = default;
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        var bestScore = float.MaxValue;
+        var found = false;
+        var settings = GetNavigationSettings();
+
+        foreach (var candidate in candidates
+                     .OrderBy(entry => entry.Score)
+                     .Take(ResourceCandidateShortlistLimit))
+        {
+            if (!TryScoreReachableResourceCandidate(world, settings, candidate.Target, reservedBlueprint, candidate.Score, out var routeScore))
+            {
+                continue;
+            }
+
+            if (routeScore >= bestScore)
+            {
+                continue;
+            }
+
+            bestScore = routeScore;
+            target = candidate.Target;
+            found = true;
+        }
+
+        return found;
+    }
+
+    private bool TryScoreReachableResourceCandidate(
+        WorldMap world,
+        BotNavigationSettings settings,
+        ResourceTarget target,
+        HouseBlueprint? reservedBlueprint,
+        float baseScore,
+        out float routeScore)
+    {
+        routeScore = float.MaxValue;
+        if (CanActOnBlock(target.X, target.Y, target.Z))
+        {
+            routeScore = baseScore;
+            return true;
+        }
+
+        if (TryFindActionPoseNear(world, target.X, target.Y, target.Z, searchRadius: 6, reservedBlueprint, out var localPose, out var localScore))
+        {
+            if (BotNavigator.TryBuildStandRoute(world, settings, Position, localPose, goalRadius: 0, out var stageWaypoints))
+            {
+                routeScore = baseScore + localScore + stageWaypoints.Length;
+                return true;
+            }
+        }
+
+        if (BotNavigator.TryBuildActionRoute(
+                world,
+                settings,
+                Position,
+                target.X,
+                target.Y,
+                target.Z,
+                searchRadius: 6,
+                reservedBlueprint,
+                out var waypoints,
+                out _))
+        {
+            routeScore = baseScore + waypoints.Length;
+            return true;
+        }
+
+        return false;
+    }
+
+    private float ScoreSurfaceResourceCandidate(WorldMap.SurfaceBlock surface)
+    {
+        var dx = surface.X + 0.5f - Position.X;
+        var dz = surface.Z + 0.5f - Position.Z;
+        var dy = surface.Y + 0.5f - Position.Y;
+        var horizontal = dx * dx + dz * dz;
+        var score = horizontal + MathF.Abs(dy) * 3.5f;
+
+        if (surface.Y + 1 < Position.Y - 4f)
+        {
+            var depth = Position.Y - (surface.Y + 1);
+            score += depth * depth * 0.4f;
+        }
+
+        if (!surface.TopVisible)
+        {
+            score += 2.5f;
+        }
+
+        score += Math.Max(0, 2 - surface.SkyExposure) * 1.5f;
+        score += (WorldMap.MaxSunVisibility - surface.SunVisibility) * 0.35f;
+        return score;
     }
 
     private bool IsResourceTargetValid(WorldMap world, ResourceTarget target)
@@ -789,6 +882,7 @@ internal sealed class CompanionBot
         _currentTarget = null;
         _resourceFocusTarget = target;
         _actionCooldown = 0.08f;
+        _retargetCooldown = 0f;
         Trace($"harvest resource={target.Resource} target={FormatCell(target.X, target.Y, target.Z)} amount={collected} stock={GetStockpile(collectedBlock)}");
         return true;
     }
@@ -961,17 +1055,7 @@ internal sealed class CompanionBot
 
     private bool IsSupportingPoseBlock(int x, int y, int z, Vector3 pose)
     {
-        var supportY = (int)MathF.Floor(pose.Y - 0.05f);
-        if (y != supportY)
-        {
-            return false;
-        }
-
-        var minX = (int)MathF.Floor(pose.X - Actor.ColliderHalfWidth + 0.03f);
-        var maxX = (int)MathF.Floor(pose.X + Actor.ColliderHalfWidth - 0.03f);
-        var minZ = (int)MathF.Floor(pose.Z - Actor.ColliderHalfWidth + 0.03f);
-        var maxZ = (int)MathF.Floor(pose.Z + Actor.ColliderHalfWidth - 0.03f);
-        return x >= minX && x <= maxX && z >= minZ && z <= maxZ;
+        return BotNavigator.IsSupportingPoseBlock(GetNavigationSettings(), pose, x, y, z);
     }
 
     private static int GetHarvestBatchSize(BotResourceType resource)
@@ -1172,13 +1256,13 @@ internal sealed class CompanionBot
 
     private void UpdateRouteProgress(float deltaTime, float movedDistance, float distanceBefore, float distanceAfter)
     {
-        if (distanceBefore <= 0.55f)
+        var progress = distanceBefore - distanceAfter;
+        if (distanceBefore <= 0.55f && progress >= RouteProgressThreshold)
         {
             _stuckTime = MathF.Max(0f, _stuckTime - deltaTime * 2f);
             return;
         }
 
-        var progress = distanceBefore - distanceAfter;
         if (progress >= RouteProgressThreshold)
         {
             _stuckTime = MathF.Max(0f, _stuckTime - deltaTime * 1.5f);
@@ -1289,14 +1373,21 @@ internal sealed class CompanionBot
 
             if (_navigationWaypointIndex < _navigationWaypoints.Length)
             {
-                return true;
+                var currentWaypoint = _navigationWaypoints[_navigationWaypointIndex];
+                if (!RequiresStagedLocalActionRoute(currentWaypoint))
+                {
+                    return true;
+                }
+
+                ResetNavigationRoute();
             }
         }
 
         if (TryFindActionPoseNear(world, targetX, targetY, targetZ, searchRadius, blueprint, out var localPose, out _))
         {
             var localDistanceSq = Vector3.DistanceSquared(Position, localPose);
-            if (localDistanceSq <= 36f)
+            var requiresStageRoute = RequiresStagedLocalActionRoute(localPose);
+            if (localDistanceSq <= 36f && !requiresStageRoute)
             {
                 if (!HasArrivedAtPose(localPose, ActionArrivalDistance, ActionVerticalArrivalTolerance))
                 {
@@ -1305,7 +1396,8 @@ internal sealed class CompanionBot
                     return true;
                 }
             }
-            else if (BotNavigator.TryBuildStandRoute(world, GetNavigationSettings(), Position, localPose, goalRadius: 1, out var stageWaypoints))
+
+            if (BotNavigator.TryBuildStandRoute(world, GetNavigationSettings(), Position, localPose, goalRadius: 0, out var stageWaypoints))
             {
                 ApplyNavigationRoute(goal, stageWaypoints);
                 Trace($"action-route-stage purpose={purpose} target={FormatCell(targetX, targetY, targetZ)} waypoints={stageWaypoints.Length} pose={FormatVector(localPose)}");
@@ -1352,7 +1444,7 @@ internal sealed class CompanionBot
         for (var candidateIndex = _buildStepIndex + 1; candidateIndex < lookaheadEnd; candidateIndex++)
         {
             var candidate = blueprint.Steps[candidateIndex];
-            if (IsBuildStepSatisfied(world, candidate))
+            if (blueprint.IsSupersededStep(candidateIndex) || IsBuildStepSatisfied(world, candidate))
             {
                 continue;
             }
@@ -1463,6 +1555,14 @@ internal sealed class CompanionBot
         }
 
         return result;
+    }
+
+    private bool RequiresStagedLocalActionRoute(Vector3 pose)
+    {
+        var horizontalDelta = new Vector2(pose.X - Position.X, pose.Z - Position.Z).Length();
+        var verticalDelta = pose.Y - Position.Y;
+        return horizontalDelta <= LocalActionRouteHorizontalThreshold
+            && verticalDelta < -LocalActionRouteVerticalDropThreshold;
     }
 
     private float GetNavigationArrivalDistance(float finalArrivalDistance, int waypointIndex)
@@ -1587,8 +1687,12 @@ internal sealed class CompanionBot
         var point = new Vector3(targetX + 0.5f, targetY + 0.5f, targetZ + 0.5f);
         var baseX = Math.Clamp(targetX, 0, Math.Max(0, world.Width - 1));
         var baseZ = Math.Clamp(targetZ, 0, Math.Max(0, world.Depth - 1));
-        var maxFeetCell = Math.Clamp((int)MathF.Floor(point.Y) + 1, 1, Math.Max(1, world.Height - 2));
-        var minFeetCell = Math.Max(1, maxFeetCell - 6);
+        var maxFeetCell = blueprint is null
+            ? Math.Clamp((int)MathF.Floor(point.Y + ReachDistance), 1, Math.Max(1, world.Height - 2))
+            : Math.Clamp((int)MathF.Floor(point.Y) + 1, 1, Math.Max(1, world.Height - 2));
+        var minFeetCell = blueprint is null
+            ? Math.Max(1, Math.Clamp((int)MathF.Floor(point.Y) - 1, 1, Math.Max(1, world.Height - 2)))
+            : Math.Max(1, maxFeetCell - 6);
         pose = Position;
         score = float.MaxValue;
 
@@ -1618,6 +1722,7 @@ internal sealed class CompanionBot
                     {
                         var candidate = new Vector3(x + 0.5f, feetCell + 0.02f, z + 0.5f);
                         if (!IsPoseClear(world, candidate)
+                            || IsSupportingPoseBlock(targetX, targetY, targetZ, candidate)
                             || DoesPoseOverlapBlock(candidate, targetX, targetY, targetZ)
                             || !CanActOnBlockFromPose(candidate, targetX, targetY, targetZ))
                         {

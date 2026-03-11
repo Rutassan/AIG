@@ -1,0 +1,6 @@
+2026-03-11T19:37:12.4385043Z [diag] session-start
+2026-03-11T19:37:12.4401428Z [app] run-start world=2304x72x2304 seed=777
+2026-03-11T19:37:12.5682173Z [bot] spawn pos=1155,50,41,20,1155,50
+2026-03-11T19:37:12.5684020Z [app] player-spawn pos=1152,50,40,20,1152,50
+2026-03-11T19:37:12.5685003Z [app] bot-log-file path=/home/rutasan/AIG/botlogs/bot-20260311-193712-430.log
+2026-03-11T19:37:18.0890157Z [app] run-stop
