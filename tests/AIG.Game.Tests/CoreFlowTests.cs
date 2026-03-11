@@ -2657,9 +2657,9 @@ public sealed class CoreFlowTests
                 customTerrainBlend
             ])!;
 
-        var expectedFar = (Color)typeof(GameApp).GetMethod("ApplyFarVisualStyle", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
+        var expectedFar = (Color)typeof(GameApp).GetMethod("ApplyFarSurfaceStyle", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
             app,
-            [new Color(124, 120, 113, 255), BlockType.Stone, 8, 2, 8, true, 30f])!;
+            [new Color(124, 120, 113, 255), terrainSurface, 30f])!;
         Assert.Equal(expectedFar.R, terrainColor.R);
         Assert.Equal(expectedFar.G, terrainColor.G);
         Assert.Equal(expectedFar.B, terrainColor.B);

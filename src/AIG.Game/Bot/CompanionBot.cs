@@ -17,6 +17,11 @@ internal sealed class CompanionBot
     private const float FollowSideOffset = 2.6f;
     private const float FollowIdleDistance = 1.65f;
     private const float FollowRouteReuseDistance = 2.4f;
+    private const float FollowMidRangeDistance = 14f;
+    private const float FollowFarRangeDistance = 28f;
+    private const float FollowVeryFarRangeDistance = 56f;
+    private const float FollowRetryCooldown = 0.35f;
+    private const float FollowFarRetryCooldown = 0.55f;
     private const float PlayerKeepoutDistance = 2.35f;
     private const float PlayerViewKeepoutDistance = 5.25f;
     private const float PlayerViewKeepoutDot = 0.05f;
@@ -57,6 +62,7 @@ internal sealed class CompanionBot
     private float _stuckTime;
     private int _strafeSign = 1;
     private float _followSideSign;
+    private float _followRetryTimer;
     private Vector3 _lastPosition;
     private Vector3 _lastPlayerPosition;
     private bool _hasPlayerPosition;
@@ -131,6 +137,7 @@ internal sealed class CompanionBot
         _actionCooldown = MathF.Max(0f, _actionCooldown - safeDelta);
         _retargetCooldown = MathF.Max(0f, _retargetCooldown - safeDelta);
         _noPathTimer = MathF.Max(0f, _noPathTimer - safeDelta);
+        _followRetryTimer = MathF.Max(0f, _followRetryTimer - safeDelta);
         UpdateBlockedResourceTargetCooldowns(safeDelta);
 
         if (_activeCommand is null)
@@ -194,6 +201,13 @@ internal sealed class CompanionBot
 
     private void UpdateFollowPlayer(WorldMap world, Vector3 playerPosition, Vector3 playerLookDirection, float deltaTime)
     {
+        if (_followRetryTimer > 0f)
+        {
+            Status = BotStatus.Idle;
+            StepIdle(world, deltaTime);
+            return;
+        }
+
         if (_noPathTimer > 0f)
         {
             Status = BotStatus.NoPath;
@@ -211,14 +225,16 @@ internal sealed class CompanionBot
 
         if (IsComfortableFollowPose(Position, desired, playerPosition, playerLookDirection))
         {
+            _followRetryTimer = 0f;
             ResetNavigationRoute();
             Status = BotStatus.Idle;
             StepIdle(world, deltaTime);
             return;
         }
 
-        if (TryEnsureStandRoute(world, desired, goalRadius: 1, playerPosition, playerLookDirection))
+        if (TryEnsureStandRoute(world, desired, GetFollowGoalRadius(playerPosition), playerPosition, playerLookDirection))
         {
+            _followRetryTimer = 0f;
             Status = BotStatus.Moving;
             var moveResult = MoveAlongNavigationRoute(world, deltaTime, MoveArrivalDistance);
             if (moveResult == MoveResult.Blocked)
@@ -236,6 +252,8 @@ internal sealed class CompanionBot
         }
 
         ResetNavigationRoute();
+        _followRetryTimer = GetFollowRetryCooldown(playerPosition);
+        Trace($"follow-route-deferred retry={_followRetryTimer:0.00}s desired={FormatVector(desired)}");
         Status = BotStatus.Idle;
         StepIdle(world, deltaTime);
     }
@@ -1222,7 +1240,8 @@ internal sealed class CompanionBot
             return false;
         }
 
-        if (Vector3.DistanceSquared(currentGoalPose, desiredPose) > FollowRouteReuseDistance * FollowRouteReuseDistance)
+        var reuseDistance = GetFollowRouteReuseDistance(playerPosition);
+        if (Vector3.DistanceSquared(currentGoalPose, desiredPose) > reuseDistance * reuseDistance)
         {
             return false;
         }
@@ -1812,6 +1831,44 @@ internal sealed class CompanionBot
         return horizontal.LengthSquared() <= 0.00001f
             ? new Vector3(0f, 0f, -1f)
             : Vector3.Normalize(horizontal);
+    }
+
+    private int GetFollowGoalRadius(Vector3 playerPosition)
+    {
+        var distance = GetHorizontalDistanceToPlayer(playerPosition);
+        return distance switch
+        {
+            >= FollowVeryFarRangeDistance => 4,
+            >= FollowFarRangeDistance => 3,
+            >= FollowMidRangeDistance => 2,
+            _ => 1
+        };
+    }
+
+    private float GetFollowRouteReuseDistance(Vector3 playerPosition)
+    {
+        var distance = GetHorizontalDistanceToPlayer(playerPosition);
+        return distance switch
+        {
+            >= FollowVeryFarRangeDistance => 12f,
+            >= FollowFarRangeDistance => 8f,
+            >= FollowMidRangeDistance => 4.5f,
+            _ => FollowRouteReuseDistance
+        };
+    }
+
+    private float GetFollowRetryCooldown(Vector3 playerPosition)
+    {
+        return GetHorizontalDistanceToPlayer(playerPosition) >= FollowFarRangeDistance
+            ? FollowFarRetryCooldown
+            : FollowRetryCooldown;
+    }
+
+    private float GetHorizontalDistanceToPlayer(Vector3 playerPosition)
+    {
+        var dx = Position.X - playerPosition.X;
+        var dz = Position.Z - playerPosition.Z;
+        return MathF.Sqrt(dx * dx + dz * dz);
     }
 
     private static float NormalizeAngle(float angle)

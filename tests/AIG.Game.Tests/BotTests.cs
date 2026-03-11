@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Reflection;
+using System.Collections.Generic;
 using AIG.Game.Bot;
 using AIG.Game.Config;
 using AIG.Game.Core;
@@ -1372,6 +1373,7 @@ public sealed class BotTests
 
         Assert.Equal(BotStatus.Idle, bot.Status);
         Assert.Empty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
+        Assert.True((float)GetPrivateField(bot, "_followRetryTimer")! > 0f);
     }
 
     [Fact(DisplayName = "CompanionBot TryEnsureStandRoute переиспользует goal и сбрасывает маршрут при неудаче")]
@@ -1431,6 +1433,69 @@ public sealed class BotTests
             Vector3.UnitZ)!;
 
         Assert.False(reused);
+    }
+
+    [Fact(DisplayName = "CompanionBot на дальнем follow использует увеличенный reuse-distance для маршрута")]
+    public void CompanionBot_CanReuseFollowRoute_UsesLargerThresholdWhenFar()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        var farGoal = CreateNavigationGoal("Follow", 38, 2, 39, 3, null);
+        SetPrivateField(bot, "_navigationGoal", farGoal);
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(38.5f, 2.02f, 39.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+
+        var reused = (bool)InvokePrivate(
+            bot,
+            "CanReuseFollowRoute",
+            farGoal,
+            new Vector3(44.2f, 2.02f, 39.3f),
+            new Vector3(48.5f, 2.02f, 48.5f),
+            Vector3.UnitZ)!;
+
+        Assert.True(reused);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper-ы дальнего follow выбирают крупный radius и reuse-distance по диапазонам")]
+    public void CompanionBot_FollowDistanceHelpers_CoverFarRanges()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+
+        Assert.Equal(4, (int)InvokePrivate(bot, "GetFollowGoalRadius", new Vector3(80.5f, 2.02f, 8.5f))!);
+        Assert.Equal(8f, (float)InvokePrivate(bot, "GetFollowRouteReuseDistance", new Vector3(48.5f, 2.02f, 8.5f))!);
+    }
+
+    [Fact(DisplayName = "CompanionBot после failed follow-route не пытается заново строить путь каждый кадр")]
+    public void CompanionBot_UpdateFollowPlayer_UsesRetryCooldownAfterFollowRouteFailure()
+    {
+        var world = CreateFlatWorld(24, 12);
+        for (var x = 9; x <= 11; x++)
+        {
+            for (var z = 9; z <= 11; z++)
+            {
+                if (x == 10 && z == 10)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 2, z, BlockType.Wood);
+                world.SetBlock(x, 3, z, BlockType.Wood);
+            }
+        }
+
+        var diagnostics = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), new Vector3(10.5f, 2.02f, 10.5f), diagnostics.Add);
+        var playerPosition = new Vector3(40.5f, 2.02f, 40.5f);
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, playerPosition, Vector3.UnitZ, 1f / 30f);
+        var failureCountAfterFirstUpdate = diagnostics.Count(line => line.Contains("follow-route-failed", StringComparison.Ordinal));
+
+        InvokePrivate(bot, "UpdateFollowPlayer", world, playerPosition, Vector3.UnitZ, 1f / 30f);
+        var failureCountAfterSecondUpdate = diagnostics.Count(line => line.Contains("follow-route-failed", StringComparison.Ordinal));
+
+        Assert.Equal(1, failureCountAfterFirstUpdate);
+        Assert.Equal(failureCountAfterFirstUpdate, failureCountAfterSecondUpdate);
+        Assert.True((float)GetPrivateField(bot, "_followRetryTimer")! > 0f);
+        Assert.Equal(BotStatus.Idle, bot.Status);
     }
 
     [Fact(DisplayName = "CompanionBot использует локальную рабочую позу и покрывает NavigationGoal")]

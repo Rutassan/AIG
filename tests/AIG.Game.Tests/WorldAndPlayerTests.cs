@@ -525,6 +525,74 @@ public sealed class WorldAndPlayerTests
         Assert.True(leavesCount > 0, "Ожидали хотя бы одну листву.");
     }
 
+    [Fact(DisplayName = "PlaceTreeIntoChunk покрывает все варианты кроны")]
+    public void World_PlaceTreeIntoChunk_CoversAllTreeVariants()
+    {
+        var world = new WorldMap(width: 64, height: 32, depth: 64, chunkSize: 16, seed: 777);
+        var variantMethod = typeof(WorldMap).GetMethod("GetTreeVariant", BindingFlags.Instance | BindingFlags.NonPublic);
+        var placeMethod = typeof(WorldMap).GetMethod("PlaceTreeIntoChunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(variantMethod);
+        Assert.NotNull(placeMethod);
+
+        var foundRoots = new Dictionary<int, (int X, int Z)>();
+        for (var x = 3; x <= 12 && foundRoots.Count < 3; x++)
+        {
+            for (var z = 3; z <= 12 && foundRoots.Count < 3; z++)
+            {
+                var variant = (int)variantMethod!.Invoke(world, [x, z])!;
+                foundRoots.TryAdd(variant, (x, z));
+            }
+        }
+
+        Assert.Equal(3, foundRoots.Count);
+
+        foreach (var root in foundRoots.Values)
+        {
+            var chunk = new Chunk(size: 16, height: 32);
+            placeMethod!.Invoke(world, [chunk, 0, 0, root.X, 4, root.Z]);
+
+            var hasWood = false;
+            var hasLeaves = false;
+            for (var y = 0; y < chunk.Height && !(hasWood && hasLeaves); y++)
+            {
+                for (var x = 0; x < chunk.Size && !(hasWood && hasLeaves); x++)
+                {
+                    for (var z = 0; z < chunk.Size && !(hasWood && hasLeaves); z++)
+                    {
+                        var block = chunk.Get(x, y, z);
+                        hasWood |= block == BlockType.Wood;
+                        hasLeaves |= block == BlockType.Leaves;
+                    }
+                }
+            }
+
+            Assert.True(hasWood);
+            Assert.True(hasLeaves);
+        }
+    }
+
+    [Fact(DisplayName = "Кэш поверхностей считает ambient occlusion и relief exposure для рельефа")]
+    public void World_SurfaceCache_ComputesAmbientOcclusionAndReliefExposure()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        world.SetBlock(4, 3, 4, BlockType.Stone);
+        world.SetBlock(5, 3, 4, BlockType.Stone);
+        world.SetBlock(3, 3, 4, BlockType.Stone);
+        world.SetBlock(4, 3, 5, BlockType.Stone);
+        world.SetBlock(4, 3, 3, BlockType.Stone);
+
+        var aoMethod = typeof(WorldMap).GetMethod("CountAmbientOcclusionNoLoad", BindingFlags.Instance | BindingFlags.NonPublic);
+        var reliefMethod = typeof(WorldMap).GetMethod("CountReliefExposureNoLoad", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(aoMethod);
+        Assert.NotNull(reliefMethod);
+
+        var ambientOcclusion = (int)aoMethod!.Invoke(world, [4, 3, 4, true])!;
+        var reliefExposure = (int)reliefMethod!.Invoke(world, [4, 3, 4, true])!;
+
+        Assert.True(ambientOcclusion >= 4);
+        Assert.Equal(4, reliefExposure);
+    }
+
     [Fact(DisplayName = "Кэш поверхностей чанка не скрывает старую картинку до пересборки и обновляется после изменения блока")]
     public void World_SurfaceCache_RebuildsInBudgetAndRefreshesAfterSetBlock()
     {

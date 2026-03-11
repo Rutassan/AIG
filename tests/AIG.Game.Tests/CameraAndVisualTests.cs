@@ -130,7 +130,7 @@ public sealed class CameraAndVisualTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(12, platform.DrawCubeCalls);
+        Assert.Equal(13, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "GameApp DrawPlayerAvatar покрывает ветки прыжка и падения")]
@@ -155,7 +155,7 @@ public sealed class CameraAndVisualTests
         SetAutoPropertyBackingField(visual, "VerticalSpeed", -1.2f);
         drawMethod!.Invoke(app, null);
 
-        Assert.Equal(24, platform.DrawCubeCalls);
+        Assert.Equal(26, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "GameApp DrawFirstPersonHand рисует руку и блок в режиме 1-го лица")]
@@ -318,19 +318,19 @@ public sealed class CameraAndVisualTests
         Assert.NotNull(method);
 
         var grass = (Color)method!.Invoke(null, [BlockType.Grass])!;
-        Assert.Equal((byte)105, grass.R);
-        Assert.Equal((byte)162, grass.G);
-        Assert.Equal((byte)82, grass.B);
+        Assert.Equal((byte)112, grass.R);
+        Assert.Equal((byte)166, grass.G);
+        Assert.Equal((byte)84, grass.B);
 
         var wood = (Color)method!.Invoke(null, [BlockType.Wood])!;
-        Assert.Equal((byte)132, wood.R);
-        Assert.Equal((byte)96, wood.G);
+        Assert.Equal((byte)136, wood.R);
+        Assert.Equal((byte)98, wood.G);
         Assert.Equal((byte)58, wood.B);
 
         var leaves = (Color)method!.Invoke(null, [BlockType.Leaves])!;
-        Assert.Equal((byte)86, leaves.R);
-        Assert.Equal((byte)138, leaves.G);
-        Assert.Equal((byte)70, leaves.B);
+        Assert.Equal((byte)88, leaves.R);
+        Assert.Equal((byte)142, leaves.G);
+        Assert.Equal((byte)72, leaves.B);
     }
 
     [Fact(DisplayName = "ApplyLeafStyle без тумана не зависит от дистанции")]
@@ -377,6 +377,196 @@ public sealed class CameraAndVisualTests
         Assert.NotEqual((byte)255, color.R);
         Assert.NotEqual((byte)255, color.G);
         Assert.NotEqual((byte)255, color.B);
+    }
+
+    [Fact(DisplayName = "Legacy-обёртки visual-style проксируют в surface-style реализацию")]
+    public void VisualStyleWrappers_ProxyToSurfaceStyleImplementations()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var visualWrapper = typeof(GameApp).GetMethod(
+            "ApplyVisualStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(BlockType), typeof(int), typeof(int), typeof(int), typeof(bool), typeof(int), typeof(int), typeof(float)],
+            modifiers: null);
+        var visualSurface = typeof(GameApp).GetMethod(
+            "ApplyVisualSurfaceStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(WorldMap.SurfaceBlock), typeof(float)],
+            modifiers: null);
+        var midWrapper = typeof(GameApp).GetMethod(
+            "ApplyMidVisualStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(BlockType), typeof(int), typeof(int), typeof(int), typeof(bool), typeof(int), typeof(int), typeof(float)],
+            modifiers: null);
+        var midSurface = typeof(GameApp).GetMethod(
+            "ApplyMidSurfaceStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(WorldMap.SurfaceBlock), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(visualWrapper);
+        Assert.NotNull(visualSurface);
+        Assert.NotNull(midWrapper);
+        Assert.NotNull(midSurface);
+
+        var surface = new WorldMap.SurfaceBlock(4, 2, 5, BlockType.Stone, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+        var baseColor = new Color(124, 121, 112, 255);
+
+        var wrappedVisual = (Color)visualWrapper!.Invoke(app, [baseColor, BlockType.Stone, 4, 2, 5, true, 4, 3, 8f])!;
+        var directVisual = (Color)visualSurface!.Invoke(app, [baseColor, surface, 8f])!;
+        Assert.Equal(directVisual.R, wrappedVisual.R);
+        Assert.Equal(directVisual.G, wrappedVisual.G);
+        Assert.Equal(directVisual.B, wrappedVisual.B);
+
+        var wrappedMid = (Color)midWrapper!.Invoke(app, [baseColor, BlockType.Stone, 4, 2, 5, true, 4, 3, 18f])!;
+        var directMid = (Color)midSurface!.Invoke(app, [baseColor, surface, 18f])!;
+        Assert.Equal(directMid.R, wrappedMid.R);
+        Assert.Equal(directMid.G, wrappedMid.G);
+        Assert.Equal(directMid.B, wrappedMid.B);
+    }
+
+    [Fact(DisplayName = "Legacy-обёртка far-style покрывает ветку side-face")]
+    public void ApplyFarVisualStyle_Wrapper_CoversSideFaceBranch()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var farWrapper = typeof(GameApp).GetMethod(
+            "ApplyFarVisualStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(BlockType), typeof(int), typeof(int), typeof(int), typeof(bool), typeof(float)],
+            modifiers: null);
+        var farSurface = typeof(GameApp).GetMethod(
+            "ApplyFarSurfaceStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(WorldMap.SurfaceBlock), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(farWrapper);
+        Assert.NotNull(farSurface);
+
+        var surface = new WorldMap.SurfaceBlock(6, 2, 6, BlockType.Wood, VisibleFaces: 3, TopVisible: false, SkyExposure: 1);
+        var baseColor = new Color(128, 94, 58, 255);
+
+        var wrapped = (Color)farWrapper!.Invoke(app, [baseColor, BlockType.Wood, 6, 2, 6, false, 20f])!;
+        var direct = (Color)farSurface!.Invoke(app, [baseColor, surface, 20f])!;
+
+        Assert.Equal(direct.R, wrapped.R);
+        Assert.Equal(direct.G, wrapped.G);
+        Assert.Equal(direct.B, wrapped.B);
+    }
+
+    [Fact(DisplayName = "Legacy-обёртка leaf-style покрывает ветку с включённым туманом")]
+    public void ApplyLeafStyle_Wrapper_CoversFogEnabledBranch()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = true,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod(
+            "ApplyLeafStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(int), typeof(float), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(method);
+
+        var color = (Color)method!.Invoke(app, [new Color(84, 132, 68, 255), 3, 0.6f, 40f])!;
+        Assert.InRange(color.R, 0, 255);
+        Assert.InRange(color.G, 0, 255);
+        Assert.InRange(color.B, 0, 255);
+    }
+
+    [Fact(DisplayName = "ApplyNearSurfaceAccent покрывает все ветки материалов")]
+    public void ApplyNearSurfaceAccent_CoversMaterialBranches()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod(
+            "ApplyNearSurfaceAccent",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(WorldMap.SurfaceBlock), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(method);
+
+        static WorldMap.SurfaceBlock FindSurface(BlockType block, Predicate<int> predicate)
+        {
+            for (var x = 0; x < 10; x++)
+            {
+                for (var y = 0; y < 4; y++)
+                {
+                    for (var z = 0; z < 10; z++)
+                    {
+                        var detailNoise = Math.Abs((x * 1597334677) ^ (z * 1402024253) ^ (y * 9586891));
+                        var detail = detailNoise % 7;
+                        if (predicate(detail))
+                        {
+                            return new WorldMap.SurfaceBlock(x, y, z, block, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+                        }
+                    }
+                }
+            }
+
+            throw new InvalidOperationException("Не нашли подходящую координату для ветки detail.");
+        }
+
+        var baseColor = new Color(120, 120, 120, 255);
+        var farSurface = new WorldMap.SurfaceBlock(0, 0, 0, BlockType.Grass, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
+        var untouchedFar = (Color)method!.Invoke(app, [baseColor, farSurface, 20f])!;
+        Assert.Equal(baseColor.R, untouchedFar.R);
+
+        var grassA = FindSurface(BlockType.Grass, detail => detail <= 1);
+        var grassB = FindSurface(BlockType.Grass, detail => detail == 2);
+        var dirt = FindSurface(BlockType.Dirt, detail => detail <= 1);
+        var stoneA = FindSurface(BlockType.Stone, detail => detail <= 1);
+        var stoneB = FindSurface(BlockType.Stone, detail => detail == 2);
+        var wood = FindSurface(BlockType.Wood, detail => detail >= 3);
+
+        Assert.NotEqual(baseColor.G, ((Color)method.Invoke(app, [baseColor, grassA, 6f])!).G);
+        Assert.NotEqual(baseColor.R, ((Color)method.Invoke(app, [baseColor, grassB, 6f])!).R);
+        Assert.NotEqual(baseColor.R, ((Color)method.Invoke(app, [baseColor, dirt, 6f])!).R);
+        Assert.NotEqual(baseColor.R, ((Color)method.Invoke(app, [baseColor, stoneA, 6f])!).R);
+        Assert.NotEqual(baseColor.R, ((Color)method.Invoke(app, [baseColor, stoneB, 6f])!).R);
+
+        var unchangedWood = (Color)method.Invoke(app, [baseColor, wood, 6f])!;
+        Assert.Equal(baseColor.R, unchangedWood.R);
+        Assert.Equal(baseColor.G, unchangedWood.G);
+        Assert.Equal(baseColor.B, unchangedWood.B);
     }
 
     [Fact(DisplayName = "DrawSkyGradient завершает работу при невалидном размере экрана")]
