@@ -8,6 +8,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
 {
     internal sealed record CubeCall(Vector3 Position, float Width, float Height, float Length, Color Color);
     internal sealed record CubeWireCall(Vector3 Position, float Width, float Height, float Length, Color Color);
+    internal sealed record RectangleCall(int X, int Y, int Width, int Height, Color Color);
 
     private sealed record FrameInput(
         Vector2 MousePosition,
@@ -25,6 +26,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly List<string> _uiTexts = [];
     private readonly List<CubeCall> _cubeCalls = [];
     private readonly List<CubeWireCall> _cubeWireCalls = [];
+    private readonly List<RectangleCall> _rectangleCalls = [];
     private readonly List<string> _screenshots = [];
 
     public int DrawCubeCalls { get; private set; }
@@ -58,6 +60,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public IReadOnlyList<string> DrawnUiTexts => _uiTexts;
     public IReadOnlyList<CubeCall> DrawnCubes => _cubeCalls;
     public IReadOnlyList<CubeWireCall> DrawnCubeWires => _cubeWireCalls;
+    public IReadOnlyList<RectangleCall> DrawnRectangles => _rectangleCalls;
     public IReadOnlyList<string> SavedScreenshots => _screenshots;
 
     public void EnqueueWindowShouldClose(params bool[] values)
@@ -268,6 +271,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void DrawRectangle(int posX, int posY, int width, int height, Color color)
     {
         DrawRectangleCalls++;
+        _rectangleCalls.Add(new RectangleCall(posX, posY, width, height, color));
     }
 
     public int GetFps() => Fps;

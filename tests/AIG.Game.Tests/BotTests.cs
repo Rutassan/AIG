@@ -1873,6 +1873,7 @@ public sealed class BotTests
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Количество: 16", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Камень", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Введите количество.", StringComparison.Ordinal));
+        Assert.True(platform.DrawRectangleCalls > 0);
     }
 
     [Fact(DisplayName = "GameApp hotkey устройства открывает и закрывает модуль без перехода в паузу")]
@@ -1923,6 +1924,7 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
         Assert.Equal("GatherResource", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
 
         device.GetType().GetField("<AmountText>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(device, "0");
@@ -1943,12 +1945,14 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
         Assert.Equal("Main", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
         Assert.Equal("BuildHouse", device.GetType().GetProperty("Screen")!.GetValue(device)!.ToString());
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
@@ -1961,6 +1965,7 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceCancelButtonRect"));
         platform.LeftMousePressed = true;
@@ -1991,6 +1996,7 @@ public sealed class BotTests
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -1999,10 +2005,12 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -2011,10 +2019,12 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -2026,6 +2036,7 @@ public sealed class BotTests
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -2034,10 +2045,12 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceGatherButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -2046,10 +2059,12 @@ public sealed class BotTests
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
         platform.LeftMousePressed = true;
         InvokePrivate(app, "HandleBotDeviceInput");
+        AdvanceBotDeviceAction(app);
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceConfirmButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
@@ -2216,9 +2231,39 @@ public sealed class BotTests
         platform.MousePosition = Center(GetRect(app, "GetBotDeviceCloseButtonRect"));
         InvokePrivate(app, "HandleBotDeviceInput");
         platform.LeftMousePressed = false;
+        AdvanceBotDeviceAction(app);
 
         Assert.False(device.IsOpen);
         Assert.True(platform.DisableCursorCalled);
+    }
+
+    [Fact(DisplayName = "GameApp не обрабатывает новый ввод браслета, пока висит pending tap-переход")]
+    public void GameApp_HandleBotDeviceInput_IgnoresInputWhileActionPending()
+    {
+        var (app, platform, _, _, _, device, _) = CreatePlayingBotDeviceApp();
+
+        device.OpenMain();
+        InvokePrivate(app, "QueueBotDeviceAction", ParseNestedEnum(typeof(GameApp), "BotDeviceAction", "OpenGatherResource"), BotWristDeviceTarget.Gather);
+
+        platform.MousePosition = Center(GetRect(app, "GetBotDeviceBuildButtonRect"));
+        platform.LeftMousePressed = true;
+        InvokePrivate(app, "HandleBotDeviceInput");
+        platform.LeftMousePressed = false;
+
+        Assert.Equal("Main", device.Screen.ToString());
+        AdvanceBotDeviceAction(app);
+        Assert.Equal("GatherResource", device.Screen.ToString());
+    }
+
+    [Fact(DisplayName = "GameApp QueueBotDeviceAction игнорирует None")]
+    public void GameApp_QueueBotDeviceAction_IgnoresNone()
+    {
+        var (app, _, _, _, _, _, visual) = CreatePlayingBotDeviceApp();
+
+        InvokePrivate(app, "QueueBotDeviceAction", ParseNestedEnum(typeof(GameApp), "BotDeviceAction", "None"), BotWristDeviceTarget.None);
+
+        Assert.Equal(0f, visual.TapBlend);
+        Assert.Equal(BotWristDeviceTarget.None, visual.TapTarget);
     }
 
     [Fact(DisplayName = "GameApp покрывает ReadBotDeviceAction, DrawFrame и DrawBotDeviceOverlay для main/build/early-return")]
@@ -2241,18 +2286,43 @@ public sealed class BotTests
         platform.LeftMousePressed = false;
         Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
 
+        var overlayRectanglesBefore = platform.DrawRectangleCalls;
+        var overlayLinesBefore = platform.DrawLineCalls;
+        InvokePrivate(app, "DrawBotDeviceOverlay");
+        Assert.True(platform.DrawRectangleCalls > overlayRectanglesBefore);
+        Assert.True(platform.DrawLineCalls > overlayLinesBefore);
+
+        var frameRectanglesBefore = platform.DrawRectangleCalls;
         var view = CameraViewBuilder.Build(player, world, AIG.Game.Core.CameraMode.FirstPerson, 0f);
         InvokePrivate(app, "DrawFrame", null, view);
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Убрать устройство", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("B / ESC: убрать модуль", StringComparison.Ordinal));
+        Assert.True(platform.DrawRectangleCalls >= frameRectanglesBefore);
 
         device.OpenBuildHouse();
         Assert.Equal("None", InvokePrivate(app, "ReadBotDeviceAction")!.ToString());
+        var buildRectanglesBefore = platform.DrawRectangleCalls;
         InvokePrivate(app, "DrawBotDeviceOverlay");
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Строительство", StringComparison.Ordinal));
         Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Шаблон: Дом S", StringComparison.Ordinal));
+        Assert.True(platform.DrawRectangleCalls > buildRectanglesBefore);
 
         _ = GetRect(app, "GetBotDeviceCloseButtonRect");
+    }
+
+    [Fact(DisplayName = "GameApp рисует screen-space руку нажатия поверх панели браслета")]
+    public void GameApp_DrawBotDeviceOverlay_DrawsTapHandOverlay()
+    {
+        var (app, platform, _, _, _, device, visual) = CreatePlayingBotDeviceApp();
+
+        device.OpenGatherResource();
+        visual.TriggerTap(BotWristDeviceTarget.Wood);
+        var rectanglesBefore = platform.DrawRectangleCalls;
+
+        InvokePrivate(app, "DrawBotDeviceOverlay");
+
+        Assert.True(platform.DrawRectangleCalls >= rectanglesBefore + 12);
+        Assert.Contains(platform.DrawnUiTexts, text => text.Contains("Дерево", StringComparison.Ordinal));
     }
 
     [Fact(DisplayName = "GameApp по F3 переключает компактный и расширенный HUD")]
@@ -2454,6 +2524,11 @@ public sealed class BotTests
     private static Vector2 Center((int X, int Y, int W, int H) rect)
     {
         return new Vector2(rect.X + rect.W / 2f, rect.Y + rect.H / 2f);
+    }
+
+    private static void AdvanceBotDeviceAction(GameApp app, float deltaTime = 0.2f)
+    {
+        InvokePrivate(app, "AdvancePendingBotDeviceAction", deltaTime);
     }
 
     private static void SetDeviceAmount(BotWristDeviceState device, string amount)

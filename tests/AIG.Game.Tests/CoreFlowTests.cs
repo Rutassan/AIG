@@ -67,6 +67,37 @@ public sealed class CoreFlowTests
         Assert.Equal("/tmp/aig-autocap-test", capturedOutputDir);
     }
 
+    [Fact(DisplayName = "Program.Main в режиме autocap-device использует AutoDeviceCaptureFactory")]
+    public void Program_Main_AutocapDevice_UsesAutoDeviceCaptureFactory()
+    {
+        var autocapCalled = false;
+        var gameCalled = false;
+        string? capturedOutputDir = null;
+
+        var previousAutoFactory = Program.AutoDeviceCaptureFactory;
+        var previousGameFactory = Program.GameFactory;
+
+        Program.AutoDeviceCaptureFactory = outputDir => new DelegatingRunner(() =>
+        {
+            autocapCalled = true;
+            capturedOutputDir = outputDir;
+        });
+        Program.GameFactory = () => new DelegatingRunner(() => gameCalled = true);
+        try
+        {
+            Program.Main(["autocap-device", "/tmp/aig-autodevice-test"]);
+        }
+        finally
+        {
+            Program.AutoDeviceCaptureFactory = previousAutoFactory;
+            Program.GameFactory = previousGameFactory;
+        }
+
+        Assert.True(autocapCalled);
+        Assert.False(gameCalled);
+        Assert.Equal("/tmp/aig-autodevice-test", capturedOutputDir);
+    }
+
     [Fact(DisplayName = "Program.Main в режиме autoperf использует AutoPerfFactory")]
     public void Program_Main_Autoperf_UsesAutoPerfFactory()
     {
@@ -171,6 +202,50 @@ public sealed class CoreFlowTests
         }
     }
 
+    [Fact(DisplayName = "TryRunAutoDeviceCapture возвращает false для обычного запуска")]
+    public void Program_TryRunAutoDeviceCapture_ReturnsFalse_ForRegularArgs()
+    {
+        var previousAutoFactory = Program.AutoDeviceCaptureFactory;
+        var autoCalled = false;
+        Program.AutoDeviceCaptureFactory = _ =>
+        {
+            autoCalled = true;
+            return new DelegatingRunner(() => { });
+        };
+
+        try
+        {
+            var result = Program.TryRunAutoDeviceCapture([]);
+            Assert.False(result);
+            Assert.False(autoCalled);
+        }
+        finally
+        {
+            Program.AutoDeviceCaptureFactory = previousAutoFactory;
+        }
+    }
+
+    [Fact(DisplayName = "TryRunAutoDeviceCapture использует директорию по умолчанию")]
+    public void Program_TryRunAutoDeviceCapture_UsesDefaultOutputDir()
+    {
+        var previousAutoFactory = Program.AutoDeviceCaptureFactory;
+        string? outputDir = null;
+        Program.AutoDeviceCaptureFactory = dir => new DelegatingRunner(() => outputDir = dir);
+
+        try
+        {
+            var result = Program.TryRunAutoDeviceCapture(["autocap-device"]);
+            Assert.True(result);
+        }
+        finally
+        {
+            Program.AutoDeviceCaptureFactory = previousAutoFactory;
+        }
+
+        Assert.NotNull(outputDir);
+        Assert.EndsWith("autocap-device", outputDir, StringComparison.Ordinal);
+    }
+
     [Fact(DisplayName = "TryRunAutoPerf использует директорию и параметры по умолчанию")]
     public void Program_TryRunAutoPerf_UsesDefaultParams()
     {
@@ -257,6 +332,39 @@ public sealed class CoreFlowTests
         }
 
         Assert.Equal(3, platform.SavedScreenshots.Count);
+        Assert.All(platform.SavedScreenshots, screenshot => Assert.StartsWith(outputDir, screenshot, StringComparison.Ordinal));
+    }
+
+    [Fact(DisplayName = "TryRunAutoDeviceCapture c default runner делает кадры браслета через платформу")]
+    public void Program_TryRunAutoDeviceCapture_DefaultRunner_CapturesScreenshots()
+    {
+        var previousPlatformFactory = Program.PlatformFactory;
+        var previousConfigFactory = Program.AutoCaptureConfigFactory;
+        var previousWorldFactory = Program.WorldFactory;
+
+        var platform = new FakeGamePlatform();
+        Program.PlatformFactory = () => platform;
+        Program.AutoCaptureConfigFactory = () => new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        Program.WorldFactory = config => new WorldMap(width: 96, height: 32, depth: 96, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autodevice-{Guid.NewGuid():N}");
+        try
+        {
+            var result = Program.TryRunAutoDeviceCapture(["autocap-device", outputDir]);
+            Assert.True(result);
+        }
+        finally
+        {
+            Program.PlatformFactory = previousPlatformFactory;
+            Program.AutoCaptureConfigFactory = previousConfigFactory;
+            Program.WorldFactory = previousWorldFactory;
+        }
+
+        Assert.Equal(7, platform.SavedScreenshots.Count);
         Assert.All(platform.SavedScreenshots, screenshot => Assert.StartsWith(outputDir, screenshot, StringComparison.Ordinal));
     }
 
@@ -558,6 +666,82 @@ public sealed class CoreFlowTests
         Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autocap-2.png", StringComparison.Ordinal));
         Assert.True(platform.CloseWindowCalled);
         Assert.True(platform.DisableCursorCalled);
+    }
+
+    [Fact(DisplayName = "RunAutoDeviceCapture сохраняет кадры браслета и закрывает окно")]
+    public void RunAutoDeviceCapture_SavesDeviceScreenshots()
+    {
+        var outputDir = Path.Combine(Path.GetTempPath(), $"aig-autodevice-{Guid.NewGuid():N}");
+        var platform = new FakeGamePlatform();
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        var app = new GameApp(config, platform, world);
+
+        app.RunAutoDeviceCapture(outputDir);
+
+        Assert.Equal(7, platform.SavedScreenshots.Count);
+        Assert.All(platform.SavedScreenshots, screenshot => Assert.StartsWith(outputDir, screenshot, StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-main.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-main-tap-gather-1.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-main-tap-gather-2.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-main-tap-gather-3.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-gather.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-gather-tap-wood-1.png", StringComparison.Ordinal));
+        Assert.Contains(platform.SavedScreenshots, s => s.EndsWith("autodevice-gather-tap-wood-2.png", StringComparison.Ordinal));
+        Assert.True(platform.CloseWindowCalled);
+        Assert.True(platform.DisableCursorCalled);
+    }
+
+    [Fact(DisplayName = "DrawAutoDeviceFrame покрывает ветку закрытого браслета")]
+    public void DrawAutoDeviceFrame_CoversClosedDeviceBranch()
+    {
+        var platform = new FakeGamePlatform();
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(32.5f, 6.2f, 32.5f));
+
+        typeof(GameApp).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(app, player);
+        typeof(GameApp).GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(app, Enum.Parse(typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic)!, "Playing"));
+
+        var method = typeof(GameApp).GetMethod("DrawAutoDeviceFrame", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, [1f / 60f]);
+
+        Assert.True(platform.BeginDrawingCalls > 0);
+        Assert.True(platform.EndDrawingCalls > 0);
+    }
+
+    [Fact(DisplayName = "DrawAutoDeviceFrame покрывает short-circuit ветку вне игрового состояния")]
+    public void DrawAutoDeviceFrame_CoversNonPlayingBranch()
+    {
+        var platform = new FakeGamePlatform();
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(32.5f, 6.2f, 32.5f));
+
+        typeof(GameApp).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(app, player);
+        typeof(GameApp).GetField("_state", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(app, Enum.Parse(typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic)!, "MainMenu"));
+
+        var method = typeof(GameApp).GetMethod("DrawAutoDeviceFrame", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, [1f / 60f]);
+
+        Assert.True(platform.BeginDrawingCalls > 0);
+        Assert.True(platform.EndDrawingCalls > 0);
     }
 
     [Fact(DisplayName = "RunAutoPerf пишет FAIL лог, если FPS ниже порога")]

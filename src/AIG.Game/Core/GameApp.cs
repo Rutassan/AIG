@@ -16,9 +16,12 @@ public class GameApp : IGameRunner
     private const int MenuButtonHeight = 56;
     private const int MenuButtonsGap = 14;
     private const int BotDevicePanelWidth = 372;
-    private const int BotDevicePanelHeight = 398;
+    private const int BotDevicePanelHeight = 480;
     private const int BotDeviceButtonHeight = 42;
     private const int BotDeviceButtonsGap = 10;
+    private const float BotDeviceTapArmThreshold = 0.08f;
+    private const float BotDeviceActionDelay = 0.10f;
+    private const int BotDeviceTapPalmSize = 28;
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
     private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
     private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
@@ -73,6 +76,8 @@ public class GameApp : IGameRunner
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
     private string? _pendingScreenshotPath;
+    private BotDeviceAction _pendingBotDeviceAction;
+    private float _pendingBotDeviceActionDelay;
 
     public GameApp()
         : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
@@ -174,6 +179,7 @@ public class GameApp : IGameRunner
 
                     if (_botDevice.IsOpen)
                     {
+                        AdvancePendingBotDeviceAction(delta);
                         HandleBotDeviceInput();
                     }
                     else
@@ -304,6 +310,61 @@ public class GameApp : IGameRunner
             DrawFrame(null, view);
 
             _platform.TakeScreenshot(Path.Combine(outputDirectory, shot.FileName));
+        }
+
+        ShutdownPlatform();
+    }
+
+    internal void RunAutoDeviceCapture(string outputDirectory)
+    {
+        Directory.CreateDirectory(outputDirectory);
+        _runtimeSeconds = 0f;
+
+        InitializePlatform(enableFullscreen: false);
+        _sceneMetricsEnabled = false;
+        _state = AppState.Playing;
+        _cameraMode = CameraMode.FirstPerson;
+        _platform.DisableCursor();
+
+        var shot = GetAutoCaptureShots()[0];
+        _ = PrepareAutoCaptureShot(shot);
+        if (_world.Seed != 0)
+        {
+            ClearSpawnCanopy(_player.Position, horizontalRadius: 24, verticalSpan: 24);
+            var deviceLook = BuildGroundLookDirection(_player.Position, new Vector3(-1f, -0.12f, 0.28f));
+            _player.SetPose(_player.Position, deviceLook);
+            UpdateWorldStreaming(force: true);
+        }
+        _companion = new CompanionBot(_config, CreateCompanionSpawnPosition(_player.Position));
+        _companionVisual.Reset(_companion.Position);
+        OpenBotDevice();
+
+        for (var i = 0; i < 12; i++)
+        {
+            DrawAutoDeviceFrame(1f / 60f);
+        }
+        _platform.TakeScreenshot(Path.Combine(outputDirectory, "autodevice-main.png"));
+
+        QueueBotDeviceAction(BotDeviceAction.OpenGatherResource, BotWristDeviceTarget.Gather);
+        for (var i = 0; i < 3; i++)
+        {
+            DrawAutoDeviceFrame(1f / 60f);
+            DrawAutoDeviceFrame(1f / 60f);
+            _platform.TakeScreenshot(Path.Combine(outputDirectory, $"autodevice-main-tap-gather-{i + 1}.png"));
+        }
+
+        for (var i = 0; i < 20; i++)
+        {
+            DrawAutoDeviceFrame(1f / 60f);
+        }
+        _platform.TakeScreenshot(Path.Combine(outputDirectory, "autodevice-gather.png"));
+
+        SelectDeviceResource(BotResourceType.Wood);
+        for (var i = 0; i < 2; i++)
+        {
+            DrawAutoDeviceFrame(1f / 60f);
+            DrawAutoDeviceFrame(1f / 60f);
+            _platform.TakeScreenshot(Path.Combine(outputDirectory, $"autodevice-gather-tap-wood-{i + 1}.png"));
         }
 
         ShutdownPlatform();
@@ -491,6 +552,15 @@ public class GameApp : IGameRunner
         _sceneMetricsEnabled = false;
     }
 
+    private void DrawAutoDeviceFrame(float deltaTime)
+    {
+        AdvanceRuntime(deltaTime);
+        _botDeviceVisual.Update(_state == AppState.Playing && _botDevice.IsOpen, deltaTime);
+        AdvancePendingBotDeviceAction(deltaTime);
+        var view = CameraViewBuilder.Build(_player, _world, CameraMode.FirstPerson, 0f);
+        DrawFrame(null, view);
+    }
+
     internal static PlayerInput ReadInput(IGamePlatform platform)
     {
         float forward = 0f;
@@ -635,6 +705,7 @@ public class GameApp : IGameRunner
             return;
         }
 
+        CancelPendingBotDeviceAction();
         _botDevice.OpenMain();
         _platform.EnableCursor();
     }
@@ -646,6 +717,7 @@ public class GameApp : IGameRunner
             return;
         }
 
+        CancelPendingBotDeviceAction();
         _botDevice.Close();
         if (_state == AppState.Playing)
         {
@@ -660,18 +732,23 @@ public class GameApp : IGameRunner
             return;
         }
 
+        if (_pendingBotDeviceAction != BotDeviceAction.None)
+        {
+            return;
+        }
+
         HandleBotDeviceDigitInput();
 
         if (_botDevice.Screen == BotWristDeviceScreen.GatherResource && _platform.IsKeyPressed(KeyboardKey.Enter))
         {
-            TriggerBotDeviceTap();
+            TriggerBotDeviceTap(BotWristDeviceTarget.Confirm);
             QueueGatherFromDevice();
             return;
         }
 
         if (_botDevice.Screen == BotWristDeviceScreen.BuildHouse && _platform.IsKeyPressed(KeyboardKey.Enter))
         {
-            TriggerBotDeviceTap();
+            TriggerBotDeviceTap(BotWristDeviceTarget.Confirm);
             QueueBuildFromDevice();
             return;
         }
@@ -679,36 +756,29 @@ public class GameApp : IGameRunner
         switch (ReadBotDeviceAction())
         {
             case BotDeviceAction.OpenGatherResource:
-                _botDevice.OpenGatherResource();
-                _botDevice.SetMessage("Выберите ресурс и введите количество.");
-                TriggerBotDeviceTap();
+                QueueBotDeviceAction(BotDeviceAction.OpenGatherResource, BotWristDeviceTarget.Gather);
                 break;
             case BotDeviceAction.OpenBuildHouse:
-                _botDevice.OpenBuildHouse();
-                _botDevice.SetMessage("Подтвердите строительство Дом S.");
-                TriggerBotDeviceTap();
+                QueueBotDeviceAction(BotDeviceAction.OpenBuildHouse, BotWristDeviceTarget.BuildHouse);
                 break;
             case BotDeviceAction.BackToMain:
-                _botDevice.BackToMain();
-                _botDevice.SetMessage(string.Empty);
-                TriggerBotDeviceTap();
+                QueueBotDeviceAction(BotDeviceAction.BackToMain, BotWristDeviceTarget.Back);
                 break;
             case BotDeviceAction.QueueGather:
-                TriggerBotDeviceTap();
+                TriggerBotDeviceTap(BotWristDeviceTarget.Confirm);
                 QueueGatherFromDevice();
                 break;
             case BotDeviceAction.QueueBuildHouse:
-                TriggerBotDeviceTap();
+                TriggerBotDeviceTap(BotWristDeviceTarget.Confirm);
                 QueueBuildFromDevice();
                 break;
             case BotDeviceAction.CancelCommands:
-                TriggerBotDeviceTap();
+                TriggerBotDeviceTap(BotWristDeviceTarget.Cancel);
                 _companion.CancelAll();
                 _botDevice.SetMessage("Команды бота сброшены.");
                 break;
             case BotDeviceAction.CloseDevice:
-                TriggerBotDeviceTap();
-                CloseBotDevice();
+                QueueBotDeviceAction(BotDeviceAction.CloseDevice, BotWristDeviceTarget.Close);
                 break;
             case BotDeviceAction.SelectWood:
                 SelectDeviceResource(BotResourceType.Wood);
@@ -725,6 +795,64 @@ public class GameApp : IGameRunner
         }
     }
 
+    private void QueueBotDeviceAction(BotDeviceAction action, BotWristDeviceTarget target)
+    {
+        if (action == BotDeviceAction.None)
+        {
+            return;
+        }
+
+        _pendingBotDeviceAction = action;
+        _pendingBotDeviceActionDelay = BotDeviceActionDelay;
+        TriggerBotDeviceTap(target);
+    }
+
+    private void AdvancePendingBotDeviceAction(float deltaTime)
+    {
+        if (_pendingBotDeviceAction == BotDeviceAction.None)
+        {
+            return;
+        }
+
+        _pendingBotDeviceActionDelay -= Math.Max(0f, deltaTime);
+        if (_pendingBotDeviceActionDelay > 0f)
+        {
+            return;
+        }
+
+        var action = _pendingBotDeviceAction;
+        CancelPendingBotDeviceAction();
+        ApplyBotDeviceAction(action);
+    }
+
+    private void CancelPendingBotDeviceAction()
+    {
+        _pendingBotDeviceAction = BotDeviceAction.None;
+        _pendingBotDeviceActionDelay = 0f;
+    }
+
+    private void ApplyBotDeviceAction(BotDeviceAction action)
+    {
+        switch (action)
+        {
+            case BotDeviceAction.OpenGatherResource:
+                _botDevice.OpenGatherResource();
+                _botDevice.SetMessage("Выберите ресурс и введите количество.");
+                break;
+            case BotDeviceAction.OpenBuildHouse:
+                _botDevice.OpenBuildHouse();
+                _botDevice.SetMessage("Подтвердите строительство Дом S.");
+                break;
+            case BotDeviceAction.BackToMain:
+                _botDevice.BackToMain();
+                _botDevice.SetMessage(string.Empty);
+                break;
+            case BotDeviceAction.CloseDevice:
+                CloseBotDevice();
+                break;
+        }
+    }
+
     private void HandleBotDeviceDigitInput()
     {
         if (_botDevice.Screen != BotWristDeviceScreen.GatherResource)
@@ -737,7 +865,7 @@ public class GameApp : IGameRunner
             if (_botDevice.BackspaceAmount())
             {
                 _botDevice.SetMessage($"Количество: {_botDevice.AmountText}");
-                TriggerBotDeviceTap();
+                TriggerBotDeviceTap(BotWristDeviceTarget.Amount);
             }
         }
 
@@ -752,7 +880,7 @@ public class GameApp : IGameRunner
             if (_botDevice.AppendDigit(digit))
             {
                 _botDevice.SetMessage($"Количество: {_botDevice.AmountText}");
-                TriggerBotDeviceTap();
+                TriggerBotDeviceTap(BotWristDeviceTarget.Amount);
             }
         }
     }
@@ -761,7 +889,7 @@ public class GameApp : IGameRunner
     {
         _botDevice.SelectResource(resource);
         _botDevice.SetMessage($"Ресурс: {resource.GetLabel()}");
-        TriggerBotDeviceTap();
+        TriggerBotDeviceTap(GetTapTargetForResource(resource));
     }
 
     private void QueueGatherFromDevice()
@@ -795,9 +923,9 @@ public class GameApp : IGameRunner
             : "Очередь бота заполнена.");
     }
 
-    private void TriggerBotDeviceTap()
+    private void TriggerBotDeviceTap(BotWristDeviceTarget target = BotWristDeviceTarget.None)
     {
-        _botDeviceVisual.TriggerTap();
+        _botDeviceVisual.TriggerTap(target);
     }
 
     private BotDeviceAction ReadBotDeviceAction()
@@ -807,77 +935,52 @@ public class GameApp : IGameRunner
             return BotDeviceAction.None;
         }
 
-        if (_botDevice.Screen == BotWristDeviceScreen.Main)
+        if (!_platform.IsMouseButtonPressed(MouseButton.Left))
         {
-            if (IsButtonClicked(GetBotDeviceGatherButtonRect()))
-            {
-                return BotDeviceAction.OpenGatherResource;
-            }
-
-            if (IsButtonClicked(GetBotDeviceBuildButtonRect()))
-            {
-                return BotDeviceAction.OpenBuildHouse;
-            }
-
-            if (IsButtonClicked(GetBotDeviceCancelButtonRect()))
-            {
-                return BotDeviceAction.CancelCommands;
-            }
-
-            if (IsButtonClicked(GetBotDeviceCloseButtonRect()))
-            {
-                return BotDeviceAction.CloseDevice;
-            }
-
             return BotDeviceAction.None;
         }
 
-        if (_botDevice.Screen == BotWristDeviceScreen.GatherResource)
+        if (!TryBuildBotDeviceLayout(out var layout))
         {
-            if (IsButtonClicked(GetBotDeviceBackButtonRect()))
-            {
-                return BotDeviceAction.BackToMain;
-            }
-
-            if (IsButtonClicked(GetBotDeviceWoodButtonRect()))
-            {
-                return BotDeviceAction.SelectWood;
-            }
-
-            if (IsButtonClicked(GetBotDeviceStoneButtonRect()))
-            {
-                return BotDeviceAction.SelectStone;
-            }
-
-            if (IsButtonClicked(GetBotDeviceDirtButtonRect()))
-            {
-                return BotDeviceAction.SelectDirt;
-            }
-
-            if (IsButtonClicked(GetBotDeviceLeavesButtonRect()))
-            {
-                return BotDeviceAction.SelectLeaves;
-            }
-
-            if (IsButtonClicked(GetBotDeviceConfirmButtonRect()))
-            {
-                return BotDeviceAction.QueueGather;
-            }
-
             return BotDeviceAction.None;
         }
 
-        if (IsButtonClicked(GetBotDeviceBackButtonRect()))
-        {
-            return BotDeviceAction.BackToMain;
-        }
+        var target = layout.HitTest(_platform.GetMousePosition());
+        return MapBotDeviceTargetToAction(target);
+    }
 
-        if (IsButtonClicked(GetBotDeviceConfirmButtonRect()))
+    private BotDeviceAction MapBotDeviceTargetToAction(BotWristDeviceTarget target)
+    {
+        return (_botDevice.Screen, target) switch
         {
-            return BotDeviceAction.QueueBuildHouse;
-        }
+            (BotWristDeviceScreen.Main, BotWristDeviceTarget.Gather) => BotDeviceAction.OpenGatherResource,
+            (BotWristDeviceScreen.Main, BotWristDeviceTarget.BuildHouse) => BotDeviceAction.OpenBuildHouse,
+            (BotWristDeviceScreen.Main, BotWristDeviceTarget.Cancel) => BotDeviceAction.CancelCommands,
+            (BotWristDeviceScreen.Main, BotWristDeviceTarget.Close) => BotDeviceAction.CloseDevice,
 
-        return BotDeviceAction.None;
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Back) => BotDeviceAction.BackToMain,
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Wood) => BotDeviceAction.SelectWood,
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Stone) => BotDeviceAction.SelectStone,
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Dirt) => BotDeviceAction.SelectDirt,
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Leaves) => BotDeviceAction.SelectLeaves,
+            (BotWristDeviceScreen.GatherResource, BotWristDeviceTarget.Confirm) => BotDeviceAction.QueueGather,
+
+            (BotWristDeviceScreen.BuildHouse, BotWristDeviceTarget.Back) => BotDeviceAction.BackToMain,
+            (BotWristDeviceScreen.BuildHouse, BotWristDeviceTarget.Confirm) => BotDeviceAction.QueueBuildHouse,
+            _ => BotDeviceAction.None
+        };
+    }
+
+    private static BotWristDeviceTarget GetTapTargetForResource(BotResourceType resource)
+    {
+        return resource switch
+        {
+            BotResourceType.Wood => BotWristDeviceTarget.Wood,
+            BotResourceType.Stone => BotWristDeviceTarget.Stone,
+            BotResourceType.Dirt => BotWristDeviceTarget.Dirt,
+            BotResourceType.Leaves => BotWristDeviceTarget.Leaves,
+            _ => BotWristDeviceTarget.None
+        };
     }
 
     private PlayerInput ReadAutoBotInput(float deltaTime, ref AutoBotState state)
@@ -991,6 +1094,45 @@ public class GameApp : IGameRunner
             && mouse.X <= rect.X + rect.W
             && mouse.Y >= rect.Y
             && mouse.Y <= rect.Y + rect.H;
+    }
+
+    private bool TryBuildBotDeviceLayout(out BotWristDeviceLayout layout)
+    {
+        if (_state != AppState.Playing || _companion is null || !_botDevice.IsOpen)
+        {
+            layout = null!;
+            return false;
+        }
+
+        var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
+        var cameraBob = MathF.Sin(_cameraBobPhase) * 0.06f * walkBob;
+        var camera = CameraViewBuilder.Build(_player, _world, _cameraMode, cameraBob).Camera;
+        layout = BuildBotDeviceLayout(camera);
+        return true;
+    }
+
+    private BotWristDeviceLayout BuildBotDeviceLayout(Camera3D camera)
+    {
+        var forward = Vector3.Normalize(camera.Target - camera.Position);
+        var rightRaw = Vector3.Cross(forward, Vector3.UnitY);
+        var right = rightRaw.LengthSquared() < 0.000001f
+            ? Vector3.UnitX
+            : Vector3.Normalize(rightRaw);
+        var up = Vector3.Normalize(Vector3.Cross(right, forward));
+
+        var bob = MathF.Sin(_playerVisual.WalkPhase * 2f) * 0.03f * _playerVisual.WalkBlend * _graphics.ViewBobScale;
+        var bobOffset = up * bob;
+        var raise = _botDeviceVisual.RaiseBlend;
+        var hologramCenter = ComposeViewPoint(camera.Position, forward, right, up, 0.86f + 0.08f * raise, 0.16f, 0.02f + 0.03f * raise) + bobOffset;
+        return BotWristDeviceLayout.Create(
+            camera,
+            _platform.GetScreenWidth(),
+            _platform.GetScreenHeight(),
+            _botDevice,
+            hologramCenter,
+            forward,
+            right,
+            up);
     }
 
     private void DrawFrame(BlockRaycastHit? hit, CameraViewBuilder.CameraView view)
@@ -2034,26 +2176,21 @@ public class GameApp : IGameRunner
         {
             var raise = _botDeviceVisual.RaiseBlend;
             var tap = _botDeviceVisual.TapBlend;
+            var layout = BuildBotDeviceLayout(camera);
 
-            var deviceForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.30f + 0.08f * raise, -0.46f + 0.10f * raise, -0.46f + 0.16f * raise) + bobOffset;
-            var deviceWrist = ComposeViewPoint(camera.Position, forward, right, up, 0.48f + 0.10f * raise, -0.32f + 0.09f * raise, -0.32f + 0.15f * raise) + bobOffset;
-            var devicePalm = ComposeViewPoint(camera.Position, forward, right, up, 0.62f + 0.10f * raise, -0.22f + 0.08f * raise, -0.22f + 0.10f * raise) + bobOffset;
+            var deviceForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.28f + 0.08f * raise, -0.60f + 0.08f * raise, -0.54f + 0.14f * raise) + bobOffset;
+            var deviceWrist = ComposeViewPoint(camera.Position, forward, right, up, 0.46f + 0.10f * raise, -0.45f + 0.08f * raise, -0.40f + 0.13f * raise) + bobOffset;
+            var devicePalm = ComposeViewPoint(camera.Position, forward, right, up, 0.60f + 0.10f * raise, -0.34f + 0.07f * raise, -0.30f + 0.08f * raise) + bobOffset;
             var deviceModule = devicePalm + forward * 0.12f + right * 0.03f + up * 0.02f;
 
-            var hologramCenter = ComposeViewPoint(camera.Position, forward, right, up, 0.84f + 0.08f * raise, 0.06f, -0.02f) + bobOffset;
-            var fingertipTarget = hologramCenter + right * 0.12f - up * 0.08f;
-            var tapForearm = ComposeViewPoint(camera.Position, forward, right, up, 0.22f + 0.10f * raise, 0.56f - 0.08f * raise, -0.48f + 0.14f * raise) + bobOffset;
-            var tapPalm = Vector3.Lerp(tapForearm, fingertipTarget, 0.74f + 0.10f * tap);
-            var tapFinger = Vector3.Lerp(tapPalm, fingertipTarget, 0.68f + 0.16f * tap);
-
             DrawFirstPersonArm(deviceForearm, deviceWrist, devicePalm, skinColor: new Color(232, 202, 172, 255), sleeveColor: new Color(198, 170, 144, 255));
-            DrawFirstPersonArm(tapForearm, tapPalm, tapFinger, skinColor: new Color(230, 198, 168, 255), sleeveColor: new Color(206, 178, 152, 255));
 
             _platform.DrawCube(deviceModule, 0.20f, 0.11f, 0.16f, new Color(34, 48, 56, 255));
             _platform.DrawCube(deviceModule - right * 0.11f, 0.06f, 0.13f, 0.18f, new Color(26, 36, 44, 255));
             _platform.DrawCube(deviceModule + forward * 0.06f, 0.03f, 0.06f, 0.10f, new Color(122, 255, 230, 195));
-            _platform.DrawCube((deviceModule + hologramCenter) * 0.5f + up * 0.02f, 0.05f, 0.18f, 0.03f, new Color(118, 255, 228, 95));
-            DrawWristHologram(hologramCenter, tap);
+            var beamCenter = Vector3.Lerp(deviceModule + forward * 0.05f, layout.PanelCenter, 0.5f) + up * 0.01f;
+            _platform.DrawCube(beamCenter, 0.035f, 0.16f + 0.05f * tap, 0.024f, new Color(118, 255, 228, 92));
+            DrawWristHologram(layout, tap);
             return;
         }
 
@@ -2089,20 +2226,23 @@ public class GameApp : IGameRunner
         _platform.DrawCube(palm + new Vector3(0.02f, -0.01f, 0.02f), 0.08f, 0.05f, 0.10f, skinColor);
     }
 
-    private void DrawWristHologram(Vector3 center, float tapBlend)
+    private void DrawWristHologram(BotWristDeviceLayout layout, float tapBlend)
     {
-        var glow = new Color(118, 255, 228, 55);
-        var bright = new Color(126, 255, 234, 125);
-        var hot = new Color(176, 255, 244, 185);
-        var pulse = 1f + tapBlend * 0.12f;
+        var glow = new Color(118, 255, 228, 20);
+        var pulse = 1f + tapBlend * 0.18f;
+        _platform.DrawCube(layout.PanelCenter, layout.PanelWorldWidth * 0.04f * pulse, layout.PanelWorldHeight * 0.04f * pulse, layout.Thickness * 0.68f, glow);
+    }
 
-        _platform.DrawCube(center, 0.44f * pulse, 0.28f * pulse, 0.02f, glow);
-        _platform.DrawCube(center + new Vector3(0f, 0.12f, 0.01f), 0.28f, 0.03f, 0.03f, bright);
-        _platform.DrawCube(center + new Vector3(-0.12f, 0.04f, 0.01f), 0.10f, 0.02f, 0.03f, hot);
-        _platform.DrawCube(center + new Vector3(0.10f, 0.04f, 0.01f), 0.18f, 0.02f, 0.03f, bright);
-        _platform.DrawCube(center + new Vector3(-0.08f, -0.04f, 0.01f), 0.18f, 0.02f, 0.03f, bright);
-        _platform.DrawCube(center + new Vector3(0.10f, -0.04f, 0.01f), 0.12f, 0.02f, 0.03f, hot);
-        _platform.DrawCube(center + new Vector3(0f, -0.12f, 0.01f), 0.34f, 0.03f, 0.03f, bright);
+    private static BotResourceType MapTargetToResource(BotWristDeviceTarget target)
+    {
+        return target switch
+        {
+            BotWristDeviceTarget.Wood => BotResourceType.Wood,
+            BotWristDeviceTarget.Stone => BotResourceType.Stone,
+            BotWristDeviceTarget.Dirt => BotResourceType.Dirt,
+            BotWristDeviceTarget.Leaves => BotResourceType.Leaves,
+            _ => BotResourceType.Wood
+        };
     }
 
     private static Color GetHeldBlockColor(BlockType block)
@@ -2427,169 +2567,243 @@ public class GameApp : IGameRunner
 
     private void DrawBotDeviceOverlay()
     {
-        if (_companion is null || !_botDevice.IsOpen)
+        if (_companion is null || !_botDevice.IsOpen || !TryBuildBotDeviceLayout(out var layout))
         {
             return;
         }
 
-        var panel = GetBotDevicePanelRect();
-        var accent = new Color(150, 255, 236, 220);
-        var glow = new Color(74, 176, 188, 160);
-        var lines = new Color(168, 255, 242, 110);
-        _platform.DrawRectangle(panel.X - 8, panel.Y - 8, panel.W + 16, panel.H + 16, new Color(14, 66, 76, 48));
-        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, new Color(7, 27, 35, 116));
-        _platform.DrawRectangle(panel.X + 8, panel.Y + 8, panel.W - 16, panel.H - 16, new Color(15, 49, 58, 156));
-        _platform.DrawRectangle(panel.X + 16, panel.Y + 14, panel.W - 32, 44, new Color(15, 64, 74, 112));
-        DrawBotDeviceCorner(panel.X, panel.Y, 1, 1, lines);
-        DrawBotDeviceCorner(panel.X + panel.W, panel.Y, -1, 1, lines);
-        DrawBotDeviceCorner(panel.X, panel.Y + panel.H, 1, -1, lines);
-        DrawBotDeviceCorner(panel.X + panel.W, panel.Y + panel.H, -1, -1, lines);
+        var panel = layout.PanelRect;
+        var accent = new Color(164, 255, 238, 244);
+        var glow = new Color(74, 176, 188, 176);
+        var dim = new Color(198, 232, 236, 236);
+        var panelShadow = new Color(8, 20, 26, 134);
+        var panelFill = new Color(18, 44, 52, 198);
+        var panelHeader = new Color(28, 92, 102, 214);
+        var panelEdge = new Color(110, 255, 232, 110);
+        var dividerColor = new Color(74, 176, 188, 184);
 
-        _platform.DrawUiText("Наручный модуль бота", new Vector2(panel.X + 24, panel.Y + 20), 24, 1f, accent);
-        _platform.DrawUiText("Проекция активна", new Vector2(panel.X + 24, panel.Y + 60), 16, 1f, new Color(176, 233, 240, 255));
-        _platform.DrawUiText($"Статус: {_companion.Status.GetLabel()}", new Vector2(panel.X + 24, panel.Y + 86), 17, 1f, Color.White);
-        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", new Vector2(panel.X + 24, panel.Y + 108), 16, 1f, new Color(206, 237, 241, 255));
-        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", new Vector2(panel.X + 24, panel.Y + 128), 16, 1f, new Color(206, 237, 241, 255));
-        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", new Vector2(panel.X + 24, panel.Y + 148), 16, 1f, new Color(206, 237, 241, 255));
-        _platform.DrawRectangle(panel.X + 24, panel.Y + 174, panel.W - 48, 1, glow);
+        _platform.DrawRectangle(panel.X - 10, panel.Y - 10, panel.W + 20, panel.H + 20, panelShadow);
+        _platform.DrawRectangle(panel.X, panel.Y, panel.W, panel.H, panelFill);
+        _platform.DrawRectangle(panel.X + 2, panel.Y + 2, panel.W - 4, 58, panelHeader);
+        _platform.DrawRectangle(panel.X, panel.Y, panel.W, 2, panelEdge);
+        _platform.DrawRectangle(panel.X, panel.Y + panel.H - 2, panel.W, 2, panelEdge);
+        _platform.DrawRectangle(panel.X, panel.Y, 2, panel.H, panelEdge);
+        _platform.DrawRectangle(panel.X + panel.W - 2, panel.Y, 2, panel.H, panelEdge);
+
+        DrawBotDeviceTapOverlay(layout);
+
+        _platform.DrawUiText("Наручный модуль бота", GetScaledBotDevicePoint(layout, 24, 20), 24, 1f, accent);
+        _platform.DrawUiText("Проекция активна", GetScaledBotDevicePoint(layout, 24, 60), 16, 1f, dim);
+        _platform.DrawUiText($"Статус: {_companion.Status.GetLabel()}", GetScaledBotDevicePoint(layout, 24, 86), 17, 1f, Color.White);
+        _platform.DrawUiText($"Активно: {_companion.GetActiveSummary()}", GetScaledBotDevicePoint(layout, 24, 108), 16, 1f, dim);
+        _platform.DrawUiText($"Очередь: {_companion.GetQueuedSummary()}", GetScaledBotDevicePoint(layout, 24, 128), 16, 1f, dim);
+        _platform.DrawUiText($"Запасы: {_companion.GetStockpileSummary()}", GetScaledBotDevicePoint(layout, 24, 148), 16, 1f, dim);
+        var dividerStart = GetScaledBotDevicePoint(layout, 24, 174);
+        var dividerEnd = GetScaledBotDevicePoint(layout, BotDevicePanelWidth - 24, 174);
+        _platform.DrawLine((int)dividerStart.X, (int)dividerStart.Y, (int)dividerEnd.X, (int)dividerEnd.Y, dividerColor);
 
         switch (_botDevice.Screen)
         {
             case BotWristDeviceScreen.Main:
-                DrawBotDeviceButton(GetBotDeviceGatherButtonRect(), "Сбор ресурсов", glow, Color.White);
-                DrawBotDeviceButton(GetBotDeviceBuildButtonRect(), "Построить Дом S", new Color(74, 114, 180, 148), Color.White);
-                DrawBotDeviceButton(GetBotDeviceCancelButtonRect(), "Сбросить команды", new Color(170, 84, 84, 146), Color.White);
-                DrawBotDeviceButton(GetBotDeviceCloseButtonRect(), "Убрать устройство", new Color(54, 84, 92, 138), Color.White);
-                _platform.DrawUiText("B / ESC: убрать модуль", new Vector2(panel.X + 24, panel.Y + panel.H - 48), 16, 1f, accent);
+                DrawBotDeviceButton(GetBotDeviceGatherButtonRect(), "Сбор ресурсов", accent);
+                DrawBotDeviceButton(GetBotDeviceBuildButtonRect(), "Построить Дом S", new Color(180, 214, 255, 235));
+                DrawBotDeviceButton(GetBotDeviceCancelButtonRect(), "Сбросить команды", new Color(255, 176, 168, 235));
+                DrawBotDeviceButton(GetBotDeviceCloseButtonRect(), "Убрать устройство", dim);
+                _platform.DrawUiText("B / ESC: убрать модуль", GetScaledBotDevicePoint(layout, 24, 430), 16, 1f, accent);
                 break;
             case BotWristDeviceScreen.GatherResource:
-                _platform.DrawUiText("Сбор ресурсов", new Vector2(panel.X + 24, panel.Y + 190), 24, 1f, accent);
+                _platform.DrawUiText("Сбор ресурсов", GetScaledBotDevicePoint(layout, 24, 190), 24, 1f, accent);
                 DrawBotDeviceResourceButton(GetBotDeviceWoodButtonRect(), "Дерево", BotResourceType.Wood);
                 DrawBotDeviceResourceButton(GetBotDeviceStoneButtonRect(), "Камень", BotResourceType.Stone);
                 DrawBotDeviceResourceButton(GetBotDeviceDirtButtonRect(), "Земля", BotResourceType.Dirt);
                 DrawBotDeviceResourceButton(GetBotDeviceLeavesButtonRect(), "Листва", BotResourceType.Leaves);
                 var amount = GetBotDeviceAmountRect();
-                _platform.DrawRectangle(amount.X, amount.Y, amount.W, amount.H, new Color(9, 38, 45, 158));
-                _platform.DrawUiText($"Количество: {_botDevice.AmountText}", new Vector2(amount.X + 18, amount.Y + 10), 22, 1f, Color.White);
-                _platform.DrawUiText("0-9, Backspace, Enter", new Vector2(amount.X + 18, amount.Y + 40), 15, 1f, accent);
-                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Подтвердить сбор", glow, Color.White);
-                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 138), Color.White);
+                _platform.DrawUiText($"Количество: {_botDevice.AmountText}", new Vector2(amount.X + 18, amount.Y + 8), 22, 1f, Color.White);
+                _platform.DrawUiText("0-9, Backspace, Enter", new Vector2(amount.X + 18, amount.Y + amount.H - 18), 14, 1f, accent);
+                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Подтвердить сбор", accent);
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", dim);
                 break;
             case BotWristDeviceScreen.BuildHouse:
-                _platform.DrawUiText("Строительство", new Vector2(panel.X + 24, panel.Y + 190), 24, 1f, accent);
-                _platform.DrawUiText("Шаблон: Дом S", new Vector2(panel.X + 24, panel.Y + 226), 20, 1f, Color.White);
-                _platform.DrawUiText("Бот сам подготовит площадку,", new Vector2(panel.X + 24, panel.Y + 256), 17, 1f, new Color(210, 240, 246, 255));
-                _platform.DrawUiText("доберет ресурсы и начнет стройку.", new Vector2(panel.X + 24, panel.Y + 278), 17, 1f, new Color(210, 240, 246, 255));
-                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Запустить стройку", new Color(74, 114, 180, 148), Color.White);
-                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", new Color(48, 73, 79, 138), Color.White);
+                _platform.DrawUiText("Строительство", GetScaledBotDevicePoint(layout, 24, 190), 24, 1f, accent);
+                _platform.DrawUiText("Шаблон: Дом S", GetScaledBotDevicePoint(layout, 24, 226), 20, 1f, Color.White);
+                _platform.DrawUiText("Бот сам подготовит площадку,", GetScaledBotDevicePoint(layout, 24, 256), 17, 1f, dim);
+                _platform.DrawUiText("доберет ресурсы и начнет стройку.", GetScaledBotDevicePoint(layout, 24, 278), 17, 1f, dim);
+                DrawBotDeviceButton(GetBotDeviceConfirmButtonRect(), "Запустить стройку", new Color(180, 214, 255, 235));
+                DrawBotDeviceButton(GetBotDeviceBackButtonRect(), "Назад", dim);
                 break;
         }
 
         if (!string.IsNullOrWhiteSpace(_botDevice.Message))
         {
-            _platform.DrawUiText(_botDevice.Message, new Vector2(panel.X + 24, panel.Y + panel.H - 24), 16, 1f, accent);
+            _platform.DrawUiText(_botDevice.Message, GetBotDeviceMessagePoint(layout), 16, 1f, accent);
         }
     }
 
-    private void DrawBotDeviceButton((int X, int Y, int W, int H) rect, string label, Color background, Color text)
+    private void DrawBotDeviceButton((int X, int Y, int W, int H) rect, string label, Color text)
     {
-        _platform.DrawRectangle(rect.X, rect.Y, rect.W, rect.H, background);
-        _platform.DrawRectangle(rect.X + 3, rect.Y + 3, rect.W - 6, rect.H - 6, new Color(12, 42, 51, 92));
+        _platform.DrawRectangle(rect.X, rect.Y, rect.W, rect.H, new Color(27, 74, 84, 158));
+        _platform.DrawRectangle(rect.X, rect.Y, rect.W, 2, new Color(114, 255, 232, 104));
+        _platform.DrawRectangle(rect.X, rect.Y + rect.H - 2, rect.W, 2, new Color(114, 255, 232, 80));
         _platform.DrawUiText(label, new Vector2(rect.X + 16, rect.Y + 10), 21, 1f, text);
     }
 
     private void DrawBotDeviceResourceButton((int X, int Y, int W, int H) rect, string label, BotResourceType resource)
     {
         var isSelected = _botDevice.SelectedResource == resource;
-        var fill = isSelected
-            ? new Color(118, 255, 228, 225)
-            : new Color(15, 55, 65, 225);
-        var text = isSelected ? Color.Black : Color.White;
-        DrawBotDeviceButton(rect, label, fill, text);
+        var text = isSelected
+            ? new Color(194, 255, 244, 255)
+            : new Color(228, 238, 242, 235);
+        DrawBotDeviceButton(rect, label, text);
+    }
+
+    private Vector2 GetScaledBotDevicePoint(BotWristDeviceLayout layout, int virtualX, int virtualY) => layout.GetPanelPoint(virtualX, virtualY);
+
+    private Vector2 GetBotDeviceMessagePoint(BotWristDeviceLayout layout)
+    {
+        return _botDevice.Screen switch
+        {
+            BotWristDeviceScreen.GatherResource => GetScaledBotDevicePoint(layout, 24, 176),
+            BotWristDeviceScreen.BuildHouse => GetScaledBotDevicePoint(layout, 24, 176),
+            _ => GetScaledBotDevicePoint(layout, 24, 456)
+        };
+    }
+
+    private void DrawBotDeviceTapOverlay(BotWristDeviceLayout layout)
+    {
+        if (_botDeviceVisual.TapBlend <= BotDeviceTapArmThreshold)
+        {
+            return;
+        }
+
+        var targetRect = GetBotDeviceElementRect(_botDeviceVisual.TapTarget);
+        if (targetRect.W <= 0 || targetRect.H <= 0)
+        {
+            targetRect = layout.PanelRect.ToTuple();
+        }
+
+        var target = new Vector2(targetRect.X + targetRect.W * 0.5f, targetRect.Y + targetRect.H * 0.5f);
+        var pressT = Math.Clamp(_botDeviceVisual.TapBlend, 0f, 1f);
+        var palmWidth = Math.Max(18, BotDeviceTapPalmSize - 8);
+        var palmHeight = Math.Max(14, (int)MathF.Round(palmWidth * 0.74f));
+        var panelCenterX = layout.PanelRect.X + layout.PanelRect.W * 0.5f;
+        var approachFromRight = target.X >= panelCenterX;
+        var fingerWidth = 6;
+        var fingerHeight = 14 + (int)MathF.Round((1f - pressT) * 2f);
+        var fingerX = (int)MathF.Round(target.X - fingerWidth * 0.5f);
+        var fingerY = (int)MathF.Round(target.Y - 2f);
+        var palmX = approachFromRight
+            ? fingerX + 1
+            : fingerX - palmWidth + fingerWidth - 1;
+        var palmY = fingerY + fingerHeight - 7;
+        var wristWidth = 8;
+        var wristHeight = Math.Max(10, palmHeight - 6);
+        var sleeveX = approachFromRight
+            ? palmX + palmWidth - 3
+            : palmX - wristWidth + 3;
+        var sleeveY = palmY + palmHeight - wristHeight + 1;
+        var thumbWidth = 7;
+        var thumbHeight = 6;
+        var thumbX = approachFromRight
+            ? palmX + 1
+            : palmX + palmWidth - thumbWidth - 1;
+        var thumbY = palmY + 7;
+        var knuckleWidth = 9;
+        var knuckleHeight = 4;
+        var knuckleX = approachFromRight
+            ? palmX + 6
+            : palmX + palmWidth - knuckleWidth - 6;
+        var knuckleY = palmY + 2;
+        var highlightSize = 8;
+
+        var sleeveShadow = new Color(34, 50, 58, 118);
+        var sleeve = new Color(198, 170, 144, 164);
+        var skin = new Color(232, 205, 178, 216);
+        var skinDark = new Color(214, 186, 160, 198);
+
+        _platform.DrawRectangle(sleeveX + 1, sleeveY + 1, wristWidth, wristHeight, sleeveShadow);
+        _platform.DrawRectangle(sleeveX, sleeveY, wristWidth, wristHeight, sleeve);
+        _platform.DrawRectangle(palmX + 2, palmY + 2, palmWidth, palmHeight, new Color(0, 0, 0, 34));
+        _platform.DrawRectangle(palmX, palmY, palmWidth, palmHeight, skin);
+        _platform.DrawRectangle(fingerX, fingerY, fingerWidth, fingerHeight, skin);
+        _platform.DrawRectangle(thumbX, thumbY, thumbWidth, thumbHeight, skinDark);
+        _platform.DrawRectangle(knuckleX, knuckleY, knuckleWidth, knuckleHeight, skinDark);
+        _platform.DrawRectangle(knuckleX + (approachFromRight ? 1 : -1), knuckleY + 5, knuckleWidth - 2, knuckleHeight, skinDark);
+
+        _platform.DrawRectangle(
+            (int)MathF.Round(target.X - highlightSize * 0.5f),
+            (int)MathF.Round(target.Y - highlightSize * 0.5f),
+            highlightSize,
+            highlightSize,
+            new Color(176, 255, 244, 110));
     }
 
     private (int X, int Y, int W, int H) GetBotDevicePanelRect()
     {
-        var maxX = Math.Max(18, _platform.GetScreenWidth() - BotDevicePanelWidth - 18);
-        var x = Math.Clamp(_platform.GetScreenWidth() / 2 + 76, 18, maxX);
-        var y = Math.Max(18, (_platform.GetScreenHeight() - BotDevicePanelHeight) / 2);
-        return (x, y, BotDevicePanelWidth, BotDevicePanelHeight);
+        return TryBuildBotDeviceLayout(out var layout)
+            ? layout.PanelRect.ToTuple()
+            : (0, 0, 0, 0);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceGatherButtonRect()
     {
-        var panel = GetBotDevicePanelRect();
-        return (panel.X + 24, panel.Y + 190, panel.W - 48, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Gather);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceBuildButtonRect()
     {
-        var gather = GetBotDeviceGatherButtonRect();
-        return (gather.X, gather.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, gather.W, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.BuildHouse);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceCancelButtonRect()
     {
-        var build = GetBotDeviceBuildButtonRect();
-        return (build.X, build.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, build.W, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Cancel);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceCloseButtonRect()
     {
-        var cancel = GetBotDeviceCancelButtonRect();
-        return (cancel.X, cancel.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, cancel.W, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Close);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceWoodButtonRect()
     {
-        var panel = GetBotDevicePanelRect();
-        return (panel.X + 24, panel.Y + 226, 154, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Wood);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceStoneButtonRect()
     {
-        var wood = GetBotDeviceWoodButtonRect();
-        return (wood.X + wood.W + 12, wood.Y, wood.W, wood.H);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Stone);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceDirtButtonRect()
     {
-        var wood = GetBotDeviceWoodButtonRect();
-        return (wood.X, wood.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, wood.W, wood.H);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Dirt);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceLeavesButtonRect()
     {
-        var dirt = GetBotDeviceDirtButtonRect();
-        return (dirt.X + dirt.W + 12, dirt.Y, dirt.W, dirt.H);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Leaves);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceAmountRect()
     {
-        var dirt = GetBotDeviceDirtButtonRect();
-        return (dirt.X, dirt.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, BotDevicePanelWidth - 48, 70);
-    }
-
-    private void DrawBotDeviceCorner(int x, int y, int dirX, int dirY, Color color)
-    {
-        var hx = dirX > 0 ? x : x - 26;
-        var hy = dirY > 0 ? y : y - 2;
-        var vx = dirX > 0 ? x : x - 2;
-        var vy = dirY > 0 ? y : y - 24;
-        _platform.DrawRectangle(hx, hy, 26, 2, color);
-        _platform.DrawRectangle(vx, vy, 2, 24, color);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Amount);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceConfirmButtonRect()
     {
-        var amount = GetBotDeviceAmountRect();
-        return (amount.X, amount.Y + amount.H + BotDeviceButtonsGap, amount.W, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Confirm);
     }
 
     private (int X, int Y, int W, int H) GetBotDeviceBackButtonRect()
     {
-        var confirm = GetBotDeviceConfirmButtonRect();
-        return (confirm.X, confirm.Y + BotDeviceButtonHeight + BotDeviceButtonsGap, confirm.W, BotDeviceButtonHeight);
+        return GetBotDeviceElementRect(BotWristDeviceTarget.Back);
+    }
+
+    private (int X, int Y, int W, int H) GetBotDeviceElementRect(BotWristDeviceTarget target)
+    {
+        return TryBuildBotDeviceLayout(out var layout)
+            ? layout.GetRect(target).ToTuple()
+            : (0, 0, 0, 0);
     }
 
     private bool BlockCenterIntersectsPlayer(Vector3 blockCenter)

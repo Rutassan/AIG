@@ -4,6 +4,7 @@ internal sealed class BotWristDeviceVisualState
 {
     public float RaiseBlend { get; private set; }
     public float TapBlend { get; private set; }
+    public BotWristDeviceTarget TapTarget { get; private set; }
 
     public void Update(bool targetRaised, float deltaTime)
     {
@@ -12,10 +13,20 @@ internal sealed class BotWristDeviceVisualState
         var raiseT = Math.Clamp(safeDelta * (targetRaised ? 9f : 7f), 0f, 1f);
         RaiseBlend += (raiseTarget - RaiseBlend) * raiseT;
         TapBlend = MathF.Max(0f, TapBlend - safeDelta * 4.8f);
+        if (TapBlend <= 0.0001f)
+        {
+            TapTarget = BotWristDeviceTarget.None;
+        }
+    }
+
+    public void TriggerTap(BotWristDeviceTarget target = BotWristDeviceTarget.None)
+    {
+        TapBlend = 1f;
+        TapTarget = target;
     }
 
     public void TriggerTap()
     {
-        TapBlend = 1f;
+        TriggerTap(BotWristDeviceTarget.None);
     }
 }

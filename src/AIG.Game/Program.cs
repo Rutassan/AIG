@@ -9,6 +9,7 @@ public static class Program
 {
     internal static Func<IGameRunner> GameFactory { get; set; } = static () => new GameApp();
     internal static Func<string, IGameRunner> AutoCaptureFactory { get; set; } = static outputDir => new AutoCaptureRunner(outputDir);
+    internal static Func<string, IGameRunner> AutoDeviceCaptureFactory { get; set; } = static outputDir => new AutoDeviceCaptureRunner(outputDir);
     internal static Func<string, float, int, IGameRunner> AutoPerfFactory { get; set; } = static (outputDir, durationSeconds, minFps) => new AutoPerfRunner(outputDir, durationSeconds, minFps);
     internal static Func<GameConfig> AutoCaptureConfigFactory { get; set; } = static () => new GameConfig
     {
@@ -28,7 +29,7 @@ public static class Program
 
     public static void Main(string[] args)
     {
-        if (TryRunAutoCapture(args) || TryRunAutoPerf(args))
+        if (TryRunAutoCapture(args) || TryRunAutoDeviceCapture(args) || TryRunAutoPerf(args))
         {
             return;
         }
@@ -66,6 +67,21 @@ public static class Program
         var minFps = ParseMinFps(args);
 
         AutoPerfFactory(outputDir, durationSeconds, minFps).Run();
+        return true;
+    }
+
+    internal static bool TryRunAutoDeviceCapture(string[] args)
+    {
+        if (args.Length == 0 || !string.Equals(args[0], "autocap-device", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var outputDir = args.Length > 1
+            ? args[1]
+            : Path.Combine(Directory.GetCurrentDirectory(), "autocap-device");
+
+        AutoDeviceCaptureFactory(outputDir).Run();
         return true;
     }
 
@@ -109,6 +125,17 @@ public static class Program
             var world = WorldFactory(config);
             var app = new GameApp(config, PlatformFactory(), world);
             app.RunAutoPerf(outputDir, durationSeconds, minFps);
+        }
+    }
+
+    private sealed class AutoDeviceCaptureRunner(string outputDir) : IGameRunner
+    {
+        public void Run()
+        {
+            var config = AutoCaptureConfigFactory();
+            var world = WorldFactory(config);
+            var app = new GameApp(config, PlatformFactory(), world);
+            app.RunAutoDeviceCapture(outputDir);
         }
     }
 }
