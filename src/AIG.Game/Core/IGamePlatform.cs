@@ -19,7 +19,11 @@ public readonly record struct WorldMaterialPassSettings(
     float CoolShadowStrength,
     float ContrastStrength,
     float GlowStrength,
-    float MaterialSeparationStrength);
+    float MaterialSeparationStrength,
+    float ShadowDepthStrength,
+    float SkyBlendStrength,
+    float SunScatterStrength,
+    float AmbientLiftStrength);
 
 public interface IGamePlatform
 {

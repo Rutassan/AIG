@@ -180,7 +180,7 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(13, platform.DrawCubeCalls);
+        Assert.Equal(14, platform.DrawCubeCalls);
         Assert.Contains(platform.DrawnCubes, cube => cube.Width <= 0.09f && cube.Color.R >= 200);
     }
 
@@ -206,7 +206,7 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(13, platform.DrawCubeCalls);
+        Assert.Equal(14, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "DrawSunShaftOverlay безопасно выходит при нулевом размере экрана")]
@@ -1298,10 +1298,11 @@ public sealed class CameraAndVisualTests
 
         method!.Invoke(app, [towardSunView]);
 
-        Assert.True(platform.DrawRectangleCalls >= 10);
+        Assert.True(platform.DrawRectangleCalls >= 13);
         Assert.Contains(platform.DrawnRectangles, rect => rect.Width >= 220 && rect.Color.R >= 250 && rect.Color.G >= 200);
         Assert.Contains(platform.DrawnRectangles, rect => rect.X == 0 && rect.Height == platform.ScreenHeight);
         Assert.Contains(platform.DrawnRectangles, rect => rect.Y == platform.ScreenHeight - rect.Height && rect.Width == platform.ScreenWidth);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 255 && rect.Color.G == 216);
     }
 
     [Fact(DisplayName = "DrawCinematicSunBloomOverlay завершает работу при невалидном viewport")]
