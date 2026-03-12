@@ -13,13 +13,13 @@ public static class Program
     internal static Func<string, float, int, IGameRunner> AutoPerfFactory { get; set; } = static (outputDir, durationSeconds, minFps) => new AutoPerfRunner(outputDir, durationSeconds, minFps);
     internal static Func<GameConfig> AutoCaptureConfigFactory { get; set; } = static () => new GameConfig
     {
-        Title = "AIG 0.017 Autocap",
+        Title = "AIG 0.018 Autocap",
         FullscreenByDefault = false,
         GraphicsQuality = GraphicsQuality.High
     };
     internal static Func<GameConfig> AutoPerfConfigFactory { get; set; } = static () => new GameConfig
     {
-        Title = "AIG 0.017 Autoperf",
+        Title = "AIG 0.018 Autoperf",
         FullscreenByDefault = false,
         GraphicsQuality = GraphicsQuality.High
     };

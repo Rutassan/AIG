@@ -20,6 +20,7 @@ uniform float warmLightStrength;
 uniform float coolShadowStrength;
 uniform float contrastStrength;
 uniform float glowStrength;
+uniform float materialSeparationStrength;
 
 void main()
 {
@@ -56,18 +57,28 @@ void main()
     lightMix = clamp(lightMix, 0.24, 1.28);
 
     float materialBrightness = 1.0
-        + grassMask * 0.03
-        - dirtMask * 0.02
-        - stoneMask * 0.03
-        + woodMask * 0.01
-        + leavesMask * 0.02;
-    float materialWarmth = grassMask * 0.02 + dirtMask * 0.05 + woodMask * 0.07;
-    float materialCoolness = stoneMask * 0.07 + leavesMask * 0.01;
+        + grassMask * (0.03 + materialSeparationStrength * 0.03)
+        - dirtMask * (0.02 + materialSeparationStrength * 0.02)
+        - stoneMask * (0.03 + materialSeparationStrength * 0.03)
+        + woodMask * (0.01 + materialSeparationStrength * 0.02)
+        + leavesMask * (0.02 + materialSeparationStrength * 0.02);
+    float materialWarmth = grassMask * (0.02 + materialSeparationStrength * 0.02)
+        + dirtMask * (0.05 + materialSeparationStrength * 0.04)
+        + woodMask * (0.07 + materialSeparationStrength * 0.05);
+    float materialCoolness = stoneMask * (0.07 + materialSeparationStrength * 0.05)
+        + leavesMask * (0.01 + materialSeparationStrength * 0.01);
+    vec3 materialTint = vec3(1.0);
+    materialTint += grassMask * vec3(-0.02, 0.05, -0.01) * materialSeparationStrength;
+    materialTint += dirtMask * vec3(0.04, 0.01, -0.03) * materialSeparationStrength;
+    materialTint += stoneMask * vec3(-0.04, -0.01, 0.04) * materialSeparationStrength;
+    materialTint += woodMask * vec3(0.06, 0.02, -0.05) * materialSeparationStrength;
+    materialTint += leavesMask * vec3(-0.03, 0.04, -0.02) * materialSeparationStrength;
 
     vec3 viewDir = normalize(cameraPos - fragWorldPos);
     float rim = pow(1.0 - max(dot(viewDir, normal), 0.0), 2.0);
     float sunScatter = pow(max(dot(viewDir, sunDir), 0.0), 12.0) * (0.18 + sunVisibility * 0.22) * warmLightStrength;
     vec3 lit = albedo.rgb * lightMix * materialBrightness;
+    lit *= materialTint;
     vec3 shadowTint = mix(vec3(1.0), vec3(0.84, 0.91, 1.06), coolShadowStrength * (1.0 - sunVisibility) * (0.55 + stoneMask * 0.25 + leavesMask * 0.12));
     lit *= shadowTint;
     lit = mix(lit, lit * vec3(1.03, 1.01, 0.97), materialWarmth * warmLightStrength);
@@ -91,7 +102,7 @@ void main()
     float luminance = dot(lit, vec3(0.2126, 0.7152, 0.0722));
     vec3 contrasted = vec3(0.5) + (lit - vec3(0.5)) * (1.0 + contrastStrength * 0.18);
     lit = mix(lit, contrasted, clamp(contrastStrength, 0.0, 1.0));
-    lit = mix(vec3(luminance), lit, 1.04 + contrastStrength * 0.08);
+    lit = mix(vec3(luminance), lit, 1.04 + contrastStrength * 0.08 + materialSeparationStrength * 0.06);
 
     finalColor = vec4(lit, albedo.a);
 }

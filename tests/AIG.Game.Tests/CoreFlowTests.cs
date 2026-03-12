@@ -2641,8 +2641,8 @@ public sealed class CoreFlowTests
         Assert.True(MathF.Abs(highlight.Position.Y - 5.5f) < 0.001f);
         Assert.True(MathF.Abs(highlight.Position.Z - 9.01f) < 0.001f);
         Assert.Equal(255, highlight.Color.R);
-        Assert.Equal(236, highlight.Color.G);
-        Assert.Equal(170, highlight.Color.B);
+        Assert.Equal(242, highlight.Color.G);
+        Assert.Equal(182, highlight.Color.B);
     }
 
     [Fact(DisplayName = "Подсветка боковой грани по X использует тонкую толщину по ширине")]
@@ -2684,9 +2684,9 @@ public sealed class CoreFlowTests
         var fill = Assert.Single(platform.DrawnCubes);
         Assert.True(MathF.Abs(fill.Length - 0.035f) < 0.0001f);
         Assert.Equal(255, fill.Color.R);
-        Assert.Equal(226, fill.Color.G);
-        Assert.Equal(132, fill.Color.B);
-        Assert.Equal(2, platform.DrawnCubeWires.Count);
+        Assert.Equal(232, fill.Color.G);
+        Assert.Equal(146, fill.Color.B);
+        Assert.Equal(3, platform.DrawnCubeWires.Count);
     }
 
     [Fact(DisplayName = "TryGetHitFaceNormal отклоняет скачок previous более чем на 1 блок по любой оси")]

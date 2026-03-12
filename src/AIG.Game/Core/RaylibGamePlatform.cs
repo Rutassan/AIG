@@ -40,6 +40,7 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private int _worldAtlasCoolShadowStrengthLoc = -1;
     private int _worldAtlasContrastStrengthLoc = -1;
     private int _worldAtlasGlowStrengthLoc = -1;
+    private int _worldAtlasMaterialSeparationStrengthLoc = -1;
     private WorldMaterialPassSettings _worldMaterialPassSettings;
     private bool _hasWorldMaterialPassSettings;
     private Texture2D _worldAtlasTexture;
@@ -365,6 +366,7 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasCoolShadowStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "coolShadowStrength");
         _worldAtlasContrastStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "contrastStrength");
         _worldAtlasGlowStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "glowStrength");
+        _worldAtlasMaterialSeparationStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "materialSeparationStrength");
         _hasWorldAtlasShader = true;
         ApplyWorldMaterialPassSettings();
     }
@@ -460,6 +462,11 @@ public sealed class RaylibGamePlatform : IGamePlatform
         {
             Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasGlowStrengthLoc, _worldMaterialPassSettings.GlowStrength, ShaderUniformDataType.Float);
         }
+
+        if (_worldAtlasMaterialSeparationStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasMaterialSeparationStrengthLoc, _worldMaterialPassSettings.MaterialSeparationStrength, ShaderUniformDataType.Float);
+        }
     }
 
     private void ReleaseTexturedBlockResources()
@@ -495,6 +502,7 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasCoolShadowStrengthLoc = -1;
         _worldAtlasContrastStrengthLoc = -1;
         _worldAtlasGlowStrengthLoc = -1;
+        _worldAtlasMaterialSeparationStrengthLoc = -1;
 
         if (_hasWorldAtlasTexture)
         {
