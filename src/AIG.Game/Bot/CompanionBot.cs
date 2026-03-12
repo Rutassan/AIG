@@ -32,12 +32,32 @@ internal sealed class CompanionBot
     private const float PlayerRouteFrontDot = 0.8f;
     private const float GatherTargetBlockDuration = 1.75f;
     private const float BuildStepBlockDuration = 1.25f;
+    private const float MissingResourceRetryCooldown = 0.85f;
+    private const float MissingBuriedStoneRetryCooldown = 2.4f;
+    private const float MissingBuildWoodRetryCooldown = 1.6f;
+    private const int DefaultResourceSearchChunkRadius = 2;
+    private const int ExtendedResourceSearchChunkRadius = 4;
+    private const int BuriedResourceProbeDepth = 6;
+    private const int BlueprintQuarryProbeDepth = 18;
+    private const int BlueprintQuarryMargin = 8;
+    private const int BlueprintForestryProbeDepth = 12;
+    private const int BlueprintForestryMargin = 28;
+    private const int BlueprintForestrySearchChunkRadius = 8;
+    private const int ResourceCandidateListSoftLimit = 48;
     private const float RouteProgressThreshold = 0.015f;
     private const float RouteMicroMoveThreshold = 0.05f;
     private const int BuildReachableLookahead = 256;
     private const int BuildReachableRouteProbeLimit = 12;
     private const int ResourceCandidateShortlistLimit = 24;
+    private const int BuriedResourceCandidateShortlistLimit = 12;
     private const int ResourceRouteProbeLimit = 8;
+    private static readonly (int X, int Z)[] CardinalDirections =
+    [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1)
+    ];
 
     private readonly record struct ResourceTarget(int X, int Y, int Z, BotResourceType Resource);
     private readonly record struct NavigationGoal(
@@ -317,12 +337,15 @@ internal sealed class CompanionBot
 
         var stepIndex = _buildStepIndex;
         var step = blueprint.Steps[stepIndex];
-        if (IsBuildStepBlocked(step) && !TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+        if (IsBuildStepBlocked(step))
         {
-            Status = BotStatus.NoPath;
-            _noPathTimer = 0.35f;
-            StepIdle(world, deltaTime);
-            return;
+            if (!TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+            {
+                Status = BotStatus.NoPath;
+                _noPathTimer = 0.35f;
+                StepIdle(world, deltaTime);
+                return;
+            }
         }
 
         if (TryContinueBuildGatherBatch(world, blueprint, stepIndex, deltaTime))
@@ -350,6 +373,11 @@ internal sealed class CompanionBot
             BlockBuildStep(step, BuildStepBlockDuration);
             if (!TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
             {
+                if (TryCreateTemporaryBuildAccess(world, blueprint, step))
+                {
+                    return;
+                }
+
                 Trace($"build-no-path step={FormatBuildStep(step)}");
                 Status = BotStatus.NoPath;
                 _noPathTimer = 0.35f;
@@ -407,6 +435,11 @@ internal sealed class CompanionBot
         {
             Trace($"build-move-blocked step={FormatBuildStep(step)}");
             BlockBuildStep(step, BuildStepBlockDuration);
+            if (TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+            {
+                return;
+            }
+
             Status = BotStatus.NoPath;
             _noPathTimer = 0.35f;
         }
@@ -455,6 +488,243 @@ internal sealed class CompanionBot
         _buildGatherFromStepIndex = 0;
     }
 
+    private bool TryCreateTemporaryBuildAccess(WorldMap world, HouseBlueprint blueprint, HouseBuildStep step)
+    {
+        if (_actionCooldown > 0f
+            || !IsPoseClear(world, Position)
+            || !TryGetTemporarySupportMaterial(step, out var supportBlock)
+            || !BotNavigator.TryFindNearestStandCell(world, GetNavigationSettings(), Position, searchRadius: 2, out var standCell)
+            || !TrySelectTemporaryBuildSupport(world, blueprint, standCell, step, supportBlock, out var supportStep))
+        {
+            return false;
+        }
+
+        TryApplyTemporaryBuildSupport(world, supportStep);
+        ResetNavigationRoute();
+        _noPathTimer = 0f;
+        Status = BotStatus.Building;
+        Trace($"build-support step={FormatBuildStep(step)} support={FormatBuildStep(supportStep)}");
+        return true;
+    }
+
+    private bool TryGetTemporarySupportMaterial(HouseBuildStep step, out BlockType block)
+    {
+        ReadOnlySpan<BlockType> preferred =
+        [
+            BlockType.Dirt,
+            BlockType.Stone,
+            BlockType.Wood
+        ];
+
+        for (var i = 0; i < preferred.Length; i++)
+        {
+            if (GetStockpile(preferred[i]) > 0)
+            {
+                block = preferred[i];
+                return true;
+            }
+        }
+
+        if (step.ConsumesResource && step.Block != BlockType.Air && GetStockpile(step.Block) > 0)
+        {
+            block = step.Block;
+            return true;
+        }
+
+        block = default;
+        return false;
+    }
+
+    private bool TrySelectTemporaryBuildSupport(
+        WorldMap world,
+        HouseBlueprint? blueprint,
+        BotNavigationCell currentCell,
+        HouseBuildStep targetStep,
+        BlockType supportBlock,
+        out HouseBuildStep supportStep)
+    {
+        supportStep = default;
+
+        var targetCenter = new Vector3(targetStep.X + 0.5f, targetStep.Y + 0.5f, targetStep.Z + 0.5f);
+        var currentHorizontal = new Vector2(targetCenter.X - Position.X, targetCenter.Z - Position.Z).Length();
+        var currentVerticalGap = MathF.Abs((targetStep.Y + 1) - currentCell.FeetY);
+        var bestScore = float.MaxValue;
+        var found = false;
+
+        foreach (var direction in GetPreferredSupportDirections(currentCell, targetStep))
+        {
+            var nextX = currentCell.X + direction.X;
+            var nextZ = currentCell.Z + direction.Z;
+            if (nextX < 0 || nextZ < 0 || nextX >= world.Width || nextZ >= world.Depth)
+            {
+                continue;
+            }
+
+            foreach (var supportTopFeet in GetSupportTopFeetCandidates(currentCell.FeetY, targetStep.Y + 1))
+            {
+                var candidate = new HouseBuildStep(nextX, supportTopFeet - 1, nextZ, supportBlock);
+                if (!IsValidTemporarySupportCandidate(world, blueprint, targetStep, candidate))
+                {
+                    continue;
+                }
+
+                var supportPose = new Vector3(candidate.X + 0.5f, candidate.Y + 1.02f, candidate.Z + 0.5f);
+                var candidateHorizontal = new Vector2(targetCenter.X - supportPose.X, targetCenter.Z - supportPose.Z).Length();
+                var candidateVerticalGap = MathF.Abs((targetStep.Y + 1) - supportTopFeet);
+                if (candidateHorizontal >= currentHorizontal - 0.05f && candidateVerticalGap >= currentVerticalGap)
+                {
+                    continue;
+                }
+
+                var score = Vector3.DistanceSquared(supportPose, targetCenter)
+                    + MathF.Abs(candidateVerticalGap) * 3f
+                    + (Math.Abs(direction.X) == 1 && Math.Sign(targetStep.X - currentCell.X) != direction.X ? 4f : 0f)
+                    + (Math.Abs(direction.Z) == 1 && Math.Sign(targetStep.Z - currentCell.Z) != direction.Z ? 4f : 0f);
+                if (score >= bestScore)
+                {
+                    continue;
+                }
+
+                bestScore = score;
+                supportStep = candidate;
+                found = true;
+            }
+        }
+
+        return found;
+    }
+
+    private IEnumerable<(int X, int Z)> GetPreferredSupportDirections(BotNavigationCell currentCell, HouseBuildStep targetStep)
+    {
+        var deltaX = targetStep.X - currentCell.X;
+        var deltaZ = targetStep.Z - currentCell.Z;
+        var primary = Math.Abs(deltaX) >= Math.Abs(deltaZ)
+            ? ((Math.Sign(deltaX), 0), (0, Math.Sign(deltaZ)))
+            : ((0, Math.Sign(deltaZ)), (Math.Sign(deltaX), 0));
+        var yielded = new HashSet<(int X, int Z)>();
+
+        if (primary.Item1 != (0, 0) && yielded.Add(primary.Item1))
+        {
+            yield return primary.Item1;
+        }
+
+        if (primary.Item2 != (0, 0) && yielded.Add(primary.Item2))
+        {
+            yield return primary.Item2;
+        }
+
+        for (var i = 0; i < CardinalDirections.Length; i++)
+        {
+            if (yielded.Add(CardinalDirections[i]))
+            {
+                yield return CardinalDirections[i];
+            }
+        }
+    }
+
+    private IEnumerable<int> GetSupportTopFeetCandidates(int currentFeet, int targetFeet)
+    {
+        var stepDelta = Math.Clamp(targetFeet - currentFeet, -1, 1);
+        yield return currentFeet + stepDelta;
+
+        if (stepDelta != 0)
+        {
+            yield return currentFeet;
+        }
+
+        yield return currentFeet - 1;
+        yield return currentFeet + 1;
+    }
+
+    private bool IsValidTemporarySupportCandidate(
+        WorldMap world,
+        HouseBlueprint? blueprint,
+        HouseBuildStep targetStep,
+        HouseBuildStep candidate)
+    {
+        if (candidate.X < 0
+            || candidate.Y < 0
+            || candidate.Z < 0
+            || candidate.X >= world.Width
+            || candidate.Y >= world.Height
+            || candidate.Z >= world.Depth
+            || world.GetBlock(candidate.X, candidate.Y, candidate.Z) != BlockType.Air
+            || (candidate.X == targetStep.X && candidate.Y == targetStep.Y && candidate.Z == targetStep.Z)
+            || !CanActOnBlock(candidate.X, candidate.Y, candidate.Z))
+        {
+            return false;
+        }
+
+        if (blueprint is not null
+            && blueprint.IsInsideInterior(candidate.X, candidate.Z)
+            && candidate.Y >= blueprint.FloorY)
+        {
+            return false;
+        }
+
+        if (DoesActorOverlapBlock(Position, Actor.ColliderHalfWidth, Actor.ColliderHeight, candidate.X, candidate.Y, candidate.Z))
+        {
+            return false;
+        }
+
+        if (_hasPlayerPosition && DoesActorOverlapBlock(_lastPlayerPosition, Actor.ColliderHalfWidth, Actor.ColliderHeight, candidate.X, candidate.Y, candidate.Z))
+        {
+            return false;
+        }
+
+        return CanStandOnTemporarySupport(world, candidate);
+    }
+
+    private bool CanStandOnTemporarySupport(WorldMap world, HouseBuildStep supportStep)
+    {
+        var pose = new Vector3(supportStep.X + 0.5f, supportStep.Y + 1.02f, supportStep.Z + 0.5f);
+        if (pose.X - Actor.ColliderHalfWidth < 0f
+            || pose.Z - Actor.ColliderHalfWidth < 0f
+            || pose.X + Actor.ColliderHalfWidth >= world.Width
+            || pose.Z + Actor.ColliderHalfWidth >= world.Depth
+            || pose.Y < 0f
+            || pose.Y + Actor.ColliderHeight >= world.Height)
+        {
+            return false;
+        }
+
+        var minX = (int)MathF.Floor(pose.X - Actor.ColliderHalfWidth);
+        var maxX = (int)MathF.Floor(pose.X + Actor.ColliderHalfWidth);
+        var minY = (int)MathF.Floor(pose.Y);
+        var maxY = (int)MathF.Floor(pose.Y + Actor.ColliderHeight);
+        var minZ = (int)MathF.Floor(pose.Z - Actor.ColliderHalfWidth);
+        var maxZ = (int)MathF.Floor(pose.Z + Actor.ColliderHalfWidth);
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var z = minZ; z <= maxZ; z++)
+                {
+                    if (world.IsSolid(x, y, z))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryApplyTemporaryBuildSupport(WorldMap world, HouseBuildStep step)
+    {
+        if (!TryConsumeStockpile(step.Block, 1))
+        {
+            return false;
+        }
+
+        world.SetBlock(step.X, step.Y, step.Z, step.Block);
+        _actionCooldown = 0.05f;
+        Trace($"build-support-place step={FormatBuildStep(step)} stock={GetStockpile(step.Block)}");
+        return true;
+    }
+
     private bool TryGetBuildResourceNeed(
         HouseBlueprint blueprint,
         int stepIndex,
@@ -486,11 +756,19 @@ internal sealed class CompanionBot
             return true;
         }
 
-        if (!TryAcquireResourceTarget(world, resource, out var target))
+        if (!TryAcquireResourceTarget(world, resource, out var target, out var searchAttempted))
         {
-            Trace($"gather-target-missing resource={resource} needed={amountNeeded}");
-            Status = BotStatus.NoPath;
-            _noPathTimer = MathF.Max(_noPathTimer, 0.15f);
+            if (searchAttempted)
+            {
+                Trace($"gather-target-missing resource={resource} needed={amountNeeded}");
+                Status = BotStatus.NoPath;
+                _noPathTimer = MathF.Max(_noPathTimer, 0.35f);
+            }
+            else
+            {
+                Status = BotStatus.NoPath;
+            }
+
             StepIdle(world, deltaTime);
             return false;
         }
@@ -504,6 +782,12 @@ internal sealed class CompanionBot
         var reservedBlueprint = _activeCommand is BotCommand { Kind: BotCommandKind.BuildHouse, Blueprint: not null } active
             ? active.Blueprint
             : null;
+        if (!IsResourceCurrentlyExposed(world, target.X, target.Y, target.Z)
+            && TryAdvanceBuriedResourceAccess(world, target, reservedBlueprint, deltaTime, countForActiveCommand))
+        {
+            return false;
+        }
+
         if (!TryEnsureActionRoute(world, NavigationPurpose.GatherAction, target.X, target.Y, target.Z, searchRadius: 6, reservedBlueprint))
         {
             BlockResourceTarget(target, GatherTargetBlockDuration);
@@ -540,8 +824,12 @@ internal sealed class CompanionBot
         return false;
     }
 
-    private bool TryAcquireResourceTarget(WorldMap world, BotResourceType resource, out ResourceTarget target)
+    private bool TryAcquireResourceTarget(WorldMap world, BotResourceType resource, out ResourceTarget target, out bool searchAttempted)
     {
+        searchAttempted = false;
+        var reservedBlueprint = _activeCommand is BotCommand { Kind: BotCommandKind.BuildHouse, Blueprint: not null } active
+            ? active.Blueprint
+            : null;
         if (_currentTarget is ResourceTarget existing
             && existing.Resource == resource
             && !IsResourceTargetBlocked(existing)
@@ -557,6 +845,7 @@ internal sealed class CompanionBot
             return false;
         }
 
+        searchAttempted = true;
         if (TryFindNearestResource(world, resource, out target))
         {
             _currentTarget = target;
@@ -566,7 +855,7 @@ internal sealed class CompanionBot
         }
 
         _currentTarget = null;
-        _retargetCooldown = 0.25f;
+        _retargetCooldown = GetMissingResourceRetryCooldown(resource, reservedBlueprint);
         Trace($"target-search-empty resource={resource}");
         return false;
     }
@@ -584,11 +873,111 @@ internal sealed class CompanionBot
 
         var centerX = Math.Clamp((int)MathF.Floor(Position.X), 0, Math.Max(0, world.Width - 1));
         var centerZ = Math.Clamp((int)MathF.Floor(Position.Z), 0, Math.Max(0, world.Depth - 1));
-        var chunkRadius = 2;
         var centerChunkX = centerX / Math.Max(1, world.ChunkSize);
         var centerChunkZ = centerZ / Math.Max(1, world.ChunkSize);
         var candidates = new List<ScoredResourceCandidate>(64);
 
+        if (resource == BotResourceType.Stone && reservedBlueprint is not null)
+        {
+            CollectBlueprintQuarryCandidates(world, reservedBlueprint, candidates);
+            if (TrySelectBuriedResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+
+            candidates.Clear();
+        }
+
+        if (resource == BotResourceType.Wood && reservedBlueprint is not null)
+        {
+            CollectBlueprintForestryCandidates(world, reservedBlueprint, candidates);
+            if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+
+            candidates.Clear();
+
+            var blueprintChunkX = Math.Clamp((int)MathF.Floor(reservedBlueprint.Center.X), 0, Math.Max(0, world.Width - 1)) / Math.Max(1, world.ChunkSize);
+            var blueprintChunkZ = Math.Clamp((int)MathF.Floor(reservedBlueprint.Center.Z), 0, Math.Max(0, world.Depth - 1)) / Math.Max(1, world.ChunkSize);
+            CollectLoadedChunkResourceCandidates(
+                world,
+                resource,
+                reservedBlueprint,
+                blueprintChunkX,
+                blueprintChunkZ,
+                BlueprintForestrySearchChunkRadius,
+                candidates);
+            if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+
+            candidates.Clear();
+        }
+
+        CollectSurfaceResourceCandidates(world, resource, reservedBlueprint, centerChunkX, centerChunkZ, DefaultResourceSearchChunkRadius, candidates);
+        if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
+        {
+            return true;
+        }
+
+        if (ExtendedResourceSearchChunkRadius > DefaultResourceSearchChunkRadius)
+        {
+            CollectSurfaceResourceCandidates(world, resource, reservedBlueprint, centerChunkX, centerChunkZ, ExtendedResourceSearchChunkRadius, candidates);
+            if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+        }
+
+        if (resource != BotResourceType.Stone || reservedBlueprint is null)
+        {
+            candidates.Clear();
+            CollectLoadedChunkResourceCandidates(world, resource, reservedBlueprint, centerChunkX, centerChunkZ, ExtendedResourceSearchChunkRadius, candidates);
+            if (TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+        }
+
+        if (resource == BotResourceType.Stone)
+        {
+            candidates.Clear();
+            CollectBuriedResourceCandidates(world, resource, reservedBlueprint, centerChunkX, centerChunkZ, ExtendedResourceSearchChunkRadius, candidates);
+            if (TrySelectBuriedResourceCandidate(world, reservedBlueprint, candidates, out target))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private float GetMissingResourceRetryCooldown(BotResourceType resource, HouseBlueprint? reservedBlueprint)
+    {
+        if (reservedBlueprint is null)
+        {
+            return MissingResourceRetryCooldown;
+        }
+
+        return resource switch
+        {
+            BotResourceType.Stone => MissingBuriedStoneRetryCooldown,
+            BotResourceType.Wood => MissingBuildWoodRetryCooldown,
+            _ => MissingResourceRetryCooldown
+        };
+    }
+
+    private void CollectSurfaceResourceCandidates(
+        WorldMap world,
+        BotResourceType resource,
+        HouseBlueprint? reservedBlueprint,
+        int centerChunkX,
+        int centerChunkZ,
+        int chunkRadius,
+        List<ScoredResourceCandidate> candidates)
+    {
         for (var chunkX = Math.Max(0, centerChunkX - chunkRadius); chunkX <= Math.Min(world.ChunkCountX - 1, centerChunkX + chunkRadius); chunkX++)
         {
             for (var chunkZ = Math.Max(0, centerChunkZ - chunkRadius); chunkZ <= Math.Min(world.ChunkCountZ - 1, centerChunkZ + chunkRadius); chunkZ++)
@@ -622,12 +1011,380 @@ internal sealed class CompanionBot
                         continue;
                     }
 
-                    candidates.Add(new ScoredResourceCandidate(candidate, ScoreSurfaceResourceCandidate(surface)));
+                    AddScoredResourceCandidate(candidates, candidate, ScoreSurfaceResourceCandidate(surface));
                 }
             }
         }
+    }
 
-        return TrySelectReachableResourceCandidate(world, reservedBlueprint, candidates, out target);
+    private void CollectLoadedChunkResourceCandidates(
+        WorldMap world,
+        BotResourceType resource,
+        HouseBlueprint? reservedBlueprint,
+        int centerChunkX,
+        int centerChunkZ,
+        int chunkRadius,
+        List<ScoredResourceCandidate> candidates)
+    {
+        for (var chunkX = Math.Max(0, centerChunkX - chunkRadius); chunkX <= Math.Min(world.ChunkCountX - 1, centerChunkX + chunkRadius); chunkX++)
+        {
+            for (var chunkZ = Math.Max(0, centerChunkZ - chunkRadius); chunkZ <= Math.Min(world.ChunkCountZ - 1, centerChunkZ + chunkRadius); chunkZ++)
+            {
+                if (!world.IsChunkLoaded(chunkX, chunkZ))
+                {
+                    continue;
+                }
+
+                var startX = chunkX * world.ChunkSize;
+                var endX = Math.Min(world.Width, startX + world.ChunkSize);
+                var startZ = chunkZ * world.ChunkSize;
+                var endZ = Math.Min(world.Depth, startZ + world.ChunkSize);
+
+                for (var x = startX; x < endX; x++)
+                {
+                    for (var z = startZ; z < endZ; z++)
+                    {
+                        for (var y = 0; y < world.Height; y++)
+                        {
+                            var block = world.GetBlock(x, y, z);
+                            if (!resource.Matches(block))
+                            {
+                                continue;
+                            }
+
+                            var candidate = new ResourceTarget(x, y, z, resource);
+                            if (IsResourceTargetBlocked(candidate))
+                            {
+                                continue;
+                            }
+
+                            if (reservedBlueprint?.IsPlannedSolidBlock(x, y, z, block) == true)
+                            {
+                                continue;
+                            }
+
+                            if (IsProtectedResourceTarget(x, y, z, reservedBlueprint))
+                            {
+                                continue;
+                            }
+
+                            if (!IsResourceCurrentlyExposed(world, x, y, z))
+                            {
+                                continue;
+                            }
+
+                            AddScoredResourceCandidate(candidates, candidate, ScoreLoadedResourceCandidate(world, x, y, z));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void CollectBuriedResourceCandidates(
+        WorldMap world,
+        BotResourceType resource,
+        HouseBlueprint? reservedBlueprint,
+        int centerChunkX,
+        int centerChunkZ,
+        int chunkRadius,
+        List<ScoredResourceCandidate> candidates)
+    {
+        for (var chunkX = Math.Max(0, centerChunkX - chunkRadius); chunkX <= Math.Min(world.ChunkCountX - 1, centerChunkX + chunkRadius); chunkX++)
+        {
+            for (var chunkZ = Math.Max(0, centerChunkZ - chunkRadius); chunkZ <= Math.Min(world.ChunkCountZ - 1, centerChunkZ + chunkRadius); chunkZ++)
+            {
+                if (!world.IsChunkLoaded(chunkX, chunkZ))
+                {
+                    continue;
+                }
+
+                var startX = chunkX * world.ChunkSize;
+                var endX = Math.Min(world.Width, startX + world.ChunkSize);
+                var startZ = chunkZ * world.ChunkSize;
+                var endZ = Math.Min(world.Depth, startZ + world.ChunkSize);
+
+                for (var x = startX; x < endX; x++)
+                {
+                    for (var z = startZ; z < endZ; z++)
+                    {
+                        if (!TryGetLoadedTopSolidY(world, x, z, out var topY))
+                        {
+                            continue;
+                        }
+
+                        var minY = Math.Max(0, topY - BuriedResourceProbeDepth);
+                        for (var y = topY; y >= minY; y--)
+                        {
+                            var block = world.GetBlock(x, y, z);
+                            if (!resource.Matches(block))
+                            {
+                                continue;
+                            }
+
+                            var candidate = new ResourceTarget(x, y, z, resource);
+                            if (IsResourceTargetBlocked(candidate)
+                                || reservedBlueprint?.IsPlannedSolidBlock(x, y, z, block) == true
+                                || IsProtectedResourceTarget(x, y, z, reservedBlueprint)
+                                || IsResourceCurrentlyExposed(world, x, y, z))
+                            {
+                                continue;
+                            }
+
+                            AddScoredResourceCandidate(candidates, candidate, ScoreBuriedResourceCandidate(x, y, z, topY));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void CollectBlueprintQuarryCandidates(
+        WorldMap world,
+        HouseBlueprint blueprint,
+        List<ScoredResourceCandidate> candidates)
+    {
+        var minX = Math.Max(0, blueprint.OriginX - BlueprintQuarryMargin);
+        var maxX = Math.Min(world.Width - 1, blueprint.OriginX + 6 + BlueprintQuarryMargin);
+        var minZ = Math.Max(0, blueprint.OriginZ - BlueprintQuarryMargin);
+        var maxZ = Math.Min(world.Depth - 1, blueprint.OriginZ + 6 + BlueprintQuarryMargin);
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var z = minZ; z <= maxZ; z++)
+            {
+                var chunkX = x / Math.Max(1, world.ChunkSize);
+                var chunkZ = z / Math.Max(1, world.ChunkSize);
+                if (!world.IsChunkLoaded(chunkX, chunkZ))
+                {
+                    continue;
+                }
+
+                if (!TryGetLoadedTopSolidY(world, x, z, out var topY))
+                {
+                    continue;
+                }
+
+                var minY = Math.Max(0, topY - BlueprintQuarryProbeDepth);
+                for (var y = topY; y >= minY; y--)
+                {
+                    if (world.GetBlock(x, y, z) != BlockType.Stone)
+                    {
+                        continue;
+                    }
+
+                    var candidate = new ResourceTarget(x, y, z, BotResourceType.Stone);
+                    var shouldSkipCandidate =
+                        IsResourceTargetBlocked(candidate)
+                        | blueprint.IsPlannedSolidBlock(x, y, z, BlockType.Stone)
+                        | IsProtectedResourceTarget(x, y, z, blueprint)
+                        | IsResourceCurrentlyExposed(world, x, y, z);
+                    if (shouldSkipCandidate)
+                    {
+                        continue;
+                    }
+
+                    AddScoredResourceCandidate(candidates, candidate, ScoreBlueprintQuarryCandidate(blueprint, x, y, z, topY));
+                    break;
+                }
+            }
+        }
+    }
+
+    private void CollectBlueprintForestryCandidates(
+        WorldMap world,
+        HouseBlueprint blueprint,
+        List<ScoredResourceCandidate> candidates)
+    {
+        var minX = Math.Max(0, blueprint.OriginX - BlueprintForestryMargin);
+        var maxX = Math.Min(world.Width - 1, blueprint.OriginX + 6 + BlueprintForestryMargin);
+        var minZ = Math.Max(0, blueprint.OriginZ - BlueprintForestryMargin);
+        var maxZ = Math.Min(world.Depth - 1, blueprint.OriginZ + 6 + BlueprintForestryMargin);
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var z = minZ; z <= maxZ; z++)
+            {
+                var chunkX = x / Math.Max(1, world.ChunkSize);
+                var chunkZ = z / Math.Max(1, world.ChunkSize);
+                if (!world.IsChunkLoaded(chunkX, chunkZ))
+                {
+                    continue;
+                }
+
+                if (!TryGetLoadedTopSolidY(world, x, z, out var topY))
+                {
+                    continue;
+                }
+
+                var minY = Math.Max(0, topY - BlueprintForestryProbeDepth);
+                for (var y = topY; y >= minY; y--)
+                {
+                    if (world.GetBlock(x, y, z) != BlockType.Wood)
+                    {
+                        continue;
+                    }
+
+                    var candidate = new ResourceTarget(x, y, z, BotResourceType.Wood);
+                    var shouldSkipCandidate =
+                        IsResourceTargetBlocked(candidate)
+                        | blueprint.IsPlannedSolidBlock(x, y, z, BlockType.Wood)
+                        | IsProtectedResourceTarget(x, y, z, blueprint)
+                        | !IsResourceCurrentlyExposed(world, x, y, z);
+                    if (shouldSkipCandidate)
+                    {
+                        continue;
+                    }
+
+                    AddScoredResourceCandidate(candidates, candidate, ScoreBlueprintForestryCandidate(world, blueprint, x, y, z, topY));
+                    break;
+                }
+            }
+        }
+    }
+
+    private void AddScoredResourceCandidate(List<ScoredResourceCandidate> candidates, ResourceTarget target, float score)
+    {
+        candidates.Add(new ScoredResourceCandidate(target, score));
+        if (candidates.Count <= ResourceCandidateListSoftLimit)
+        {
+            return;
+        }
+
+        var worstIndex = 0;
+        var worstScore = candidates[0].Score;
+        for (var i = 1; i < candidates.Count; i++)
+        {
+            if (candidates[i].Score <= worstScore)
+            {
+                continue;
+            }
+
+            worstScore = candidates[i].Score;
+            worstIndex = i;
+        }
+
+        candidates.RemoveAt(worstIndex);
+    }
+
+    private bool IsResourceCurrentlyExposed(WorldMap world, int x, int y, int z)
+    {
+        return !IsSolidNoLoad(world, x + 1, y, z)
+            || !IsSolidNoLoad(world, x - 1, y, z)
+            || !IsSolidNoLoad(world, x, y + 1, z)
+            || !IsSolidNoLoad(world, x, y - 1, z)
+            || !IsSolidNoLoad(world, x, y, z + 1)
+            || !IsSolidNoLoad(world, x, y, z - 1);
+    }
+
+    private bool IsSolidNoLoad(WorldMap world, int x, int y, int z)
+    {
+        return world.TryGetBlockNoLoad(x, y, z, out var block) && block != BlockType.Air;
+    }
+
+    private bool IsAirNoLoad(WorldMap world, int x, int y, int z)
+    {
+        if (!world.TryGetBlockNoLoad(x, y, z, out var block))
+        {
+            return false;
+        }
+
+        return block == BlockType.Air;
+    }
+
+    private int CountAirExposureNoLoad(WorldMap world, int x, int y, int z)
+    {
+        var exposure = 0;
+        if (IsAirNoLoad(world, x + 1, y, z)) exposure++;
+        if (IsAirNoLoad(world, x - 1, y, z)) exposure++;
+        if (IsAirNoLoad(world, x, y, z + 1)) exposure++;
+        if (IsAirNoLoad(world, x, y, z - 1)) exposure++;
+        if (IsAirNoLoad(world, x, y + 1, z)) exposure++;
+        return exposure;
+    }
+
+    private bool TryGetLoadedTopSolidY(WorldMap world, int x, int z, out int topY)
+    {
+        topY = -1;
+        for (var y = world.Height - 1; y >= 0; y--)
+        {
+            if (world.GetBlock(x, y, z) == BlockType.Air)
+            {
+                continue;
+            }
+
+            topY = y;
+            return true;
+        }
+
+        return false;
+    }
+
+    private float ScoreLoadedResourceCandidate(WorldMap world, int x, int y, int z)
+    {
+        var dx = x + 0.5f - Position.X;
+        var dz = z + 0.5f - Position.Z;
+        var dy = y + 0.5f - Position.Y;
+        var horizontal = dx * dx + dz * dz;
+        var score = horizontal + MathF.Abs(dy) * 3.5f;
+
+        if (y + 1 < Position.Y - 4f)
+        {
+            var depth = Position.Y - (y + 1);
+            score += depth * depth * 0.4f;
+        }
+
+        if (!IsAirNoLoad(world, x, y + 1, z))
+        {
+            score += 2.5f;
+        }
+
+        var exposure = CountAirExposureNoLoad(world, x, y, z);
+        score -= exposure * 0.4f;
+        return score;
+    }
+
+    private float ScoreBuriedResourceCandidate(int x, int y, int z, int topY)
+    {
+        var dx = x + 0.5f - Position.X;
+        var dz = z + 0.5f - Position.Z;
+        var dy = y + 0.5f - Position.Y;
+        var horizontal = dx * dx + dz * dz;
+        var coverDepth = Math.Max(0, topY - y);
+        var score = horizontal + MathF.Abs(dy) * 3.5f;
+        score += coverDepth * coverDepth * 0.85f;
+        score += coverDepth * 3.5f;
+        return score;
+    }
+
+    private float ScoreBlueprintQuarryCandidate(HouseBlueprint blueprint, int x, int y, int z, int topY)
+    {
+        var score = ScoreBuriedResourceCandidate(x, y, z, topY);
+        var dx = x + 0.5f - blueprint.Center.X;
+        var dz = z + 0.5f - blueprint.Center.Z;
+        score += (dx * dx + dz * dz) * 0.8f;
+        if (y < blueprint.FloorY - 2)
+        {
+            score += (blueprint.FloorY - 2 - y) * 2.5f;
+        }
+
+        return score;
+    }
+
+    private float ScoreBlueprintForestryCandidate(WorldMap world, HouseBlueprint blueprint, int x, int y, int z, int topY)
+    {
+        var dx = x + 0.5f - Position.X;
+        var dz = z + 0.5f - Position.Z;
+        var dy = y + 0.5f - Position.Y;
+        var score = dx * dx + dz * dz + MathF.Abs(dy) * 2.5f;
+
+        var buildDx = x + 0.5f - blueprint.Center.X;
+        var buildDz = z + 0.5f - blueprint.Center.Z;
+        score += (buildDx * buildDx + buildDz * buildDz) * 0.35f;
+        score += Math.Max(0, topY - y) * 0.6f;
+        score -= CountAirExposureNoLoad(world, x, y, z) * 0.45f;
+        return score;
     }
 
     private bool TryFindFocusedResourceTarget(WorldMap world, BotResourceType resource, HouseBlueprint? reservedBlueprint, out ResourceTarget target)
@@ -731,6 +1488,44 @@ internal sealed class CompanionBot
         return found;
     }
 
+    private bool TrySelectBuriedResourceCandidate(
+        WorldMap world,
+        HouseBlueprint? reservedBlueprint,
+        List<ScoredResourceCandidate> candidates,
+        out ResourceTarget target)
+    {
+        target = default;
+        if (candidates.Count == 0)
+        {
+            return false;
+        }
+
+        var bestScore = float.MaxValue;
+        var found = false;
+        var settings = GetNavigationSettings();
+
+        foreach (var candidate in candidates
+                     .OrderBy(entry => entry.Score)
+                     .Take(BuriedResourceCandidateShortlistLimit))
+        {
+            if (!TryScoreBuriedResourceCandidate(world, settings, candidate.Target, reservedBlueprint, candidate.Score, out var routeScore))
+            {
+                continue;
+            }
+
+            if (routeScore >= bestScore)
+            {
+                continue;
+            }
+
+            bestScore = routeScore;
+            target = candidate.Target;
+            found = true;
+        }
+
+        return found;
+    }
+
     private bool TryScoreReachableResourceCandidate(
         WorldMap world,
         BotNavigationSettings settings,
@@ -769,6 +1564,39 @@ internal sealed class CompanionBot
         {
             routeScore = baseScore + waypoints.Length;
             return true;
+        }
+
+        return false;
+    }
+
+    private bool TryScoreBuriedResourceCandidate(
+        WorldMap world,
+        BotNavigationSettings settings,
+        ResourceTarget target,
+        HouseBlueprint? reservedBlueprint,
+        float baseScore,
+        out float routeScore)
+    {
+        routeScore = float.MaxValue;
+        if (!TryFindBuriedResourceAccessBlock(world, target, out var digX, out var digY, out var digZ))
+        {
+            return false;
+        }
+
+        var accessDepth = Math.Max(0, digY - target.Y);
+        if (CanActOnBlock(digX, digY, digZ))
+        {
+            routeScore = baseScore + accessDepth * 1.25f;
+            return true;
+        }
+
+        if (TryFindActionPoseNear(world, digX, digY, digZ, searchRadius: 6, reservedBlueprint, out var localPose, out var localScore))
+        {
+            if (BotNavigator.TryBuildStandRoute(world, settings, Position, localPose, goalRadius: 0, out var stageWaypoints))
+            {
+                routeScore = baseScore + localScore + stageWaypoints.Length + accessDepth * 1.25f;
+                return true;
+            }
         }
 
         return false;
@@ -928,6 +1756,145 @@ internal sealed class CompanionBot
         {
             _blockedBuildSteps.Remove(expiredSteps[i]);
         }
+    }
+
+    private bool TryAdvanceBuriedResourceAccess(
+        WorldMap world,
+        ResourceTarget target,
+        HouseBlueprint? reservedBlueprint,
+        float deltaTime,
+        bool countForActiveCommand)
+    {
+        if (!TryFindBuriedResourceAccessBlock(world, target, out var digX, out var digY, out var digZ))
+        {
+            return false;
+        }
+
+        if (CanActOnBlock(digX, digY, digZ))
+        {
+            return TryHarvestExcavationBlock(world, target, digX, digY, digZ, countForActiveCommand, reservedBlueprint);
+        }
+
+        if (!TryEnsureActionRoute(world, NavigationPurpose.GatherAction, digX, digY, digZ, searchRadius: 6, reservedBlueprint))
+        {
+            return TryCreateTemporaryGatherAccess(world, digX, digY, digZ, target.Resource.ToBlockType());
+        }
+
+        var excavationMove = MoveAlongNavigationRoute(world, deltaTime, ActionArrivalDistance);
+        if (excavationMove != MoveResult.Moving)
+        {
+            if (excavationMove == MoveResult.Arrived && !CanActOnBlock(digX, digY, digZ))
+            {
+                ResetNavigationRoute();
+            }
+
+            return TryCreateTemporaryGatherAccess(world, digX, digY, digZ, target.Resource.ToBlockType());
+        }
+
+        Status = BotStatus.Gathering;
+        return true;
+    }
+
+    private bool TryFindBuriedResourceAccessBlock(WorldMap world, ResourceTarget target, out int digX, out int digY, out int digZ)
+    {
+        digX = target.X;
+        digY = target.Y;
+        digZ = target.Z;
+        if (!IsResourceTargetValid(world, target))
+        {
+            return false;
+        }
+
+        if (IsResourceCurrentlyExposed(world, target.X, target.Y, target.Z))
+        {
+            return false;
+        }
+
+        var maxProbeDepth = GetBuriedResourceProbeDepth(target);
+        var coverY = -1;
+        for (var y = target.Y + 1; y < world.Height; y++)
+        {
+            var block = world.GetBlock(target.X, y, target.Z);
+            if (block == BlockType.Air)
+            {
+                digY = coverY;
+                return coverY >= 0;
+            }
+
+            if (y - target.Y > maxProbeDepth)
+            {
+                return false;
+            }
+
+            coverY = y;
+        }
+
+        digY = coverY;
+        return coverY >= 0;
+    }
+
+    private int GetBuriedResourceProbeDepth(ResourceTarget target)
+    {
+        return target.Resource == BotResourceType.Stone
+            && _activeCommand is BotCommand { Kind: BotCommandKind.BuildHouse, Blueprint: not null }
+            ? BlueprintQuarryProbeDepth
+            : BuriedResourceProbeDepth;
+    }
+
+    private bool TryCreateTemporaryGatherAccess(WorldMap world, int targetX, int targetY, int targetZ, BlockType preferredBlock)
+    {
+        var targetStep = new HouseBuildStep(targetX, targetY, targetZ, preferredBlock);
+        if (_actionCooldown > 0f
+            || !IsPoseClear(world, Position)
+            || !TryGetTemporarySupportMaterial(targetStep, out var supportBlock)
+            || !BotNavigator.TryFindNearestStandCell(world, GetNavigationSettings(), Position, searchRadius: 2, out var standCell)
+            || !TrySelectTemporaryBuildSupport(world, blueprint: null, standCell, targetStep, supportBlock, out var supportStep))
+        {
+            return false;
+        }
+
+        _stockpile[supportStep.Block] = GetStockpile(supportStep.Block) - 1;
+        world.SetBlock(supportStep.X, supportStep.Y, supportStep.Z, supportStep.Block);
+        _actionCooldown = 0.05f;
+        ResetNavigationRoute();
+        _noPathTimer = 0f;
+        Status = BotStatus.Gathering;
+        Trace($"gather-support-place step={FormatBuildStep(supportStep)} stock={GetStockpile(supportStep.Block)}");
+        Trace($"gather-support target={FormatCell(targetX, targetY, targetZ)} support={FormatBuildStep(supportStep)}");
+        return true;
+    }
+
+    private bool TryHarvestExcavationBlock(
+        WorldMap world,
+        ResourceTarget target,
+        int x,
+        int y,
+        int z,
+        bool countForActiveCommand,
+        HouseBlueprint? reservedBlueprint)
+    {
+        if (_actionCooldown > 0f || IsProtectedResourceTarget(x, y, z, reservedBlueprint))
+        {
+            return false;
+        }
+
+        var currentBlock = world.GetBlock(x, y, z);
+        if (currentBlock == BlockType.Air)
+        {
+            return false;
+        }
+
+        world.SetBlock(x, y, z, BlockType.Air);
+        AddStockpile(currentBlock, 1);
+        if (countForActiveCommand && target.Resource.Matches(currentBlock))
+        {
+            _activeGatheredAmount++;
+        }
+
+        _actionCooldown = 0.08f;
+        _retargetCooldown = 0f;
+        Trace($"quarry-harvest resource={target.Resource} dig={FormatCell(x, y, z)} actual={currentBlock} stock={GetStockpile(currentBlock)}");
+        return true;
     }
 
     private bool TryHarvestTarget(WorldMap world, ResourceTarget target, bool countForActiveCommand)

@@ -34,6 +34,9 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private int _worldAtlasFogColorLoc = -1;
     private int _worldAtlasFogRangeLoc = -1;
     private int _worldAtlasStrengthLoc = -1;
+    private int _worldAtlasShadowStrengthLoc = -1;
+    private int _worldAtlasAtmosphereStrengthLoc = -1;
+    private int _worldAtlasWarmLightStrengthLoc = -1;
     private WorldMaterialPassSettings _worldMaterialPassSettings;
     private bool _hasWorldMaterialPassSettings;
     private Texture2D _worldAtlasTexture;
@@ -353,6 +356,9 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasFogColorLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogColor");
         _worldAtlasFogRangeLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogRange");
         _worldAtlasStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shaderStrength");
+        _worldAtlasShadowStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowStrength");
+        _worldAtlasAtmosphereStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "atmosphereStrength");
+        _worldAtlasWarmLightStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "warmLightStrength");
         _hasWorldAtlasShader = true;
         ApplyWorldMaterialPassSettings();
     }
@@ -417,6 +423,21 @@ public sealed class RaylibGamePlatform : IGamePlatform
         if (_worldAtlasStrengthLoc >= 0)
         {
             Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasStrengthLoc, _worldMaterialPassSettings.Strength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowStrengthLoc, _worldMaterialPassSettings.ShadowStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasAtmosphereStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasAtmosphereStrengthLoc, _worldMaterialPassSettings.AtmosphereStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasWarmLightStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasWarmLightStrengthLoc, _worldMaterialPassSettings.WarmLightStrength, ShaderUniformDataType.Float);
         }
     }
 

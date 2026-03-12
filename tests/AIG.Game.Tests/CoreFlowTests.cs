@@ -3415,6 +3415,59 @@ public sealed class CoreFlowTests
         }));
     }
 
+    [Fact(DisplayName = "StreamCompanionWorkArea в background-ветке при стройке дома стримит и центр blueprint")]
+    public void StreamCompanionWorkArea_BackgroundBranch_QueuesBlueprintArea()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var world = new WorldMap(width: 96, height: 16, depth: 96, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var companion = new CompanionBot(config, new Vector3(44.5f, 2.02f, 44.5f));
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Background-blueprint",
+            originX: 40,
+            floorY: 2,
+            originZ: 40,
+            steps: [new HouseBuildStep(40, 2, 40, BlockType.Wood)]);
+        Assert.True(companion.Enqueue(BotCommand.BuildHouse(blueprint)));
+        SetPrivateField(app, "_companion", companion);
+
+        var method = typeof(GameApp).GetMethod("StreamCompanionWorkArea", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        Assert.True(WaitUntil(() =>
+        {
+            method!.Invoke(app, [true, false]);
+            _ = world.ApplyBackgroundStreamingResults(2, 2);
+            return world.IsChunkLoaded(5, 5) && world.IsChunkLoaded(9, 5);
+        }));
+    }
+
+    [Fact(DisplayName = "StreamCompanionWorkArea при стройке дома стримит и расширенную зону вокруг blueprint")]
+    public void StreamCompanionWorkArea_BuildHouse_StreamsBlueprintForestryArea()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var world = new WorldMap(width: 96, height: 16, depth: 96, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var companion = new CompanionBot(config, new Vector3(44.5f, 2.02f, 44.5f));
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Стриминг-дома",
+            originX: 40,
+            floorY: 2,
+            originZ: 40,
+            steps: [new HouseBuildStep(40, 2, 40, BlockType.Wood)]);
+        Assert.True(companion.Enqueue(BotCommand.BuildHouse(blueprint)));
+        SetPrivateField(app, "_companion", companion);
+
+        var method = typeof(GameApp).GetMethod("StreamCompanionWorkArea", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        Assert.True(WaitUntil(() =>
+        {
+            method!.Invoke(app, [false, false]);
+            return world.IsChunkLoaded(5, 5) && world.IsChunkLoaded(11, 5);
+        }));
+    }
+
     [Fact(DisplayName = "Адаптивный порог заморозки покрывает low-профиль")]
     public void GetAdaptiveFreezeSpeedThreshold_CoversLowBranch()
     {

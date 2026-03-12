@@ -12,7 +12,10 @@ public readonly record struct WorldMaterialPassSettings(
     Color FogColor,
     float FogStart,
     float FogEnd,
-    float Strength);
+    float Strength,
+    float ShadowStrength,
+    float AtmosphereStrength,
+    float WarmLightStrength);
 
 public interface IGamePlatform
 {

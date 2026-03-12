@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AIG.Game.Tests")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+97cac0acbd2c1daee02efee414512544367bc6da")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+8b6c1d68424696f126932116096aa2ed30c0e13f")]
 [assembly: System.Reflection.AssemblyProductAttribute("AIG.Game.Tests")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AIG.Game.Tests")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

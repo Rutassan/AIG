@@ -1501,12 +1501,7 @@ public class GameApp : IGameRunner
             return;
         }
 
-        var strength = _graphics.Quality switch
-        {
-            GraphicsQuality.Low => 0.52f,
-            GraphicsQuality.Medium => 0.76f,
-            _ => 1f
-        };
+        var strength = GetWorldPostProcessStrength();
         if (_botDevice.IsOpen)
         {
             strength *= 0.82f;
@@ -1517,10 +1512,11 @@ public class GameApp : IGameRunner
         horizonY = Math.Clamp(horizonY, 0, height - 1);
         var fog = _graphics.FogColor;
 
-        DrawHorizonBand(width, height, horizonY - 26, 24, new Color((byte)255, (byte)207, (byte)156, (byte)MathF.Round(8f * strength)));
-        DrawHorizonBand(width, height, horizonY + 6, 36, new Color((byte)fog.R, (byte)fog.G, (byte)fog.B, (byte)MathF.Round(11f * strength)));
-        DrawHorizonBand(width, height, horizonY + 40, 54, new Color((byte)90, (byte)110, (byte)132, (byte)MathF.Round(8f * strength)));
+        DrawHorizonBand(width, height, horizonY - 34, 30, new Color((byte)255, (byte)210, (byte)160, (byte)MathF.Round(10f * strength)));
+        DrawHorizonBand(width, height, horizonY - 4, 42, new Color((byte)fog.R, (byte)fog.G, (byte)fog.B, (byte)MathF.Round(12f * strength)));
+        DrawHorizonBand(width, height, horizonY + 36, 62, new Color((byte)88, (byte)108, (byte)132, (byte)MathF.Round(9f * strength)));
         DrawCinematicSunBloomOverlay(view, strength);
+        DrawSunShaftOverlay(view, strength);
 
         var vignetteSide = Math.Max(26, width / 12);
         var vignetteTop = Math.Max(20, height / 12);
@@ -1549,6 +1545,25 @@ public class GameApp : IGameRunner
         DrawCenteredGlowRect(sunScreen, 360, 220, new Color((byte)255, (byte)203, (byte)150, (byte)MathF.Round(10f * strength)));
         DrawCenteredGlowRect(sunScreen, 224, 136, new Color((byte)255, (byte)214, (byte)164, (byte)MathF.Round(13f * strength)));
         DrawCenteredGlowRect(sunScreen, 132, 86, new Color((byte)255, (byte)226, (byte)182, (byte)MathF.Round(16f * strength)));
+    }
+
+    private void DrawSunShaftOverlay(CameraViewBuilder.CameraView view, float strength)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        {
+            return;
+        }
+
+        var shaftAlpha = (byte)MathF.Round(8f * strength);
+        DrawCenteredGlowRect(new Vector2(sunScreen.X, sunScreen.Y + height * 0.12f), 92, 220, new Color((byte)255, (byte)214, (byte)166, shaftAlpha));
+        DrawCenteredGlowRect(new Vector2(sunScreen.X, sunScreen.Y + height * 0.24f), 64, 156, new Color((byte)248, (byte)206, (byte)156, (byte)MathF.Round(6f * strength)));
     }
 
     private void DrawHorizonBand(int width, int height, int y, int bandHeight, Color color)
@@ -1805,8 +1820,7 @@ public class GameApp : IGameRunner
 
                 _world.TryGetChunkSurfaceState(chunkX, chunkZ, out var surfaceBlocks, out var surfaceRevision, out var surfaceDirty);
                 var chunkReveal = GetChunkRevealFactor(chunkX, chunkZ);
-                var useChunkAtlasMesh = !surfaceDirty
-                    && (!progressiveChunkReveal || chunkReveal >= 0.999f)
+                var useChunkAtlasMesh = (!progressiveChunkReveal || chunkReveal >= 0.999f)
                     && chunkDistSq <= chunkMeshRenderDistance * chunkMeshRenderDistance
                     && TryDrawChunkAtlasMesh(chunkX, chunkZ, surfaceRevision, surfaceBlocks, ref remainingChunkMeshBuildBudget);
 
@@ -2336,6 +2350,9 @@ public class GameApp : IGameRunner
             GraphicsQuality.Medium => 0.72f,
             _ => 1f
         };
+        var shadowStrength = GetWorldShadowStrength();
+        var atmosphereStrength = GetWorldAtmosphereStrength();
+        var warmLightStrength = GetWorldWarmLightStrength();
 
         _platform.ConfigureWorldMaterialPass(new WorldMaterialPassSettings(
             CameraPosition: _player.EyePosition,
@@ -2343,7 +2360,50 @@ public class GameApp : IGameRunner
             FogColor: _graphics.FogColor,
             FogStart: fogStart,
             FogEnd: fogEnd,
-            Strength: strength));
+            Strength: strength,
+            ShadowStrength: shadowStrength,
+            AtmosphereStrength: atmosphereStrength,
+            WarmLightStrength: warmLightStrength));
+    }
+
+    private float GetWorldShadowStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.26f,
+            GraphicsQuality.Medium => 0.38f,
+            _ => 0.52f
+        };
+    }
+
+    private float GetWorldAtmosphereStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.58f,
+            GraphicsQuality.Medium => 0.76f,
+            _ => 0.94f
+        };
+    }
+
+    private float GetWorldWarmLightStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.48f,
+            GraphicsQuality.Medium => 0.66f,
+            _ => 0.82f
+        };
+    }
+
+    private float GetWorldPostProcessStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.58f,
+            GraphicsQuality.Medium => 0.82f,
+            _ => 1f
+        };
     }
 
     private Color QuantizeInstanceColor(Color color)
@@ -3100,22 +3160,22 @@ public class GameApp : IGameRunner
 
     private static Color GetSkyTopColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(66, 122, 196, 255), 1.05f), 0.05f, 0.08f, 1.06f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(70, 126, 198, 255), 1.08f), 0.06f, 0.08f, 1.06f);
     }
 
     private static Color GetSkyMidColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(136, 186, 226, 255), 1.04f), 0.06f, 0.05f, 1.05f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(144, 192, 230, 255), 1.06f), 0.07f, 0.05f, 1.06f);
     }
 
     private static Color GetSkyHorizonColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(246, 216, 186, 255), 1.02f), 0.10f, 0.02f, 1.04f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(248, 220, 188, 255), 1.05f), 0.12f, 0.02f, 1.05f);
     }
 
     private static Color GetSkyGlowColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 190, 128, 255), 1.06f), 0.12f, 0f, 1.06f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 194, 132, 255), 1.10f), 0.14f, 0f, 1.08f);
     }
 
     private void DrawPlayerAvatar()
@@ -4419,16 +4479,35 @@ public class GameApp : IGameRunner
         var surfaceBudget = underPressure ? 1 : 2;
         var chunkRadius = 2;
         var center = _companion.Position;
+        var blueprintCenter = _companion.ActiveCommand is BotCommand { Kind: BotCommandKind.BuildHouse, Blueprint: not null } buildCommand
+            ? buildCommand.Blueprint.Center
+            : (Vector3?)null;
+        var blueprintChunkRadius = blueprintCenter.HasValue ? 6 : 0;
+        var blueprintChunkBudget = underPressure ? 1 : 2;
+        var blueprintSurfaceBudget = underPressure ? 1 : 2;
         if (useBackgroundStreaming)
         {
             _world.EnsureChunksAroundBudgetedAsync(center, chunkRadius, chunkBudget);
             _world.QueueDirtyChunkSurfacesAsync(center, surfaceBudget);
+            if (blueprintCenter.HasValue)
+            {
+                _world.EnsureChunksAroundBudgetedAsync(blueprintCenter.Value, blueprintChunkRadius, blueprintChunkBudget);
+                _world.QueueDirtyChunkSurfacesAsync(blueprintCenter.Value, blueprintSurfaceBudget);
+            }
+
             _ = _world.ApplyBackgroundStreamingResults(chunkBudget, surfaceBudget);
             return;
         }
 
         _world.EnsureChunksAroundBudgeted(center, chunkRadius, chunkBudget);
         _world.RebuildDirtyChunkSurfaces(center, surfaceBudget);
+        if (!blueprintCenter.HasValue)
+        {
+            return;
+        }
+
+        _world.EnsureChunksAroundBudgeted(blueprintCenter.Value, blueprintChunkRadius, blueprintChunkBudget);
+        _world.RebuildDirtyChunkSurfaces(blueprintCenter.Value, blueprintSurfaceBudget);
     }
 
     private int ResolveStreamingRenderDistance(int measuredFps, Vector3 center, bool force)

@@ -209,6 +209,36 @@ public sealed class CameraAndVisualTests
         Assert.Equal(12, platform.DrawCubeCalls);
     }
 
+    [Fact(DisplayName = "DrawSunShaftOverlay безопасно выходит при нулевом размере экрана")]
+    public void DrawSunShaftOverlay_ReturnsWhenScreenSizeIsZero()
+    {
+        var platform = new FakeGamePlatform
+        {
+            ScreenWidth = 0,
+            ScreenHeight = 0
+        };
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("DrawSunShaftOverlay", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method!.Invoke(app,
+        [
+            new CameraViewBuilder.CameraView(
+                new Camera3D
+                {
+                    Position = new Vector3(4f, 3.6f, 4f),
+                    Target = new Vector3(4f, 3.6f, 3f),
+                    Up = Vector3.UnitY,
+                    Projection = CameraProjection.Perspective
+                },
+                new Vector3(4f, 3.6f, 4f),
+                new Vector3(0f, 0f, -1f)),
+            1f
+        ]);
+
+        Assert.Empty(platform.DrawnRectangles);
+    }
+
     [Fact(DisplayName = "GameApp DrawFirstPersonHand при screen-space браслете не рисует вторую 3D-руку")]
     public void GameApp_DrawFirstPersonHand_WithDevice_DoesNotDrawSecond3DHand()
     {

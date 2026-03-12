@@ -77,6 +77,28 @@ public sealed class WorldMap
         return chunk.Get(localX, y, localZ);
     }
 
+    internal bool TryGetBlockNoLoad(int x, int y, int z, out BlockType block)
+    {
+        if (!IsInside(x, y, z))
+        {
+            block = BlockType.Air;
+            return false;
+        }
+
+        var chunkX = x / ChunkSize;
+        var chunkZ = z / ChunkSize;
+        if (!_chunks.TryGetValue((chunkX, chunkZ), out var chunk))
+        {
+            block = BlockType.Air;
+            return false;
+        }
+
+        var localX = x - chunkX * ChunkSize;
+        var localZ = z - chunkZ * ChunkSize;
+        block = chunk.Get(localX, y, localZ);
+        return true;
+    }
+
     public void SetBlock(int x, int y, int z, BlockType blockType)
     {
         if (!IsInside(x, y, z))

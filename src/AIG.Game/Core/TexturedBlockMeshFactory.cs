@@ -32,19 +32,21 @@ internal static class TexturedBlockMeshFactory
         Vector3 V2,
         Vector3 V3,
         WorldTextureAtlas.WorldAtlasTile Tile,
-        byte Shade);
+        byte Shade,
+        byte Sun,
+        byte Accent);
 
     public static TexturedBlockMeshData Build(BlockType block)
     {
         var tiles = WorldTextureAtlas.GetFaceTiles(block);
         var faces = new[]
         {
-            new FaceDefinition(new Vector3(1f, 0f, 0f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, -0.5f), tiles.Side, 206),
-            new FaceDefinition(new Vector3(-1f, 0f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(-0.5f, 0.5f, 0.5f), tiles.Side, 188),
-            new FaceDefinition(new Vector3(0f, 1f, 0f),  new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(-0.5f, 0.5f, 0.5f), tiles.Top, 255),
-            new FaceDefinition(new Vector3(0f, -1f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(-0.5f, -0.5f, -0.5f), tiles.Bottom, 142),
-            new FaceDefinition(new Vector3(0f, 0f, 1f),  new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f), tiles.Side, 222),
-            new FaceDefinition(new Vector3(0f, 0f, -1f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, -0.5f),  new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(-0.5f, 0.5f, -0.5f), tiles.Side, 172)
+            new FaceDefinition(new Vector3(1f, 0f, 0f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, -0.5f), tiles.Side, 206, 204, 156),
+            new FaceDefinition(new Vector3(-1f, 0f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(-0.5f, 0.5f, 0.5f), tiles.Side, 188, 186, 148),
+            new FaceDefinition(new Vector3(0f, 1f, 0f),  new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(-0.5f, 0.5f, 0.5f), tiles.Top, 255, 255, 228),
+            new FaceDefinition(new Vector3(0f, -1f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(-0.5f, -0.5f, -0.5f), tiles.Bottom, 142, 82, 122),
+            new FaceDefinition(new Vector3(0f, 0f, 1f),  new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f), tiles.Side, 222, 214, 166),
+            new FaceDefinition(new Vector3(0f, 0f, -1f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, -0.5f),  new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(-0.5f, 0.5f, -0.5f), tiles.Side, 172, 172, 136)
         };
 
         var vertices = new float[faces.Length * 4 * 3];
@@ -85,8 +87,8 @@ internal static class TexturedBlockMeshFactory
             for (var i = 0; i < 4; i++)
             {
                 colors[colorOffset + i * 4 + 0] = face.Shade;
-                colors[colorOffset + i * 4 + 1] = face.Shade;
-                colors[colorOffset + i * 4 + 2] = face.Shade;
+                colors[colorOffset + i * 4 + 1] = face.Sun;
+                colors[colorOffset + i * 4 + 2] = face.Accent;
                 colors[colorOffset + i * 4 + 3] = 255;
             }
 

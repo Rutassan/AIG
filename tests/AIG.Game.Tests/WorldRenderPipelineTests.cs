@@ -80,6 +80,8 @@ public sealed class WorldRenderPipelineTests
         Assert.Equal(topUv.V1, mesh.TexCoords[topFaceOffset + 1]);
 
         Assert.True(mesh.Colors[2 * 4 * 4] > mesh.Colors[3 * 4 * 4], "Верхняя грань должна быть светлее нижней.");
+        Assert.NotEqual(mesh.Colors[0], mesh.Colors[1]);
+        Assert.NotEqual(mesh.Colors[0], mesh.Colors[2]);
     }
 
     [Fact(DisplayName = "ChunkSurfaceMeshFactory убирает внутреннюю грань между соседними блоками")]
@@ -108,6 +110,18 @@ public sealed class WorldRenderPipelineTests
         Assert.Equal(10 * 4, mesh.VertexCount);
     }
 
+    [Fact(DisplayName = "WorldMap.TryGetBlockNoLoad не генерирует отсутствующий чанк и возвращает false")]
+    public void WorldMap_TryGetBlockNoLoad_ReturnsFalseForUnloadedChunk()
+    {
+        var world = new WorldMap(16, 8, 16, chunkSize: 8, seed: 0);
+
+        var found = world.TryGetBlockNoLoad(12, 1, 12, out var block);
+
+        Assert.False(found);
+        Assert.Equal(BlockType.Air, block);
+        Assert.Equal(0, world.LoadedChunkCount);
+    }
+
     [Fact(DisplayName = "ChunkSurfaceMeshFactory не пишет грани, если индекс вершины вышел бы за ushort")]
     public void ChunkSurfaceMeshFactory_AddFaceIfVisible_StopsOnIndexOverflow()
     {
@@ -121,7 +135,9 @@ public sealed class WorldRenderPipelineTests
             Vector3.One,
             Vector3.UnitY,
             WorldTextureAtlas.WorldAtlasTile.Stone,
-            (byte)200
+            (byte)200,
+            (byte)180,
+            (byte)160
         ]);
 
         var vertices = Enumerable.Repeat(0f, (ushort.MaxValue - 3) * 3).ToList();
@@ -183,6 +199,32 @@ public sealed class WorldRenderPipelineTests
         typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
 
         Assert.Contains(platform.DrawnTexturedChunkMeshes, call => call.ChunkX == 2 && call.ChunkZ == 0 && call.TriangleCount > 0);
+    }
+
+    [Fact(DisplayName = "DrawWorld держит старый chunk mesh, пока dirty-чанк еще не пересобран")]
+    public void DrawWorld_DirtyChunk_KeepsUsingCachedChunkMeshUntilRebuildCompletes()
+    {
+        var world = new WorldMap(8, 8, 8, chunkSize: 8, seed: 0);
+        world.SetBlock(4, 1, 4, BlockType.Grass);
+        world.SetBlock(5, 1, 4, BlockType.Wood);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 2.2f, 4.5f), maxChunks: 16);
+
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world);
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4.5f, 2.2f, 4.5f)));
+
+        typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
+        var meshCallsBefore = platform.DrawTexturedChunkMeshCalls;
+        var texturedFallbackBefore = platform.DrawTexturedBlockInstancedCalls;
+        var legacyFallbackBefore = platform.LegacyDrawCubeInstancedCalls;
+
+        world.SetBlock(6, 1, 4, BlockType.Stone);
+
+        typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
+
+        Assert.True(platform.DrawTexturedChunkMeshCalls > meshCallsBefore);
+        Assert.Equal(texturedFallbackBefore, platform.DrawTexturedBlockInstancedCalls);
+        Assert.Equal(legacyFallbackBefore, platform.LegacyDrawCubeInstancedCalls);
     }
 
     [Fact(DisplayName = "DrawWorld оставляет legacy fallback для неизвестного блока рядом с chunk mesh")]
@@ -248,6 +290,41 @@ public sealed class WorldRenderPipelineTests
         var settings = Assert.Single(platform.WorldMaterialPasses);
         Assert.True(settings.FogEnd > settings.FogStart);
         Assert.True(settings.Strength > 0.9f);
+        Assert.True(settings.ShadowStrength > 0.45f);
+        Assert.True(settings.AtmosphereStrength > 0.9f);
+        Assert.True(settings.WarmLightStrength > 0.8f);
+    }
+
+    [Fact(DisplayName = "ChunkSurfaceMeshFactory кодирует отдельные каналы света, солнца и relief")]
+    public void ChunkSurfaceMeshFactory_EncodesDistinctLightingChannels()
+    {
+        var world = new WorldMap(8, 8, 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(4, 1, 4, BlockType.Stone);
+        world.SetBlock(4, 2, 4, BlockType.Wood);
+        world.SetBlock(4, 1, 5, BlockType.Wood);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 2.2f, 4.5f), maxChunks: 16);
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var surfaces));
+
+        var mesh = ChunkSurfaceMeshFactory.Build(world, surfaces);
+
+        Assert.NotEmpty(mesh.Colors);
+        Assert.Contains(Enumerable.Range(0, mesh.VertexCount), index =>
+        {
+            var offset = index * 4;
+            return mesh.Colors[offset + 0] != mesh.Colors[offset + 1]
+                || mesh.Colors[offset + 0] != mesh.Colors[offset + 2];
+        });
     }
 
     [Fact(DisplayName = "Бюджет сборки новых chunk mesh зависит от качества графики")]

@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Reflection;
 using System.Collections.Generic;
+using System.Linq;
 using AIG.Game.Bot;
 using AIG.Game.Config;
 using AIG.Game.Core;
@@ -335,6 +336,45 @@ public sealed class BotTests
         Assert.Equal(BlockType.Air, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY + 1, blueprint.OriginZ));
     }
 
+    [Fact(DisplayName = "CompanionBot при строительстве дома добывает скрытый камень под грунтом и завершает стройку")]
+    public void CompanionBot_BuildsHouseAfterExcavatingBuriedStone()
+    {
+        var world = new WorldMap(width: 48, height: 16, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Stone);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        var playerPosition = new Vector3(8.5f, 4.02f, 8.5f);
+        WarmWorld(world, playerPosition);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 4.02f, 8.5f));
+        var blueprint = HouseBlueprint.CreateCabinS(world, playerPosition, new Vector3(1f, 0f, 0f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 480);
+        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 128);
+        InvokePrivate(bot, "AddStockpile", BlockType.Leaves, 96);
+
+        Assert.True(bot.Enqueue(BotCommand.BuildHouse(blueprint)));
+
+        StepBot(bot, world, playerPosition, frames: 11000);
+
+        Assert.Null(bot.ActiveCommand);
+        Assert.Equal(BlockType.Stone, world.GetBlock(blueprint.OriginX + 3, blueprint.FloorY, blueprint.OriginZ - 2));
+        Assert.Equal(BlockType.Stone, world.GetBlock(blueprint.OriginX + 5, blueprint.FloorY + 2, blueprint.OriginZ + 5));
+        Assert.Equal(BotStatus.Idle, bot.Status);
+    }
+
     [Fact(DisplayName = "House blueprint выбирает более ровную площадку вместо крутого склона перед игроком")]
     public void HouseBlueprint_PrefersFlatterSite_OverSteepSlope()
     {
@@ -494,7 +534,7 @@ public sealed class BotTests
         SetPrivateField(bot, "_currentTarget", blockedTarget);
         InvokePrivate(bot, "BlockResourceTarget", blockedTarget, 1.75f);
 
-        var acquire = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!);
+        var acquire = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!, null!);
         Assert.True((bool)acquire.Result!);
 
         var target = acquire.Args[2]!;
@@ -634,6 +674,1013 @@ public sealed class BotTests
         Assert.Equal(22, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
         Assert.Equal(4, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
         Assert.Equal(16, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при отсутствии surface-камня выбирает скрытый камень под верхним слоем")]
+    public void CompanionBot_TryFindNearestResource_FindsBuriedStoneCandidate()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+        world.SetBlock(10, 3, 10, BlockType.Dirt);
+        WarmWorld(world, new Vector3(8.5f, 4.02f, 10.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 4.02f, 10.5f));
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+        Assert.True((bool)nearest.Result!);
+
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(10, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(10, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot для стройки дома ищет глубокий камень вокруг стройплощадки, даже если он глубже обычного buried-probe")]
+    public void CompanionBot_TryFindNearestResource_BuildHouseUsesDeepBlueprintQuarry()
+    {
+        var world = new WorldMap(width: 48, height: 24, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 15; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(24, 4, 20, BlockType.Stone);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(18.5f, 16.02f, 18.5f));
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Глубокий-камень",
+            originX: 14,
+            floorY: 5,
+            originZ: 14,
+            steps: [new HouseBuildStep(14, 5, 14, BlockType.Stone)]);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        WarmWorld(world, bot.Position);
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(24, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(4, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(20, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при сборе скрытого камня вскрывает грунт и завершает команду")]
+    public void CompanionBot_GathersBuriedStone_ByExcavatingCover()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+        world.SetBlock(10, 3, 10, BlockType.Dirt);
+        WarmWorld(world, new Vector3(8.5f, 4.02f, 10.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 4.02f, 10.5f));
+        Assert.True(bot.Enqueue(BotCommand.Gather(BotResourceType.Stone, 1)));
+
+        StepBot(bot, world, new Vector3(14.5f, 4.02f, 10.5f), frames: 420);
+
+        Assert.Equal(BlockType.Air, world.GetBlock(10, 2, 10));
+        Assert.True(bot.GetStockpile(BlockType.Stone) >= 1);
+        Assert.Null(bot.ActiveCommand);
+        Assert.Equal(BotStatus.Idle, bot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper поиска доступа к скрытому ресурсу покрывает success, exposed, deep и no-load ветки")]
+    public void CompanionBot_TryFindBuriedResourceAccessBlock_CoversBranches()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 4.02f, 10.5f));
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+        WarmWorld(world, bot.Position);
+
+        var success = InvokePrivateWithArgs(bot, "TryFindBuriedResourceAccessBlock", world, CreateResourceTarget(10, 2, 10, BotResourceType.Stone), 0, 0, 0);
+        Assert.True((bool)success.Result!);
+        Assert.Equal(10, (int)success.Args[2]!);
+        Assert.Equal(3, (int)success.Args[3]!);
+        Assert.Equal(10, (int)success.Args[4]!);
+
+        world.SetBlock(10, 3, 10, BlockType.Air);
+        var exposed = InvokePrivateWithArgs(bot, "TryFindBuriedResourceAccessBlock", world, CreateResourceTarget(10, 2, 10, BotResourceType.Stone), 0, 0, 0);
+        Assert.False((bool)exposed.Result!);
+
+        for (var y = 3; y <= 10; y++)
+        {
+            world.SetBlock(10, y, 10, BlockType.Dirt);
+        }
+
+        var deep = InvokePrivateWithArgs(bot, "TryFindBuriedResourceAccessBlock", world, CreateResourceTarget(10, 2, 10, BotResourceType.Stone), 0, 0, 0);
+        Assert.False((bool)deep.Result!);
+
+        var topSolidWorld = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < topSolidWorld.Width; x++)
+        {
+            for (var z = 0; z < topSolidWorld.Depth; z++)
+            {
+                for (var y = 0; y < topSolidWorld.Height; y++)
+                {
+                    topSolidWorld.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 7; x <= 9; x++)
+        {
+            for (var z = 7; z <= 9; z++)
+            {
+                for (var y = 0; y < topSolidWorld.Height; y++)
+                {
+                    topSolidWorld.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        topSolidWorld.SetBlock(8, 6, 8, BlockType.Stone);
+        WarmWorld(topSolidWorld, new Vector3(8.5f, 10.02f, 8.5f));
+
+        var topSolid = InvokePrivateWithArgs(bot, "TryFindBuriedResourceAccessBlock", topSolidWorld, CreateResourceTarget(8, 6, 8, BotResourceType.Stone), 0, 0, 0);
+        Assert.True((bool)topSolid.Result!);
+        Assert.Equal(topSolidWorld.Height - 1, (int)topSolid.Args[3]!);
+
+        var unloadedWorld = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        var noLoad = InvokePrivateWithArgs(bot, "TryFindBuriedResourceAccessBlock", unloadedWorld, CreateResourceTarget(10, 2, 10, BotResourceType.Stone), 0, 0, 0);
+        Assert.False((bool)noLoad.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot UpdateGatherCommand для скрытого камня сначала использует buried-recovery, а не обычный маршрут")]
+    public void CompanionBot_UpdateGatherCommand_UsesBuriedRecoveryBeforeNormalRoute()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 8; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+        WarmWorld(world, new Vector3(8.5f, 9.02f, 10.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 9.02f, 10.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.Gather(BotResourceType.Stone, 1));
+        SetPrivateField(bot, "_currentTarget", CreateResourceTarget(10, 2, 10, BotResourceType.Stone));
+
+        InvokePrivate(bot, "UpdateGatherCommand", world, BotResourceType.Stone, 1, 1f / 30f);
+
+        Assert.Equal(BotStatus.Gathering, bot.Status);
+        Assert.Equal(BlockType.Air, world.GetBlock(10, 8, 10));
+        Assert.NotNull(GetPrivateField(bot, "_currentTarget"));
+    }
+
+    [Fact(DisplayName = "CompanionBot helper поиска buried-кандидата покрывает route-score и отказы")]
+    public void CompanionBot_TryScoreBuriedResourceCandidate_CoversRouteAndFailure()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(10, 2, 10, BlockType.Stone);
+        world.SetBlock(10, 3, 10, BlockType.Dirt);
+        WarmWorld(world, new Vector3(2.5f, 4.02f, 2.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(2.5f, 4.02f, 2.5f));
+        var scoreArgs = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(10, 2, 10, BotResourceType.Stone),
+            null!,
+            5f,
+            0f);
+        Assert.True((bool)scoreArgs.Result!);
+        Assert.True((float)scoreArgs.Args[5]! > 5f);
+
+        world.SetBlock(10, 3, 10, BlockType.Air);
+        var failArgs = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(10, 2, 10, BotResourceType.Stone),
+            null!,
+            5f,
+            0f);
+        Assert.False((bool)failArgs.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерный recovery умеет снимать верхний слой и временно ставить опору")]
+    public void CompanionBot_BuriedResourceRecovery_CoversExcavationAndSupport()
+    {
+        var excavationWorld = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < excavationWorld.Width; x++)
+        {
+            for (var z = 0; z < excavationWorld.Depth; z++)
+            {
+                for (var y = 0; y < excavationWorld.Height; y++)
+                {
+                    excavationWorld.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                excavationWorld.SetBlock(x, 0, z, BlockType.Dirt);
+                excavationWorld.SetBlock(x, 1, z, BlockType.Dirt);
+                excavationWorld.SetBlock(x, 2, z, BlockType.Dirt);
+                excavationWorld.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        excavationWorld.SetBlock(10, 2, 10, BlockType.Stone);
+        excavationWorld.SetBlock(10, 3, 10, BlockType.Dirt);
+        WarmWorld(excavationWorld, new Vector3(8.5f, 4.02f, 10.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 4.02f, 10.5f));
+        var excavate = InvokePrivate(
+            bot,
+            "TryAdvanceBuriedResourceAccess",
+            excavationWorld,
+            CreateResourceTarget(10, 2, 10, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            true);
+        Assert.True((bool)excavate!);
+        Assert.Equal(BlockType.Air, excavationWorld.GetBlock(10, 3, 10));
+        Assert.Equal(1, bot.GetStockpile(BlockType.Dirt));
+
+        var supportWorld = CreateFlatWorld(24, 12);
+        var supportBot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(supportBot, "AddStockpile", BlockType.Dirt, 1);
+        SetPrivateField(supportBot, "_noPathTimer", 1f);
+
+        Assert.True((bool)InvokePrivate(supportBot, "TryCreateTemporaryGatherAccess", supportWorld, 8, 4, 5, BlockType.Stone)!);
+        Assert.Equal(BotStatus.Gathering, supportBot.Status);
+        Assert.Equal(0f, Assert.IsType<float>(GetPrivateField(supportBot, "_noPathTimer")!));
+        Assert.Equal(0, supportBot.GetStockpile(BlockType.Dirt));
+        Assert.Contains(
+            new[]
+            {
+                supportWorld.GetBlock(6, 1, 5),
+                supportWorld.GetBlock(6, 2, 5),
+                supportWorld.GetBlock(5, 1, 6),
+                supportWorld.GetBlock(5, 2, 6)
+            },
+            block => block == BlockType.Dirt);
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерные helper-ы покрывают fail-ветки опоры и excavation harvest")]
+    public void CompanionBot_BuriedResourceHelpers_CoverFailureBranches()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+
+        SetPrivateField(bot, "_actionCooldown", 0.1f);
+        Assert.False((bool)InvokePrivate(bot, "TryCreateTemporaryGatherAccess", world, 8, 4, 5, BlockType.Stone)!);
+        SetPrivateField(bot, "_actionCooldown", 0f);
+        Assert.False((bool)InvokePrivate(bot, "TryCreateTemporaryGatherAccess", world, 8, 4, 5, BlockType.Stone)!);
+
+        var target = CreateResourceTarget(8, 2, 5, BotResourceType.Stone);
+        world.SetBlock(8, 2, 5, BlockType.Air);
+        Assert.False((bool)InvokePrivate(bot, "TryHarvestExcavationBlock", world, target, 8, 2, 5, true, null)!);
+
+        world.SetBlock(8, 2, 5, BlockType.Stone);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(8.5f, 3.02f, 5.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        Assert.False((bool)InvokePrivate(bot, "TryHarvestExcavationBlock", world, target, 8, 2, 5, true, null)!);
+
+        SetPrivateField(bot, "_hasPlayerPosition", false);
+        Assert.True((bool)InvokePrivate(bot, "TryHarvestExcavationBlock", world, target, 8, 2, 5, true, null)!);
+        Assert.Equal(1, Assert.IsType<int>(GetPrivateField(bot, "_activeGatheredAmount")!));
+        Assert.Equal(1, bot.GetStockpile(BlockType.Stone));
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-search покрывает unloaded-chunk, пустую колонку и выбор лучшего buried-кандидата")]
+    public void CompanionBot_BuriedSearch_CoversChunkAndRankingBranches()
+    {
+        var world = new WorldMap(width: 48, height: 12, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        for (var x = 8; x < 16; x++)
+        {
+            for (var z = 8; z < 16; z++)
+            {
+                for (var y = 0; y < 4; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 4.02f, 4.5f));
+        WarmWorld(world, bot.Position);
+
+        var topSolid = InvokePrivateWithArgs(bot, "TryGetLoadedTopSolidY", world, 8, 8, 0);
+        Assert.False((bool)topSolid.Result!);
+
+        world.SetBlock(10, 2, 18, BlockType.Stone);
+        world.SetBlock(14, 2, 18, BlockType.Stone);
+        world.SetBlock(6, 2, 18, BlockType.Stone);
+        world.SetBlock(6, 3, 18, BlockType.Air); // этот кандидат "buried" уже не считается скрытым
+        WarmWorld(world, new Vector3(12.5f, 4.02f, 18.5f));
+
+        var scoredType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic);
+        Assert.NotNull(scoredType);
+        var list = Assert.IsAssignableFrom<System.Collections.IList>(Activator.CreateInstance(typeof(List<>).MakeGenericType(scoredType!))!);
+        list.Add(Activator.CreateInstance(scoredType!, [CreateResourceTarget(6, 2, 18, BotResourceType.Stone), 1f])!);
+        list.Add(Activator.CreateInstance(scoredType!, [CreateResourceTarget(10, 2, 18, BotResourceType.Stone), 2f])!);
+        list.Add(Activator.CreateInstance(scoredType!, [CreateResourceTarget(14, 2, 18, BotResourceType.Stone), 3f])!);
+
+        var selected = InvokePrivateWithArgs(bot, "TrySelectBuriedResourceCandidate", world, null!, list, null!);
+        Assert.True((bool)selected.Result!);
+        var target = selected.Args[3]!;
+        var targetType = target.GetType();
+        Assert.Equal(10, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(18, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+        Assert.True((bool)nearest.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper сбора buried-кандидатов пропускает unloaded и пустые loaded чанки")]
+    public void CompanionBot_CollectBuriedResourceCandidates_SkipsUnloadedAndAirChunks()
+    {
+        var world = new WorldMap(width: 48, height: 12, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 16; x < 24; x++)
+        {
+            for (var z = 16; z < 24; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Stone);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 4.02f, 4.5f));
+        world.EnsureChunksAround(bot.Position, radiusInChunks: 0);
+        world.EnsureChunksAround(new Vector3(20.5f, 4.02f, 20.5f), radiusInChunks: 0);
+        _ = world.RebuildDirtyChunkSurfaces(bot.Position, maxChunks: 256);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(20.5f, 4.02f, 20.5f), maxChunks: 256);
+
+        var scoredType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic);
+        Assert.NotNull(scoredType);
+        var list = Assert.IsAssignableFrom<System.Collections.IList>(Activator.CreateInstance(typeof(List<>).MakeGenericType(scoredType!))!);
+
+        InvokePrivate(bot, "CollectBuriedResourceCandidates", world, BotResourceType.Stone, null, 0, 0, 3, list);
+
+        Assert.NotEmpty(list);
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-candidate helper пропускает blocked, planned, protected и exposed цели")]
+    public void CompanionBot_CollectBuriedResourceCandidates_SkipsInvalidTargets()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 3; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+        world.SetBlock(10, 2, 8, BlockType.Stone);
+        world.SetBlock(12, 2, 8, BlockType.Stone);
+        world.SetBlock(14, 2, 8, BlockType.Stone);
+        world.SetBlock(14, 3, 8, BlockType.Air);
+        world.SetBlock(16, 2, 8, BlockType.Stone);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 4.02f, 8.5f));
+        WarmWorld(world, new Vector3(12.5f, 4.02f, 8.5f));
+        InvokePrivate(bot, "BlockResourceTarget", CreateResourceTarget(8, 2, 8, BotResourceType.Stone), 1.5f);
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(12.5f, 3.02f, 8.5f));
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Buried-invalid",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: [new HouseBuildStep(10, 2, 8, BlockType.Stone)]);
+
+        var scoredType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic);
+        Assert.NotNull(scoredType);
+        var list = Assert.IsAssignableFrom<System.Collections.IList>(Activator.CreateInstance(typeof(List<>).MakeGenericType(scoredType!))!);
+
+        InvokePrivate(bot, "CollectBuriedResourceCandidates", world, BotResourceType.Stone, blueprint, 1, 1, 1, list);
+
+        Assert.Single(list);
+        var entry = list[0]!;
+        var target = entry.GetType().GetProperty("Target", BindingFlags.Instance | BindingFlags.Public)!.GetValue(entry)!;
+        var targetType = target.GetType();
+        Assert.Equal(16, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(8, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper buried-candidate сразу пропускает полностью не загруженный чанк")]
+    public void CompanionBot_CollectBuriedResourceCandidates_SkipsCompletelyUnloadedChunk()
+    {
+        var world = new WorldMap(width: 24, height: 12, depth: 24, chunkSize: 8, seed: 0);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(4.5f, 2.02f, 4.5f));
+        var scoredType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic);
+        Assert.NotNull(scoredType);
+        var list = Assert.IsAssignableFrom<System.Collections.IList>(Activator.CreateInstance(typeof(List<>).MakeGenericType(scoredType!))!);
+
+        InvokePrivate(bot, "CollectBuriedResourceCandidates", world, BotResourceType.Stone, null, 1, 1, 0, list);
+
+        Assert.Empty(list);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper оценки buried-кандидата возвращает false, если доступ к dig-блоку не построить")]
+    public void CompanionBot_TryScoreBuriedResourceCandidate_FailsWhenNoRouteToDigBlock()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        world.SetBlock(13, 3, 5, BlockType.Dirt);
+        for (var x = 4; x <= 6; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                if (x == 5 && z == 5)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 4, z, BlockType.Dirt);
+                world.SetBlock(x, 5, z, BlockType.Dirt);
+            }
+        }
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        var score = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null!,
+            1f,
+            0f);
+
+        Assert.False((bool)score.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper оценки buried-кандидата сразу принимает цель, если dig-блок уже в досягаемости")]
+    public void CompanionBot_TryScoreBuriedResourceCandidate_SucceedsWhenDigBlockAlreadyReachable()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 3; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+        world.SetBlock(8, 3, 8, BlockType.Dirt);
+        WarmWorld(world, new Vector3(8.5f, 4.02f, 8.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 4.02f, 8.5f));
+        var score = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(8, 2, 8, BotResourceType.Stone),
+            null!,
+            5f,
+            0f);
+
+        Assert.True((bool)score.Result!);
+        Assert.InRange((float)score.Args[5]!, 6.24f, 6.26f);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper оценки buried-кандидата возвращает false, если около dig-блока вообще нет рабочей позы")]
+    public void CompanionBot_TryScoreBuriedResourceCandidate_FailsWhenNoActionPoseExists()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 3; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        world.SetBlock(13, 3, 5, BlockType.Dirt);
+        for (var x = 11; x <= 15; x++)
+        {
+            for (var z = 3; z <= 7; z++)
+            {
+                for (var y = 4; y <= 6; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        var score = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null!,
+            1f,
+            0f);
+
+        Assert.False((bool)score.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot helper оценки buried-кандидата покрывает ветку: рабочая поза найдена, но stage-route до неё не строится")]
+    public void CompanionBot_TryScoreBuriedResourceCandidate_FailsWhenLocalPoseExistsButStageRouteFails()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 4; x <= 6; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                for (var y = 0; y <= 4; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        for (var x = 12; x <= 14; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                for (var y = 0; y <= 4; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        world.SetBlock(13, 3, 5, BlockType.Dirt);
+        WarmWorld(world, new Vector3(5.5f, 5.02f, 5.5f));
+        WarmWorld(world, new Vector3(13.5f, 5.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 5.02f, 5.5f));
+        var score = InvokePrivateWithArgs(
+            bot,
+            "TryScoreBuriedResourceCandidate",
+            world,
+            new BotNavigationSettings(bot.Actor.ColliderHalfWidth, bot.Actor.ColliderHeight, 7f),
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null!,
+            1f,
+            0f);
+
+        Assert.False((bool)score.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-recovery после провала route сразу переходит в temporary gather access")]
+    public void CompanionBot_TryAdvanceBuriedResourceAccess_UsesTemporarySupportAfterRouteFailure()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(5, 0, 5, BlockType.Dirt);
+        world.SetBlock(5, 1, 5, BlockType.Dirt);
+        world.SetBlock(5, 2, 5, BlockType.Dirt);
+        world.SetBlock(5, 3, 5, BlockType.Dirt);
+        for (var x = 12; x <= 14; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+        WarmWorld(world, new Vector3(13.5f, 4.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 1);
+
+        Assert.True((bool)InvokePrivate(
+            bot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+        Assert.Equal(BotStatus.Gathering, bot.Status);
+        Assert.Equal(0, bot.GetStockpile(BlockType.Dirt));
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-recovery покрывает moving и arrived-fallback ветки")]
+    public void CompanionBot_BuriedRecovery_CoversNavigationBranches()
+    {
+        var world = CreateFlatWorld(32, 16);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        world.SetBlock(13, 3, 5, BlockType.Dirt);
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+
+        var movingBot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        Assert.True((bool)InvokePrivate(
+            movingBot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+        Assert.Equal(BotStatus.Gathering, movingBot.Status);
+
+        var arrivedBot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        InvokePrivate(arrivedBot, "AddStockpile", BlockType.Dirt, 1);
+        SetPrivateField(arrivedBot, "_navigationGoal", CreateNavigationGoal("GatherAction", 13, 3, 5, 6, null));
+        SetPrivateField(arrivedBot, "_navigationWaypoints", new[] { arrivedBot.Position });
+        SetPrivateField(arrivedBot, "_navigationWaypointIndex", 0);
+        Assert.True((bool)InvokePrivate(
+            arrivedBot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+        Assert.Equal(BotStatus.Gathering, arrivedBot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-recovery покрывает blocked-move ветку и уходит в temporary support fallback")]
+    public void CompanionBot_TryAdvanceBuriedResourceAccess_CoversBlockedMoveFallback()
+    {
+        var world = CreateFlatWorld(32, 16);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        world.SetBlock(13, 3, 5, BlockType.Dirt);
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 1);
+        SetPrivateField(bot, "_playerCollisionProbe", new Func<Vector3, bool>(_ => true));
+        SetPrivateField(bot, "_stuckTime", 2.3f);
+
+        Assert.True((bool)InvokePrivate(
+            bot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+        Assert.Equal(BotStatus.Gathering, bot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-recovery сразу возвращает false для уже открытой buried-цели")]
+    public void CompanionBot_TryAdvanceBuriedResourceAccess_FailsForExposedTarget()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+        world.SetBlock(8, 3, 8, BlockType.Air);
+        WarmWorld(world, new Vector3(6.5f, 2.02f, 8.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 8.5f));
+
+        Assert.False((bool)InvokePrivate(
+            bot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(8, 2, 8, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot buried-recovery возвращает false, если route не строится и нечем поставить временную опору")]
+    public void CompanionBot_TryAdvanceBuriedResourceAccess_FailsWithoutSupportMaterial()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(5, 0, 5, BlockType.Dirt);
+        world.SetBlock(5, 1, 5, BlockType.Dirt);
+        world.SetBlock(5, 2, 5, BlockType.Dirt);
+        world.SetBlock(5, 3, 5, BlockType.Dirt);
+        for (var x = 12; x <= 14; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+            }
+        }
+
+        world.SetBlock(13, 2, 5, BlockType.Stone);
+        WarmWorld(world, new Vector3(5.5f, 4.02f, 5.5f));
+        WarmWorld(world, new Vector3(13.5f, 4.02f, 5.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 4.02f, 5.5f));
+
+        Assert.False((bool)InvokePrivate(
+            bot,
+            "TryAdvanceBuriedResourceAccess",
+            world,
+            CreateResourceTarget(13, 2, 5, BotResourceType.Stone),
+            null,
+            1f / 30f,
+            false)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерный harvest не увеличивает gathered amount, если добыт не целевой тип ресурса")]
+    public void CompanionBot_TryHarvestExcavationBlock_DoesNotCountNonTargetResource()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 5, BlockType.Dirt);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+
+        Assert.True((bool)InvokePrivate(
+            bot,
+            "TryHarvestExcavationBlock",
+            world,
+            CreateResourceTarget(8, 2, 5, BotResourceType.Stone),
+            8,
+            2,
+            5,
+            true,
+            null)!);
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(bot, "_activeGatheredAmount")!));
+        Assert.Equal(1, bot.GetStockpile(BlockType.Dirt));
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерный harvest под action cooldown сразу отказывает")]
+    public void CompanionBot_TryHarvestExcavationBlock_FailsDuringCooldown()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 5, BlockType.Stone);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        SetPrivateField(bot, "_actionCooldown", 0.1f);
+
+        Assert.False((bool)InvokePrivate(
+            bot,
+            "TryHarvestExcavationBlock",
+            world,
+            CreateResourceTarget(8, 2, 5, BotResourceType.Stone),
+            8,
+            2,
+            5,
+            true,
+            null)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерный harvest не увеличивает gathered amount, если вызван без countForActiveCommand")]
+    public void CompanionBot_TryHarvestExcavationBlock_DoesNotCountWhenFlagIsFalse()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(8, 2, 5, BlockType.Stone);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+
+        Assert.True((bool)InvokePrivate(
+            bot,
+            "TryHarvestExcavationBlock",
+            world,
+            CreateResourceTarget(8, 2, 5, BotResourceType.Stone),
+            8,
+            2,
+            5,
+            false,
+            null)!);
+        Assert.Equal(0, Assert.IsType<int>(GetPrivateField(bot, "_activeGatheredAmount")!));
+        Assert.Equal(1, bot.GetStockpile(BlockType.Stone));
+    }
+
+    [Fact(DisplayName = "CompanionBot карьерный harvest отказывает и для protected keepout blueprint")]
+    public void CompanionBot_TryHarvestExcavationBlock_FailsForProtectedBlueprintTarget()
+    {
+        var world = CreateFlatWorld(32, 12);
+        world.SetBlock(22, 2, 22, BlockType.Stone);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Protected-quarry",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: []);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(18.5f, 2.02f, 22.5f));
+
+        Assert.False((bool)InvokePrivate(
+            bot,
+            "TryHarvestExcavationBlock",
+            world,
+            CreateResourceTarget(22, 2, 22, BotResourceType.Stone),
+            22,
+            2,
+            22,
+            true,
+            blueprint)!);
     }
 
     [Fact(DisplayName = "CompanionBot в focused-поиске пропускает blocked/keepout цели и выбирает лучший оставшийся вариант")]
@@ -949,20 +1996,922 @@ public sealed class BotTests
 
         world.SetBlock(6, 2, 6, BlockType.Wood);
         WarmWorld(world, new Vector3(6.5f, 2f, 6.5f));
-        var acquireFirst = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!);
+        var acquireFirst = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!, null!);
         Assert.True((bool)acquireFirst.Result!);
-        var acquireExisting = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!);
+        var acquireExisting = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!, null!);
         Assert.True((bool)acquireExisting.Result!);
 
         SetPrivateField(bot, "_currentTarget", null);
         SetPrivateField(bot, "_retargetCooldown", 0.2f);
-        var acquireCooldown = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!);
+        var acquireCooldown = InvokePrivateWithArgs(bot, "TryAcquireResourceTarget", world, BotResourceType.Wood, null!, null!);
         Assert.False((bool)acquireCooldown.Result!);
 
         var validateCurrent = (bool)InvokePrivate(bot, "IsResourceTargetValid", world, target!)!;
         Assert.True(validateCurrent);
         world.SetBlock(6, 2, 6, BlockType.Air);
         Assert.False((bool)InvokePrivate(bot, "IsResourceTargetValid", world, target!)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot ищет актуальный камень по загруженным чанкам, даже если surface-cache еще грязная")]
+    public void CompanionBot_TryFindNearestResource_FindsExposedStoneFromLoadedChunks_WhenSurfaceCacheIsDirty()
+    {
+        var world = CreateFlatWorld(32, 12);
+        WarmWorld(world, new Vector3(8.5f, 2.02f, 8.5f));
+
+        world.SetBlock(10, 2, 8, BlockType.Stone);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(8.5f, 2.02f, 8.5f), maxChunks: 64);
+        world.SetBlock(10, 3, 8, BlockType.Air);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(10, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(8, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при стройке дома предпочитает ближний скрытый камень на стройплощадке, а не дальний fallback-кандидат")]
+    public void CompanionBot_TryFindNearestResource_BuildHousePrefersNearbyBuriedStone()
+    {
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        WarmWorld(world, new Vector3(8.5f, 2.02f, 8.5f));
+
+        world.SetBlock(10, 2, 8, BlockType.Stone);
+        world.SetBlock(12, 2, 8, BlockType.Stone);
+        world.SetBlock(14, 2, 8, BlockType.Stone);
+        world.SetBlock(16, 2, 8, BlockType.Stone);
+
+        world.SetBlock(14, 3, 8, BlockType.Dirt);
+        world.SetBlock(14, 1, 8, BlockType.Dirt);
+        world.SetBlock(13, 2, 8, BlockType.Dirt);
+        world.SetBlock(15, 2, 8, BlockType.Dirt);
+        world.SetBlock(14, 2, 7, BlockType.Dirt);
+        world.SetBlock(14, 2, 9, BlockType.Dirt);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Keepout",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(10, 2, 8, BlockType.Stone)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(12.5f, 3.02f, 8.5f));
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Stone, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(14, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(8, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot loaded fallback для дерева пропускает planned/protected цели и берёт валидную")]
+    public void CompanionBot_TryFindNearestResource_LoadedFallbackForWood_SkipsPlannedAndProtected()
+    {
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(10, 2, 8, BlockType.Wood);
+        world.SetBlock(12, 2, 8, BlockType.Wood);
+        world.SetBlock(14, 2, 8, BlockType.Wood);
+        world.EnsureChunksAround(new Vector3(8.5f, 2.02f, 8.5f), radiusInChunks: 2);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Fallback-wood",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: [new HouseBuildStep(10, 2, 8, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(12.5f, 3.02f, 8.5f));
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Wood, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(14, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(2, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(8, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при стройке дома ищет дерево в более широком лесном поясе вокруг blueprint")]
+    public void CompanionBot_TryFindNearestResource_BuildHouseUsesBlueprintForestry()
+    {
+        var world = new WorldMap(width: 96, height: 16, depth: 96, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        // У дерева верх закрыт листвой, поэтому более полезен целевой поиск по лесному поясу, а не локальный чистый двор.
+        world.SetBlock(72, 2, 48, BlockType.Wood);
+        world.SetBlock(72, 3, 48, BlockType.Wood);
+        world.SetBlock(72, 4, 48, BlockType.Wood);
+        world.SetBlock(72, 5, 48, BlockType.Leaves);
+        world.SetBlock(71, 5, 48, BlockType.Leaves);
+        world.SetBlock(73, 5, 48, BlockType.Leaves);
+        world.SetBlock(72, 5, 47, BlockType.Leaves);
+        world.SetBlock(72, 5, 49, BlockType.Leaves);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Лесной-дом",
+            originX: 44,
+            floorY: 2,
+            originZ: 44,
+            steps: [new HouseBuildStep(44, 2, 44, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(32.5f, 2.02f, 48.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+
+        world.EnsureChunksAround(bot.Position, radiusInChunks: 4);
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(bot.Position, maxChunks: 256);
+        _ = world.RebuildDirtyChunkSurfaces(blueprint.Center, maxChunks: 256);
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Wood, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(72, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.InRange((int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!, 2, 4);
+        Assert.Equal(48, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot при стройке дома ищет дерево по загруженным chunk вокруг blueprint, даже если лес уже вне forestry-пояса и локального радиуса бота")]
+    public void CompanionBot_TryFindNearestResource_BuildHouseUsesBlueprintForestryLoadedFallback()
+    {
+        var world = new WorldMap(width: 128, height: 16, depth: 128, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(96, 2, 48, BlockType.Wood);
+        world.SetBlock(96, 3, 48, BlockType.Wood);
+        world.SetBlock(96, 4, 48, BlockType.Wood);
+        world.SetBlock(96, 5, 48, BlockType.Leaves);
+        world.SetBlock(95, 5, 48, BlockType.Leaves);
+        world.SetBlock(97, 5, 48, BlockType.Leaves);
+        world.SetBlock(96, 5, 47, BlockType.Leaves);
+        world.SetBlock(96, 5, 49, BlockType.Leaves);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Лесной-дом-loaded",
+            originX: 44,
+            floorY: 2,
+            originZ: 44,
+            steps: [new HouseBuildStep(44, 2, 44, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(32.5f, 2.02f, 48.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+
+        world.EnsureChunksAround(bot.Position, radiusInChunks: 4);
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 8);
+        _ = world.RebuildDirtyChunkSurfaces(bot.Position, maxChunks: 512);
+        _ = world.RebuildDirtyChunkSurfaces(blueprint.Center, maxChunks: 512);
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Wood, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(96, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.InRange((int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!, 2, 4);
+        Assert.Equal(48, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot после пустого ближнего поиска переходит на расширенный surface-радиус")]
+    public void CompanionBot_TryFindNearestResource_UsesExtendedSurfaceRadius()
+    {
+        var world = new WorldMap(width: 80, height: 12, depth: 80, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                for (var y = 1; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(42, 1, 12, BlockType.Wood);
+        WarmWorld(world, new Vector3(12.5f, 1.02f, 12.5f));
+        WarmWorld(world, new Vector3(42.5f, 1.02f, 12.5f));
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(12.5f, 1.02f, 12.5f));
+
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Wood, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(42, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(1, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(12, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot loaded fallback реально возвращает ресурс, если surface-cache ещё пустой")]
+    public void CompanionBot_TryFindNearestResource_LoadedFallback_ReturnsTarget_WhenSurfaceCacheMissing()
+    {
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                for (var y = 1; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(10, 1, 8, BlockType.Wood);
+        world.EnsureChunksAround(new Vector3(8.5f, 2.02f, 8.5f), radiusInChunks: 2);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        var nearest = InvokePrivateWithArgs(bot, "TryFindNearestResource", world, BotResourceType.Wood, null!);
+
+        Assert.True((bool)nearest.Result!);
+        var target = nearest.Args[2]!;
+        var targetType = target.GetType();
+        Assert.Equal(10, (int)targetType.GetProperty("X", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(1, (int)targetType.GetProperty("Y", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+        Assert.Equal(8, (int)targetType.GetProperty("Z", BindingFlags.Instance | BindingFlags.Public)!.GetValue(target)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot не спамит поиском ресурса на каждом тике, пока действует miss-cooldown")]
+    public void CompanionBot_ExecuteGatherObjective_MissingResource_RespectsRetryCooldown()
+    {
+        var world = CreateFlatWorld(24, 12);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Dirt);
+                for (var y = 1; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        WarmWorld(world, new Vector3(6.5f, 2.02f, 6.5f));
+
+        var log = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), new Vector3(6.5f, 2.02f, 6.5f), log.Add);
+
+        var first = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+        var second = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+
+        Assert.False(first);
+        Assert.False(second);
+        Assert.Equal(1, log.Count(entry => entry.Contains("target-search-empty resource=Stone", StringComparison.Ordinal)));
+        Assert.Equal(1, log.Count(entry => entry.Contains("gather-target-missing resource=Stone", StringComparison.Ordinal)));
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_retargetCooldown")!) >= 0.8f);
+    }
+
+    [Fact(DisplayName = "CompanionBot при стройке дома держит более длинный miss-cooldown для камня и не дёргает тяжёлый поиск каждый тик")]
+    public void CompanionBot_ExecuteGatherObjective_BuildHouseStoneMissing_UsesLongerRetryCooldown()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+
+                for (var y = 0; y <= 8; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Dirt);
+                }
+            }
+        }
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Нет-камня",
+            originX: 10,
+            floorY: 4,
+            originZ: 10,
+            steps: [new HouseBuildStep(10, 4, 10, BlockType.Stone)]);
+        var log = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), new Vector3(12.5f, 9.02f, 12.5f), log.Add);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        WarmWorld(world, bot.Position);
+
+        var first = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+        var second = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Stone, 1, 1f / 30f, false)!;
+
+        Assert.False(first);
+        Assert.False(second);
+        Assert.Equal(1, log.Count(entry => entry.Contains("target-search-empty resource=Stone", StringComparison.Ordinal)));
+        Assert.Equal(1, log.Count(entry => entry.Contains("gather-target-missing resource=Stone", StringComparison.Ordinal)));
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_retargetCooldown")!) >= 2.3f);
+    }
+
+    [Fact(DisplayName = "CompanionBot при стройке дома держит более длинный miss-cooldown и для дерева")]
+    public void CompanionBot_ExecuteGatherObjective_BuildHouseWoodMissing_UsesLongerRetryCooldown()
+    {
+        var world = new WorldMap(width: 48, height: 12, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Нет-дерева",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: [new HouseBuildStep(20, 2, 20, BlockType.Wood)]);
+        var log = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), blueprint.Center, log.Add);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(blueprint.Center, maxChunks: 256);
+
+        var first = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Wood, 1, 1f / 30f, false)!;
+        var second = (bool)InvokePrivate(bot, "ExecuteGatherObjective", world, BotResourceType.Wood, 1, 1f / 30f, false)!;
+
+        Assert.False(first);
+        Assert.False(second);
+        Assert.Equal(1, log.Count(entry => entry.Contains("target-search-empty resource=Wood", StringComparison.Ordinal)));
+        Assert.Equal(1, log.Count(entry => entry.Contains("gather-target-missing resource=Wood", StringComparison.Ordinal)));
+        Assert.True(Assert.IsType<float>(GetPrivateField(bot, "_retargetCooldown")!) >= 1.5f);
+    }
+
+    [Fact(DisplayName = "CompanionBot build resource cooldown для листьев использует обычный fallback, а не специальные ветки wood/stone")]
+    public void CompanionBot_GetMissingResourceRetryCooldown_ForLeavesBuildHouse_UsesDefaultCooldown()
+    {
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Листва-cooldown",
+            originX: 10,
+            floorY: 2,
+            originZ: 10,
+            steps: [new HouseBuildStep(10, 2, 10, BlockType.Leaves)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(12.5f, 2.02f, 12.5f));
+
+        var cooldown = (float)InvokePrivate(bot, "GetMissingResourceRetryCooldown", BotResourceType.Leaves, blueprint)!;
+
+        Assert.InRange(cooldown, 0.84f, 0.86f);
+    }
+
+    [Fact(DisplayName = "CompanionBot surface helper пропускает planned и protected цели")]
+    public void CompanionBot_CollectSurfaceResourceCandidates_SkipsPlannedAndProtected()
+    {
+        var world = CreateFlatWorld(24, 12);
+        world.SetBlock(10, 2, 8, BlockType.Wood);
+        world.SetBlock(12, 2, 8, BlockType.Wood);
+        WarmWorld(world, new Vector3(8.5f, 2.02f, 8.5f));
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Surface-skip",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(10, 2, 8, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(12.5f, 3.02f, 8.5f));
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(
+            bot,
+            "CollectSurfaceResourceCandidates",
+            world,
+            BotResourceType.Wood,
+            blueprint,
+            1,
+            1,
+            1,
+            candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot loaded helper пропускает planned и protected цели")]
+    public void CompanionBot_CollectLoadedChunkResourceCandidates_SkipsPlannedAndProtected()
+    {
+        var world = new WorldMap(width: 32, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(10, 2, 8, BlockType.Wood);
+        world.SetBlock(12, 2, 8, BlockType.Wood);
+        world.EnsureChunksAround(new Vector3(8.5f, 2.02f, 8.5f), radiusInChunks: 2);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Loaded-skip",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(10, 2, 8, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(12.5f, 3.02f, 8.5f));
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(
+            bot,
+            "CollectLoadedChunkResourceCandidates",
+            world,
+            BotResourceType.Wood,
+            blueprint,
+            1,
+            1,
+            1,
+            candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint forestry helper пропускает пустые loaded-колонки и невалидные цели")]
+    public void CompanionBot_CollectBlueprintForestryCandidates_SkipsLoadedAirAndInvalidTargets()
+    {
+        var world = new WorldMap(width: 64, height: 12, depth: 64, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(28, 2, 24, BlockType.Wood);
+        world.SetBlock(28, 3, 24, BlockType.Leaves);
+        world.SetBlock(30, 2, 24, BlockType.Wood);
+        world.SetBlock(30, 3, 24, BlockType.Leaves);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Forestry-helper",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: [new HouseBuildStep(28, 2, 24, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(18.5f, 2.02f, 24.5f));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(blueprint.Center, maxChunks: 256);
+        InvokePrivate(bot, "BlockResourceTarget", CreateResourceTarget(30, 2, 24, BotResourceType.Wood), 2f);
+
+        // Делает loaded chunk с пустой колонкой: helper должен её пропустить без кандидата.
+        for (var y = 0; y < world.Height; y++)
+        {
+            world.SetBlock(8, y, 8, BlockType.Air);
+        }
+        world.EnsureChunksAround(new Vector3(8.5f, 2.02f, 8.5f), radiusInChunks: 0);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintForestryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint quarry helper пропускает пустые loaded-колонки и невалидные buried-цели")]
+    public void CompanionBot_CollectBlueprintQuarryCandidates_SkipsLoadedAirAndInvalidTargets()
+    {
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+                for (var y = 4; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(28, 2, 24, BlockType.Stone);
+        world.SetBlock(28, 3, 24, BlockType.Dirt);
+        world.SetBlock(30, 2, 24, BlockType.Stone);
+        world.SetBlock(30, 3, 24, BlockType.Dirt);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Quarry-helper",
+            originX: 20,
+            floorY: 3,
+            originZ: 20,
+            steps: [new HouseBuildStep(28, 2, 24, BlockType.Stone)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(18.5f, 4.02f, 24.5f));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+        _ = world.RebuildDirtyChunkSurfaces(blueprint.Center, maxChunks: 256);
+        InvokePrivate(bot, "BlockResourceTarget", CreateResourceTarget(30, 2, 24, BotResourceType.Stone), 2f);
+
+        for (var y = 0; y < world.Height; y++)
+        {
+            world.SetBlock(8, y, 8, BlockType.Air);
+        }
+        world.EnsureChunksAround(new Vector3(8.5f, 2.02f, 8.5f), radiusInChunks: 0);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintQuarryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint forestry helper пропускает protected и неэкспонированную древесину")]
+    public void CompanionBot_CollectBlueprintForestryCandidates_SkipsProtectedAndUnexposedWood()
+    {
+        var world = new WorldMap(width: 64, height: 12, depth: 64, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(24, 2, 24, BlockType.Wood);
+        world.SetBlock(26, 2, 24, BlockType.Wood);
+        world.SetBlock(26, 3, 24, BlockType.Dirt);
+        world.SetBlock(27, 2, 24, BlockType.Dirt);
+        world.SetBlock(25, 2, 24, BlockType.Dirt);
+        world.SetBlock(26, 2, 23, BlockType.Dirt);
+        world.SetBlock(26, 2, 25, BlockType.Dirt);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Forestry-protected",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: []);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(20.5f, 2.02f, 20.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(24.5f, 3.02f, 24.5f));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintForestryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint quarry helper пропускает protected и уже открытый камень")]
+    public void CompanionBot_CollectBlueprintQuarryCandidates_SkipsProtectedAndExposedStone()
+    {
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+                for (var y = 4; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(24, 2, 24, BlockType.Stone);
+        world.SetBlock(24, 3, 24, BlockType.Dirt);
+        world.SetBlock(26, 2, 24, BlockType.Stone);
+        world.SetBlock(26, 3, 24, BlockType.Air);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Quarry-protected",
+            originX: 20,
+            floorY: 3,
+            originZ: 20,
+            steps: []);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(20.5f, 4.02f, 20.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(24.5f, 3.02f, 24.5f));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintQuarryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint forestry helper покрывает blocked/planned/protected/unexposed и оставляет только валидную древесину")]
+    public void CompanionBot_CollectBlueprintForestryCandidates_CoversAllGuardReasons()
+    {
+        var world = new WorldMap(width: 72, height: 12, depth: 72, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                for (var y = 2; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        foreach (var x in new[] { 24, 26, 28, 30, 32 })
+        {
+            world.SetBlock(x, 2, 24, BlockType.Wood);
+            world.SetBlock(x, 3, 24, BlockType.Leaves);
+        }
+
+        world.SetBlock(30, 3, 24, BlockType.Dirt);
+        world.SetBlock(31, 2, 24, BlockType.Dirt);
+        world.SetBlock(29, 2, 24, BlockType.Dirt);
+        world.SetBlock(30, 2, 23, BlockType.Dirt);
+        world.SetBlock(30, 2, 25, BlockType.Dirt);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Forestry-guards",
+            originX: 20,
+            floorY: 2,
+            originZ: 20,
+            steps: [new HouseBuildStep(26, 2, 24, BlockType.Wood)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(20.5f, 2.02f, 20.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(28.5f, 3.02f, 24.5f));
+        InvokePrivate(bot, "BlockResourceTarget", CreateResourceTarget(24, 2, 24, BotResourceType.Wood), 2f);
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintForestryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(1, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint quarry helper покрывает blocked/planned/protected/exposed и оставляет только валидный buried-камень")]
+    public void CompanionBot_CollectBlueprintQuarryCandidates_CoversAllGuardReasons()
+    {
+        var world = new WorldMap(width: 72, height: 16, depth: 72, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+                world.SetBlock(x, 1, z, BlockType.Dirt);
+                world.SetBlock(x, 2, z, BlockType.Dirt);
+                world.SetBlock(x, 3, z, BlockType.Dirt);
+                for (var y = 4; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        foreach (var x in new[] { 24, 26, 28, 30, 32 })
+        {
+            world.SetBlock(x, 2, 24, BlockType.Stone);
+            world.SetBlock(x, 3, 24, BlockType.Dirt);
+        }
+
+        world.SetBlock(30, 3, 24, BlockType.Air);
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Quarry-guards",
+            originX: 20,
+            floorY: 3,
+            originZ: 20,
+            steps: [new HouseBuildStep(26, 2, 24, BlockType.Stone)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(20.5f, 4.02f, 20.5f));
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(28.5f, 3.02f, 24.5f));
+        InvokePrivate(bot, "BlockResourceTarget", CreateResourceTarget(24, 2, 24, BotResourceType.Stone), 2f);
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 4);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+        var candidates = Activator.CreateInstance(listType)!;
+
+        InvokePrivate(bot, "CollectBlueprintQuarryCandidates", world, blueprint, candidates);
+
+        Assert.Equal(1, (int)listType.GetProperty("Count")!.GetValue(candidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint forestry/quarry helper покрывают loaded-ветку без верхнего solid-блока")]
+    public void CompanionBot_BlueprintHelpers_CoverLoadedChunkWithoutTopSolid()
+    {
+        var world = new WorldMap(width: 48, height: 12, depth: 48, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Empty-loaded",
+            originX: 16,
+            floorY: 2,
+            originZ: 16,
+            steps: []);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(16.5f, 2.02f, 16.5f));
+        world.EnsureChunksAround(blueprint.Center, radiusInChunks: 2);
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+
+        var forestryCandidates = Activator.CreateInstance(listType)!;
+        InvokePrivate(bot, "CollectBlueprintForestryCandidates", world, blueprint, forestryCandidates);
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(forestryCandidates)!);
+
+        var quarryCandidates = Activator.CreateInstance(listType)!;
+        InvokePrivate(bot, "CollectBlueprintQuarryCandidates", world, blueprint, quarryCandidates);
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(quarryCandidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot blueprint forestry/quarry helper пропускают unloaded chunk-колонки")]
+    public void CompanionBot_BlueprintHelpers_SkipUnloadedChunks()
+    {
+        var world = new WorldMap(width: 48, height: 12, depth: 48, chunkSize: 8, seed: 0);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Unloaded-range",
+            originX: 16,
+            floorY: 2,
+            originZ: 16,
+            steps: []);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(16.5f, 2.02f, 16.5f));
+
+        var candidateType = typeof(CompanionBot).GetNestedType("ScoredResourceCandidate", BindingFlags.NonPublic)!;
+        var listType = typeof(List<>).MakeGenericType(candidateType);
+
+        var forestryCandidates = Activator.CreateInstance(listType)!;
+        InvokePrivate(bot, "CollectBlueprintForestryCandidates", world, blueprint, forestryCandidates);
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(forestryCandidates)!);
+
+        var quarryCandidates = Activator.CreateInstance(listType)!;
+        InvokePrivate(bot, "CollectBlueprintQuarryCandidates", world, blueprint, quarryCandidates);
+        Assert.Equal(0, (int)listType.GetProperty("Count")!.GetValue(quarryCandidates)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot сильнее штрафует карьерный камень, который лежит заметно ниже уровня пола дома")]
+    public void CompanionBot_ScoreBlueprintQuarryCandidate_PenalizesDeepStoneBelowFloor()
+    {
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Штраф-глубины",
+            originX: 14,
+            floorY: 12,
+            originZ: 14,
+            steps: [new HouseBuildStep(14, 12, 14, BlockType.Stone)]);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(18.5f, 12.02f, 18.5f));
+
+        var shallow = (float)InvokePrivate(bot, "ScoreBlueprintQuarryCandidate", blueprint, 20, 11, 20, 15)!;
+        var deep = (float)InvokePrivate(bot, "ScoreBlueprintQuarryCandidate", blueprint, 20, 4, 20, 15)!;
+
+        Assert.True(deep > shallow);
+    }
+
+    [Fact(DisplayName = "CompanionBot считает воздушную экспозицию для полностью открытого и полностью зажатого блока")]
+    public void CompanionBot_CountAirExposureNoLoad_HandlesOpenAndClosedBlocks()
+    {
+        var world = new WorldMap(width: 16, height: 12, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(8.5f, 2.02f, 8.5f));
+
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+        var openExposure = (int)InvokePrivate(bot, "CountAirExposureNoLoad", world, 8, 2, 8)!;
+
+        world.SetBlock(9, 2, 8, BlockType.Dirt);
+        world.SetBlock(7, 2, 8, BlockType.Dirt);
+        world.SetBlock(8, 2, 9, BlockType.Dirt);
+        world.SetBlock(8, 2, 7, BlockType.Dirt);
+        world.SetBlock(8, 3, 8, BlockType.Dirt);
+        var closedExposure = (int)InvokePrivate(bot, "CountAirExposureNoLoad", world, 8, 2, 8)!;
+
+        Assert.Equal(5, openExposure);
+        Assert.Equal(0, closedExposure);
     }
 
     [Fact(DisplayName = "CompanionBot private helper-ветки по движению, позе и ориентации покрыты")]
@@ -2043,6 +3992,257 @@ public sealed class BotTests
         InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
 
         Assert.Equal(BotStatus.NoPath, bot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot при недостижимом шаге стройки ставит временную ступень к цели")]
+    public void CompanionBot_UpdateBuildCommand_CreatesTemporarySupportForUnreachableBuildStep()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 4; x <= 5; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                for (var y = 0; y <= 4; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        for (var x = 14; x <= 15; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                for (var y = 0; y <= 1; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Временный-доступ",
+            originX: 12,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(14, 2, 5, BlockType.Wood)]);
+
+        var traces = new List<string>();
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 5.02f, 5.5f), traces.Add);
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        InvokePrivate(bot, "AddStockpile", BlockType.Dirt, 1);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BlockType.Dirt, world.GetBlock(6, 3, 5));
+        Assert.Equal(BotStatus.Building, bot.Status);
+        Assert.Contains(traces, trace => trace.Contains("build-support", StringComparison.Ordinal));
+    }
+
+    [Fact(DisplayName = "CompanionBot не пытается строить временную ступень без подходящего материала")]
+    public void CompanionBot_TryCreateTemporaryBuildAccess_RequiresSupportMaterial()
+    {
+        var world = new WorldMap(width: 24, height: 16, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                for (var y = 0; y < world.Height; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 4; x <= 5; x++)
+        {
+            for (var z = 4; z <= 6; z++)
+            {
+                for (var y = 0; y <= 4; y++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Stone);
+                }
+            }
+        }
+
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Без-материала",
+            originX: 12,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(14, 2, 5, BlockType.Wood)]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 5.02f, 5.5f));
+
+        Assert.False((bool)InvokePrivate(bot, "TryCreateTemporaryBuildAccess", world, blueprint, blueprint.Steps[0])!);
+        Assert.Equal(BlockType.Air, world.GetBlock(6, 3, 5));
+    }
+
+    [Fact(DisplayName = "CompanionBot при blocked current step выбирает достижимый альтернативный шаг вместо NoPath")]
+    public void CompanionBot_UpdateBuildCommand_BlockedStepUsesReachableAlternative()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Blocked-step-reroute",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(999, 2, 999, BlockType.Wood),
+                new HouseBuildStep(8, 2, 5, BlockType.Wood)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        InvokePrivate(bot, "BlockBuildStep", blueprint.Steps[0], 1.25f);
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BlockType.Wood, world.GetBlock(8, 2, 5));
+        Assert.NotEqual(BotStatus.NoPath, bot.Status);
+    }
+
+    [Fact(DisplayName = "CompanionBot при blocked move стройки переходит на достижимый альтернативный шаг")]
+    public void CompanionBot_UpdateBuildCommand_BlockedMoveUsesReachableAlternative()
+    {
+        var world = CreateFlatWorld(32, 12);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Blocked-move-reroute",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(999, 2, 999, BlockType.Wood),
+                new HouseBuildStep(8, 2, 5, BlockType.Wood)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 1);
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        SetPrivateField(bot, "_navigationGoal", CreateNavigationGoal("BuildAction", 999, 2, 999, 7, blueprint));
+        SetPrivateField(bot, "_navigationWaypoints", new[] { new Vector3(20.5f, 2.02f, 20.5f) });
+        SetPrivateField(bot, "_navigationWaypointIndex", 0);
+        SetPrivateField(bot, "_stuckTime", 3f);
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BotStatus.Building, bot.Status);
+        Assert.Equal(0f, Assert.IsType<float>(GetPrivateField(bot, "_noPathTimer")!));
+    }
+
+    [Fact(DisplayName = "CompanionBot support helpers покрывают fallback материала и отказы по stockpile")]
+    public void CompanionBot_TemporarySupportHelpers_CoverFallbackMaterialAndStockFailure()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var step = new HouseBuildStep(8, 2, 5, BlockType.Leaves);
+        InvokePrivate(bot, "AddStockpile", BlockType.Leaves, 1);
+
+        var material = InvokePrivateWithArgs(bot, "TryGetTemporarySupportMaterial", step, default(BlockType));
+        Assert.True((bool)material.Result!);
+        Assert.Equal(BlockType.Leaves, Assert.IsType<BlockType>(material.Args[1]!));
+        Assert.False((bool)InvokePrivate(bot, "TryGetTemporarySupportMaterial", new HouseBuildStep(8, 2, 5, BlockType.Air), default(BlockType))!);
+
+        Assert.True((bool)InvokePrivate(bot, "TryConsumeStockpile", BlockType.Leaves, 1)!);
+        Assert.False((bool)InvokePrivate(bot, "TryApplyTemporaryBuildSupport", world, new HouseBuildStep(6, 1, 5, BlockType.Wood))!);
+    }
+
+    [Fact(DisplayName = "CompanionBot support helper-ы покрывают направления, границы и проверки позы")]
+    public void CompanionBot_TemporarySupportHelpers_CoverDirectionAndPoseBranches()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Support-helper-coverage",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(2, 2, 2, BlockType.Wood)]);
+        var remoteBlueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Support-remote",
+            originX: 12,
+            floorY: 2,
+            originZ: 12,
+            steps: [new HouseBuildStep(14, 2, 14, BlockType.Wood)]);
+
+        Assert.False((bool)InvokePrivate(bot, "CanStandOnTemporarySupport", world, new HouseBuildStep(0, 11, 0, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "CanStandOnTemporarySupport", world, new HouseBuildStep(24, 1, 5, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "CanStandOnTemporarySupport", world, new HouseBuildStep(5, -1, 5, BlockType.Dirt))!);
+        world.SetBlock(6, 2, 5, BlockType.Stone);
+        Assert.False((bool)InvokePrivate(bot, "CanStandOnTemporarySupport", world, new HouseBuildStep(6, 1, 5, BlockType.Dirt))!);
+        world.SetBlock(6, 2, 5, BlockType.Air);
+
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, remoteBlueprint, remoteBlueprint.Steps[0], new HouseBuildStep(-1, 1, 5, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, remoteBlueprint, remoteBlueprint.Steps[0], new HouseBuildStep(14, 2, 14, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, remoteBlueprint, remoteBlueprint.Steps[0], new HouseBuildStep(20, 1, 20, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, blueprint, blueprint.Steps[0], new HouseBuildStep(5, 2, 5, BlockType.Dirt))!);
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, remoteBlueprint, remoteBlueprint.Steps[0], new HouseBuildStep(5, 2, 5, BlockType.Dirt))!);
+
+        SetPrivateField(bot, "_hasPlayerPosition", true);
+        SetPrivateField(bot, "_lastPlayerPosition", new Vector3(7.5f, 2.02f, 5.5f));
+        Assert.False((bool)InvokePrivate(bot, "IsValidTemporarySupportCandidate", world, remoteBlueprint, remoteBlueprint.Steps[0], new HouseBuildStep(7, 2, 5, BlockType.Dirt))!);
+
+        var selection = InvokePrivateWithArgs(
+            bot,
+            "TrySelectTemporaryBuildSupport",
+            world,
+            blueprint,
+            new BotNavigationCell(0, 2, 0),
+            new HouseBuildStep(-2, 0, 1, BlockType.Wood),
+            BlockType.Dirt,
+            default(HouseBuildStep));
+
+        Assert.True((bool)selection.Result!);
+        Assert.Equal(new HouseBuildStep(0, 2, 1, BlockType.Dirt), Assert.IsType<HouseBuildStep>(selection.Args[5]!));
+
+        var centerSelection = InvokePrivateWithArgs(
+            bot,
+            "TrySelectTemporaryBuildSupport",
+            world,
+            remoteBlueprint,
+            new BotNavigationCell(10, 2, 10),
+            new HouseBuildStep(12, 0, 12, BlockType.Wood),
+            BlockType.Dirt,
+            default(HouseBuildStep));
+        Assert.True((bool)centerSelection.Result!);
+    }
+
+    [Fact(DisplayName = "CompanionBot support directions покрывают нулевые и доминирующие оси")]
+    public void CompanionBot_GetPreferredSupportDirections_CoversAxisBranches()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var zeroDirections = ((System.Collections.IEnumerable)InvokePrivate(bot, "GetPreferredSupportDirections", new BotNavigationCell(4, 2, 4), new HouseBuildStep(4, 2, 4, BlockType.Wood))!)
+            .Cast<object>()
+            .Select(item => ((ValueTuple<int, int>)item))
+            .ToArray();
+        Assert.Equal(4, zeroDirections.Length);
+
+        var verticalDominantDirections = ((System.Collections.IEnumerable)InvokePrivate(bot, "GetPreferredSupportDirections", new BotNavigationCell(4, 2, 4), new HouseBuildStep(5, 2, 9, BlockType.Wood))!)
+            .Cast<object>()
+            .Select(item => ((ValueTuple<int, int>)item))
+            .ToArray();
+        Assert.Equal((0, 1), verticalDominantDirections[0]);
     }
 
     [Fact(DisplayName = "CompanionBot считает нерасходуемый альтернативный шаг доступным по ресурсам")]

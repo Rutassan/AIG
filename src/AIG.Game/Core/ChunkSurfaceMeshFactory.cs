@@ -33,7 +33,9 @@ internal static class ChunkSurfaceMeshFactory
         Vector3 V2,
         Vector3 V3,
         WorldTextureAtlas.WorldAtlasTile Tile,
-        byte Shade);
+        byte Shade,
+        byte Sun,
+        byte Accent);
 
     public static ChunkSurfaceMeshData Build(WorldMap world, IReadOnlyList<WorldMap.SurfaceBlock> surfaces)
     {
@@ -64,7 +66,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(0.5f, 0.5f, 0.5f),
                 center + new Vector3(0.5f, 0.5f, -0.5f),
                 tiles.Side,
-                ApplyLight(206, sunLight, occlusion)),
+                ApplyLight(206, sunLight, occlusion),
+                EncodeSunChannel(surface, topBias: -0.02f, visibilityBias: 0.05f),
+                EncodeAccentChannel(surface, ridgeBias: 0.04f, cavityBias: 0.09f)),
                 !world.IsSurfaceMeshingSolid(surface.X + 1, surface.Y, surface.Z),
                 vertices,
                 texCoords,
@@ -79,7 +83,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(-0.5f, 0.5f, -0.5f),
                 center + new Vector3(-0.5f, 0.5f, 0.5f),
                 tiles.Side,
-                ApplyLight(188, sunLight, occlusion)),
+                ApplyLight(188, sunLight, occlusion),
+                EncodeSunChannel(surface, topBias: -0.04f, visibilityBias: 0.02f),
+                EncodeAccentChannel(surface, ridgeBias: 0.02f, cavityBias: 0.11f)),
                 !world.IsSurfaceMeshingSolid(surface.X - 1, surface.Y, surface.Z),
                 vertices,
                 texCoords,
@@ -94,7 +100,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(0.5f, 0.5f, 0.5f),
                 center + new Vector3(-0.5f, 0.5f, 0.5f),
                 tiles.Top,
-                ApplyLight(255, sunLight, relief)),
+                ApplyLight(255, sunLight, relief),
+                EncodeSunChannel(surface, topBias: 0.18f, visibilityBias: 0.12f),
+                EncodeAccentChannel(surface, ridgeBias: 0.18f, cavityBias: 0.05f)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y + 1, surface.Z),
                 vertices,
                 texCoords,
@@ -109,7 +117,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(0.5f, -0.5f, -0.5f),
                 center + new Vector3(-0.5f, -0.5f, -0.5f),
                 tiles.Bottom,
-                ApplyLight(142, sunLight, occlusion)),
+                ApplyLight(142, sunLight, occlusion),
+                EncodeSunChannel(surface, topBias: -0.28f, visibilityBias: -0.08f),
+                EncodeAccentChannel(surface, ridgeBias: -0.10f, cavityBias: 0.14f)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y - 1, surface.Z),
                 vertices,
                 texCoords,
@@ -124,7 +134,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(-0.5f, 0.5f, 0.5f),
                 center + new Vector3(0.5f, 0.5f, 0.5f),
                 tiles.Side,
-                ApplyLight(222, sunLight, occlusion)),
+                ApplyLight(222, sunLight, occlusion),
+                EncodeSunChannel(surface, topBias: 0.02f, visibilityBias: 0.08f),
+                EncodeAccentChannel(surface, ridgeBias: 0.05f, cavityBias: 0.08f)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y, surface.Z + 1),
                 vertices,
                 texCoords,
@@ -139,7 +151,9 @@ internal static class ChunkSurfaceMeshFactory
                 center + new Vector3(0.5f, 0.5f, -0.5f),
                 center + new Vector3(-0.5f, 0.5f, -0.5f),
                 tiles.Side,
-                ApplyLight(172, sunLight, occlusion)),
+                ApplyLight(172, sunLight, occlusion),
+                EncodeSunChannel(surface, topBias: -0.08f, visibilityBias: -0.02f),
+                EncodeAccentChannel(surface, ridgeBias: 0.01f, cavityBias: 0.12f)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y, surface.Z - 1),
                 vertices,
                 texCoords,
@@ -177,10 +191,10 @@ internal static class ChunkSurfaceMeshFactory
             return;
         }
 
-        AddVertex(face.V0, face.Normal, face.Shade, uv.U0, uv.V1, vertices, texCoords, normals, colors);
-        AddVertex(face.V1, face.Normal, face.Shade, uv.U1, uv.V1, vertices, texCoords, normals, colors);
-        AddVertex(face.V2, face.Normal, face.Shade, uv.U1, uv.V0, vertices, texCoords, normals, colors);
-        AddVertex(face.V3, face.Normal, face.Shade, uv.U0, uv.V0, vertices, texCoords, normals, colors);
+        AddVertex(face.V0, face.Normal, face.Shade, face.Sun, face.Accent, uv.U0, uv.V1, vertices, texCoords, normals, colors);
+        AddVertex(face.V1, face.Normal, face.Shade, face.Sun, face.Accent, uv.U1, uv.V1, vertices, texCoords, normals, colors);
+        AddVertex(face.V2, face.Normal, face.Shade, face.Sun, face.Accent, uv.U1, uv.V0, vertices, texCoords, normals, colors);
+        AddVertex(face.V3, face.Normal, face.Shade, face.Sun, face.Accent, uv.U0, uv.V0, vertices, texCoords, normals, colors);
 
         indices.Add((ushort)(vertexBase + 0));
         indices.Add((ushort)(vertexBase + 2));
@@ -194,6 +208,8 @@ internal static class ChunkSurfaceMeshFactory
         Vector3 vertex,
         Vector3 normal,
         byte shade,
+        byte sun,
+        byte accent,
         float u,
         float v,
         List<float> vertices,
@@ -213,8 +229,8 @@ internal static class ChunkSurfaceMeshFactory
         normals.Add(normal.Z);
 
         colors.Add(shade);
-        colors.Add(shade);
-        colors.Add(shade);
+        colors.Add(sun);
+        colors.Add(accent);
         colors.Add(255);
     }
 
@@ -222,5 +238,37 @@ internal static class ChunkSurfaceMeshFactory
     {
         var value = baseShade * Math.Clamp(sunLight * accent, 0.45f, 1.25f);
         return (byte)Math.Clamp((int)MathF.Round(value), 48, 255);
+    }
+
+    private static byte EncodeSunChannel(WorldMap.SurfaceBlock surface, float topBias, float visibilityBias)
+    {
+        var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var sky = Math.Clamp(surface.SkyExposure / 5f, 0f, 1f);
+        var value = 0.30f
+            + sunVisibility * (0.52f + visibilityBias)
+            + sky * 0.10f
+            + (surface.TopVisible ? 0.08f : -0.04f)
+            + topBias
+            - cavity * 0.14f;
+        return EncodeUnit(value);
+    }
+
+    private static byte EncodeAccentChannel(WorldMap.SurfaceBlock surface, float ridgeBias, float cavityBias)
+    {
+        var ridge = Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f);
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+        var value = 0.42f
+            + ridge * (0.22f + ridgeBias)
+            + sunVisibility * 0.08f
+            - cavity * (0.20f + cavityBias)
+            + (surface.TopVisible ? 0.06f : -0.02f);
+        return EncodeUnit(value);
+    }
+
+    private static byte EncodeUnit(float value)
+    {
+        return (byte)Math.Clamp((int)MathF.Round(Math.Clamp(value, 0.05f, 1f) * 255f), 18, 255);
     }
 }
