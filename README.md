@@ -28,12 +28,13 @@
 - усиленная material system для разных типов блоков;
 - постобработка, небо, облачные полосы и дальний фон, согласованные с новым рендером;
 - усиленный shader stack мира с `sun scatter`, `ambient lift`, `haze` и material-shadow response;
+- дополнительная глубина рендера через `horizon depth` и `foliage translucency`;
 - автопроверки производительности и стабильности;
 - полное автоматическое тестовое покрытие.
 
 ## Текущее состояние
 
-Последняя завершённая версия: `0.020`.
+Последняя завершённая версия: `0.021`.
 
 На этом этапе в проекте уже реализованы:
 - текстурный atlas блоков;
@@ -43,7 +44,7 @@
 - усиленная material system и material-separation в shader;
 - лёгкие солнечные тени без тяжёлой shadow-map системы;
 - улучшенные небо, cloud bands, дальний фон и post-process;
-- более зрелый shader-driven light stack: `sun scatter`, `ambient lift`, `shadow depth`, `haze`, `material shadow`;
+- более зрелый shader-driven light stack: `sun scatter`, `ambient lift`, `shadow depth`, `haze`, `material shadow`, `horizon depth`, `foliage translucency`;
 - обновлённая подсветка блока;
 - доработанный held-block и спецслои рендера;
 - стабильный `autocheck` / `autoperf`;
@@ -146,6 +147,7 @@ dotnet test AIG.sln --collect:"XPlat Code Coverage" -v minimal
 - material-channel для разных типов блоков;
 - material-separation для лучшего различия блоков под светом и в тени;
 - material-shadow response для более выразительного различия материалов именно в тенях;
+- `horizon depth` и `foliage translucency` для более глубокой дальней атмосферы и лучшего солнечного прохода через растительность;
 - атмосферный туман;
 - стилизованный свет, distance haze и лёгкие солнечные тени;
 - улучшенные небо, облачные полосы и дальний фон;

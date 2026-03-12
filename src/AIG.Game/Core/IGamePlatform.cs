@@ -25,7 +25,9 @@ public readonly record struct WorldMaterialPassSettings(
     float SunScatterStrength,
     float AmbientLiftStrength,
     float HazeStrength,
-    float MaterialShadowStrength);
+    float MaterialShadowStrength,
+    float HorizonDepthStrength,
+    float FoliageTranslucencyStrength);
 
 public interface IGamePlatform
 {

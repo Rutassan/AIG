@@ -47,6 +47,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private int _worldAtlasAmbientLiftStrengthLoc = -1;
     private int _worldAtlasHazeStrengthLoc = -1;
     private int _worldAtlasMaterialShadowStrengthLoc = -1;
+    private int _worldAtlasHorizonDepthStrengthLoc = -1;
+    private int _worldAtlasFoliageTranslucencyStrengthLoc = -1;
     private WorldMaterialPassSettings _worldMaterialPassSettings;
     private bool _hasWorldMaterialPassSettings;
     private Texture2D _worldAtlasTexture;
@@ -379,6 +381,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasAmbientLiftStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "ambientLiftStrength");
         _worldAtlasHazeStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "hazeStrength");
         _worldAtlasMaterialShadowStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "materialShadowStrength");
+        _worldAtlasHorizonDepthStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "horizonDepthStrength");
+        _worldAtlasFoliageTranslucencyStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "foliageTranslucencyStrength");
         _hasWorldAtlasShader = true;
         ApplyWorldMaterialPassSettings();
     }
@@ -508,6 +512,16 @@ public sealed class RaylibGamePlatform : IGamePlatform
         if (_worldAtlasMaterialShadowStrengthLoc >= 0)
         {
             Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasMaterialShadowStrengthLoc, _worldMaterialPassSettings.MaterialShadowStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasHorizonDepthStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasHorizonDepthStrengthLoc, _worldMaterialPassSettings.HorizonDepthStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasFoliageTranslucencyStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFoliageTranslucencyStrengthLoc, _worldMaterialPassSettings.FoliageTranslucencyStrength, ShaderUniformDataType.Float);
         }
     }
 

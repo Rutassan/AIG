@@ -2686,7 +2686,7 @@ public sealed class CoreFlowTests
         Assert.Equal(255, fill.Color.R);
         Assert.Equal(236, fill.Color.G);
         Assert.Equal(162, fill.Color.B);
-        Assert.Equal(6, platform.DrawnCubeWires.Count);
+        Assert.Equal(7, platform.DrawnCubeWires.Count);
     }
 
     [Fact(DisplayName = "TryGetHitFaceNormal отклоняет скачок previous более чем на 1 блок по любой оси")]
