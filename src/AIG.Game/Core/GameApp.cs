@@ -1463,6 +1463,8 @@ public class GameApp : IGameRunner
         }
 
         DrawSunGlow(view);
+        DrawSkyCloudBands(view);
+        DrawFarHorizonRidges(view);
 
         var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
         var horizonY = (int)MathF.Round(height * (0.56f + viewY * 0.2f));
@@ -1517,6 +1519,7 @@ public class GameApp : IGameRunner
         DrawHorizonBand(width, height, horizonY + 36, 62, new Color((byte)88, (byte)108, (byte)132, (byte)MathF.Round(9f * strength)));
         DrawCinematicSunBloomOverlay(view, strength);
         DrawSunShaftOverlay(view, strength);
+        DrawSoftScreenLiftOverlay(width, height, horizonY, strength);
 
         var vignetteSide = Math.Max(26, width / 12);
         var vignetteTop = Math.Max(20, height / 12);
@@ -1602,6 +1605,71 @@ public class GameApp : IGameRunner
         DrawCenteredGlowRect(sunScreen, 132, 132, new Color(255, 218, 164, 22));
         DrawCenteredGlowRect(sunScreen, 76, 76, new Color(255, 232, 186, 28));
         DrawCenteredGlowRect(sunScreen, 28, 28, new Color(255, 245, 214, 34));
+    }
+
+    private void DrawSkyCloudBands(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var horizonBase = height * (0.32f + Math.Clamp(view.RayDirection.Y, -1f, 1f) * 0.08f);
+        var strength = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.55f,
+            GraphicsQuality.Medium => 0.78f,
+            _ => 1f
+        };
+
+        for (var layer = 0; layer < 4; layer++)
+        {
+            var y = horizonBase + layer * 18f;
+            var bandHeight = 10 + layer * 4;
+            var alpha = (byte)MathF.Round((18f - layer * 3f) * strength);
+            var color = ApplySceneColorGrade(new Color((byte)214, (byte)222, (byte)232, alpha), 0.05f, 0.03f, 1.02f);
+
+            for (var i = 0; i < 5; i++)
+            {
+                var hash = Math.Abs(((layer + 1) * 92821) ^ ((i + 3) * 317) ^ (_world.Seed * 7));
+                var rectWidth = 120 + hash % 140;
+                var gap = 58 + hash % 46;
+                var x = (int)((i * (rectWidth + gap) + (hash % 90)) % (width + rectWidth)) - rectWidth / 2;
+                _platform.DrawRectangle(x, (int)y, rectWidth, bandHeight, color);
+            }
+        }
+    }
+
+    private void DrawFarHorizonRidges(CameraViewBuilder.CameraView view)
+    {
+        var width = _platform.GetScreenWidth();
+        var height = _platform.GetScreenHeight();
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var horizonY = height * (0.61f + Math.Clamp(view.RayDirection.Y, -1f, 1f) * 0.12f);
+        var bandColor = ApplySceneColorGrade(new Color((byte)92, (byte)112, (byte)134, (byte)18), 0.02f, 0.08f, 1.01f);
+        for (var i = 0; i < 6; i++)
+        {
+            var ridgeWidth = 150 + i * 46;
+            var ridgeHeight = 12 + (i % 3) * 6;
+            var x = (i * (width / 5)) - ridgeWidth / 3;
+            var y = (int)horizonY - 8 - (i % 2) * 6;
+            _platform.DrawRectangle(x, y, ridgeWidth, ridgeHeight, bandColor);
+        }
+    }
+
+    private void DrawSoftScreenLiftOverlay(int width, int height, int horizonY, float strength)
+    {
+        var highlightAlpha = (byte)MathF.Round(10f * strength);
+        var coolAlpha = (byte)MathF.Round(7f * strength);
+        _platform.DrawRectangle(0, Math.Max(0, horizonY - 72), width, 30, new Color((byte)255, (byte)222, (byte)176, highlightAlpha));
+        _platform.DrawRectangle(0, Math.Max(0, horizonY - 128), width, 22, new Color((byte)214, (byte)226, (byte)244, coolAlpha));
+        _platform.DrawRectangle(0, 0, width, Math.Max(20, height / 10), new Color((byte)206, (byte)220, (byte)244, (byte)MathF.Round(5f * strength)));
     }
 
     private void DrawCenteredGlowRect(Vector2 center, int width, int height, Color color)
@@ -2353,6 +2421,9 @@ public class GameApp : IGameRunner
         var shadowStrength = GetWorldShadowStrength();
         var atmosphereStrength = GetWorldAtmosphereStrength();
         var warmLightStrength = GetWorldWarmLightStrength();
+        var coolShadowStrength = GetWorldCoolShadowStrength();
+        var contrastStrength = GetWorldContrastStrength();
+        var glowStrength = GetWorldGlowStrength();
 
         _platform.ConfigureWorldMaterialPass(new WorldMaterialPassSettings(
             CameraPosition: _player.EyePosition,
@@ -2363,7 +2434,10 @@ public class GameApp : IGameRunner
             Strength: strength,
             ShadowStrength: shadowStrength,
             AtmosphereStrength: atmosphereStrength,
-            WarmLightStrength: warmLightStrength));
+            WarmLightStrength: warmLightStrength,
+            CoolShadowStrength: coolShadowStrength,
+            ContrastStrength: contrastStrength,
+            GlowStrength: glowStrength));
     }
 
     private float GetWorldShadowStrength()
@@ -2393,6 +2467,36 @@ public class GameApp : IGameRunner
             GraphicsQuality.Low => 0.48f,
             GraphicsQuality.Medium => 0.66f,
             _ => 0.82f
+        };
+    }
+
+    private float GetWorldCoolShadowStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.22f,
+            GraphicsQuality.Medium => 0.34f,
+            _ => 0.48f
+        };
+    }
+
+    private float GetWorldContrastStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.18f,
+            GraphicsQuality.Medium => 0.30f,
+            _ => 0.42f
+        };
+    }
+
+    private float GetWorldGlowStrength()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.28f,
+            GraphicsQuality.Medium => 0.42f,
+            _ => 0.58f
         };
     }
 
@@ -3160,22 +3264,22 @@ public class GameApp : IGameRunner
 
     private static Color GetSkyTopColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(70, 126, 198, 255), 1.08f), 0.06f, 0.08f, 1.06f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(66, 122, 194, 255), 1.10f), 0.07f, 0.09f, 1.07f);
     }
 
     private static Color GetSkyMidColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(144, 192, 230, 255), 1.06f), 0.07f, 0.05f, 1.06f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(152, 196, 232, 255), 1.08f), 0.08f, 0.05f, 1.06f);
     }
 
     private static Color GetSkyHorizonColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(248, 220, 188, 255), 1.05f), 0.12f, 0.02f, 1.05f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(246, 222, 190, 255), 1.07f), 0.13f, 0.02f, 1.05f);
     }
 
     private static Color GetSkyGlowColor()
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 194, 132, 255), 1.10f), 0.14f, 0f, 1.08f);
+        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 198, 140, 255), 1.12f), 0.15f, 0f, 1.09f);
     }
 
     private void DrawPlayerAvatar()
@@ -3390,15 +3494,17 @@ public class GameApp : IGameRunner
     private void DrawHeldBlock(Vector3 held, BlockType block)
     {
         var baseColor = GetHeldBlockColor(block);
-        var shadowColor = MultiplyRgb(baseColor, 0.68f);
-        var accentColor = LerpColor(baseColor, new Color(244, 236, 214, 255), 0.18f);
-        var edgeColor = LerpColor(baseColor, new Color(26, 30, 38, 255), 0.10f);
+        var shadowColor = MultiplyRgb(baseColor, 0.64f);
+        var accentColor = LerpColor(baseColor, new Color(244, 236, 214, 255), 0.22f);
+        var edgeColor = LerpColor(baseColor, new Color(24, 30, 40, 255), 0.14f);
+        var coolFacet = LerpColor(baseColor, new Color(170, 194, 220, 255), 0.12f);
 
-        _platform.DrawCube(held - new Vector3(0.034f, 0.026f, 0.028f), 0.21f, 0.21f, 0.21f, new Color(18, 20, 26, 72));
-        _platform.DrawCube(held - new Vector3(0.016f, 0.012f, 0.012f), 0.19f, 0.19f, 0.19f, shadowColor);
+        _platform.DrawCube(held - new Vector3(0.036f, 0.028f, 0.030f), 0.22f, 0.22f, 0.22f, new Color(18, 20, 26, 72));
+        _platform.DrawCube(held - new Vector3(0.014f, 0.012f, 0.014f), 0.19f, 0.19f, 0.19f, shadowColor);
         _platform.DrawCube(held, 0.17f, 0.17f, 0.17f, baseColor);
-        _platform.DrawCube(held + new Vector3(0.028f, 0.026f, 0.028f), 0.082f, 0.082f, 0.082f, accentColor);
-        _platform.DrawCube(held + new Vector3(-0.020f, -0.020f, -0.020f), 0.050f, 0.050f, 0.050f, edgeColor);
+        _platform.DrawCube(held + new Vector3(0.030f, 0.026f, 0.030f), 0.078f, 0.078f, 0.078f, accentColor);
+        _platform.DrawCube(held + new Vector3(-0.018f, 0.018f, 0.026f), 0.062f, 0.038f, 0.096f, coolFacet);
+        _platform.DrawCube(held + new Vector3(-0.022f, -0.022f, -0.022f), 0.050f, 0.050f, 0.050f, edgeColor);
     }
 
     private void DrawBlockHighlight(BlockRaycastHit? hit, Vector3 rayOrigin, Vector3 rayDirection)
@@ -3432,10 +3538,11 @@ public class GameApp : IGameRunner
         var height = MathF.Abs(faceNormal.Y) > 0.5f ? faceThickness : faceSize;
         var length = MathF.Abs(faceNormal.Z) > 0.5f ? faceThickness : faceSize;
 
-        var fillColor = new Color(255, 220, 92, 34);
-        var outlineColor = new Color(255, 232, 138, 220);
+        var fillColor = new Color(255, 226, 132, 22);
+        var outlineColor = new Color(255, 236, 170, 236);
         _platform.DrawCube(faceCenter, width, height, length, fillColor);
         _platform.DrawCubeWires(faceCenter, width, height, length, outlineColor);
+        _platform.DrawCubeWires(faceCenter, width * 1.03f, height * 1.03f, length * 1.03f, new Color(110, 220, 255, 86));
     }
 
     private static bool TryGetHitFaceNormal(BlockRaycastHit hit, out Vector3 faceNormal)

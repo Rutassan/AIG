@@ -2641,8 +2641,8 @@ public sealed class CoreFlowTests
         Assert.True(MathF.Abs(highlight.Position.Y - 5.5f) < 0.001f);
         Assert.True(MathF.Abs(highlight.Position.Z - 9.01f) < 0.001f);
         Assert.Equal(255, highlight.Color.R);
-        Assert.Equal(232, highlight.Color.G);
-        Assert.Equal(138, highlight.Color.B);
+        Assert.Equal(236, highlight.Color.G);
+        Assert.Equal(170, highlight.Color.B);
     }
 
     [Fact(DisplayName = "Подсветка боковой грани по X использует тонкую толщину по ширине")]
@@ -2660,7 +2660,7 @@ public sealed class CoreFlowTests
         var hit = new BlockRaycastHit(1, 1, 1, 0, 1, 1);
         method!.Invoke(app, [hit, new Vector3(1f, 0f, 0f)]);
 
-        var highlight = platform.DrawnCubeWires.Single();
+        var highlight = platform.DrawnCubeWires.Single(wire => MathF.Abs(wire.Width - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Width - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Height - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);
@@ -2684,9 +2684,9 @@ public sealed class CoreFlowTests
         var fill = Assert.Single(platform.DrawnCubes);
         Assert.True(MathF.Abs(fill.Length - 0.035f) < 0.0001f);
         Assert.Equal(255, fill.Color.R);
-        Assert.Equal(220, fill.Color.G);
-        Assert.Equal(92, fill.Color.B);
-        Assert.Single(platform.DrawnCubeWires);
+        Assert.Equal(226, fill.Color.G);
+        Assert.Equal(132, fill.Color.B);
+        Assert.Equal(2, platform.DrawnCubeWires.Count);
     }
 
     [Fact(DisplayName = "TryGetHitFaceNormal отклоняет скачок previous более чем на 1 блок по любой оси")]
@@ -2921,7 +2921,7 @@ public sealed class CoreFlowTests
         var hit = new BlockRaycastHit(10, 5, 8, 10, 6, 8); // previous указывает на верхнюю грань
         method!.Invoke(app, [(BlockRaycastHit?)hit, new Vector3(10.5f, 5.6f, 9.6f), new Vector3(0f, 0f, -1f)]);
 
-        var highlight = platform.DrawnCubeWires.Single();
+        var highlight = platform.DrawnCubeWires.Single(wire => MathF.Abs(wire.Length - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Width - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Height - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Length - 0.035f) < 0.0001f);
@@ -2948,7 +2948,7 @@ public sealed class CoreFlowTests
         var hit = new BlockRaycastHit(10, 5, 8, 10, 6, 8);
         method!.Invoke(app, [(BlockRaycastHit?)hit, new Vector3(10.5f, 5.6f, 9.6f), Vector3.Zero]);
 
-        var highlight = platform.DrawnCubeWires.Single();
+        var highlight = platform.DrawnCubeWires.Single(wire => MathF.Abs(wire.Height - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Width - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Height - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);

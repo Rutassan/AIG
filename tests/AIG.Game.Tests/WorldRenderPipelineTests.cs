@@ -84,6 +84,30 @@ public sealed class WorldRenderPipelineTests
         Assert.NotEqual(mesh.Colors[0], mesh.Colors[2]);
     }
 
+    [Fact(DisplayName = "TexturedBlockMeshFactory использует fallback-материал для неизвестного блока")]
+    public void TexturedBlockMeshFactory_UnknownBlock_UsesFallbackMaterialChannel()
+    {
+        var mesh = TexturedBlockMeshFactory.Build((BlockType)99);
+        var stoneUv = WorldTextureAtlas.GetTileUv(WorldTextureAtlas.WorldAtlasTile.Stone);
+
+        Assert.Equal(stoneUv.U0, mesh.TexCoords[0]);
+        Assert.Equal(stoneUv.V1, mesh.TexCoords[1]);
+        Assert.Contains(Enumerable.Range(0, mesh.VertexCount), index => mesh.Colors[index * 4 + 3] == 255);
+    }
+
+    [Fact(DisplayName = "TexturedBlockMeshFactory кодирует material channel для всех atlas-блоков")]
+    public void TexturedBlockMeshFactory_EncodeMaterialChannel_CoversAllAtlasBlocks()
+    {
+        var method = typeof(TexturedBlockMeshFactory).GetMethod("EncodeMaterialChannel", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        Assert.Equal((byte)32, method!.Invoke(null, [BlockType.Grass]));
+        Assert.Equal((byte)72, method.Invoke(null, [BlockType.Dirt]));
+        Assert.Equal((byte)128, method.Invoke(null, [BlockType.Stone]));
+        Assert.Equal((byte)184, method.Invoke(null, [BlockType.Wood]));
+        Assert.Equal((byte)232, method.Invoke(null, [BlockType.Leaves]));
+    }
+
     [Fact(DisplayName = "ChunkSurfaceMeshFactory убирает внутреннюю грань между соседними блоками")]
     public void ChunkSurfaceMeshFactory_HidesInternalFacesBetweenAdjacentBlocks()
     {
@@ -137,7 +161,8 @@ public sealed class WorldRenderPipelineTests
             WorldTextureAtlas.WorldAtlasTile.Stone,
             (byte)200,
             (byte)180,
-            (byte)160
+            (byte)160,
+            (byte)128
         ]);
 
         var vertices = Enumerable.Repeat(0f, (ushort.MaxValue - 3) * 3).ToList();
@@ -293,6 +318,9 @@ public sealed class WorldRenderPipelineTests
         Assert.True(settings.ShadowStrength > 0.45f);
         Assert.True(settings.AtmosphereStrength > 0.9f);
         Assert.True(settings.WarmLightStrength > 0.8f);
+        Assert.True(settings.CoolShadowStrength > 0.4f);
+        Assert.True(settings.ContrastStrength > 0.4f);
+        Assert.True(settings.GlowStrength > 0.55f);
     }
 
     [Fact(DisplayName = "ChunkSurfaceMeshFactory кодирует отдельные каналы света, солнца и relief")]
@@ -325,6 +353,22 @@ public sealed class WorldRenderPipelineTests
             return mesh.Colors[offset + 0] != mesh.Colors[offset + 1]
                 || mesh.Colors[offset + 0] != mesh.Colors[offset + 2];
         });
+        Assert.Contains(Enumerable.Range(0, mesh.VertexCount), index =>
+        {
+            var offset = index * 4;
+            return mesh.Colors[offset + 3] != 255;
+        });
+    }
+
+    [Fact(DisplayName = "ChunkSurfaceMeshFactory кодирует fallback-материал для неизвестного блока")]
+    public void ChunkSurfaceMeshFactory_EncodeMaterialChannel_UsesFallbackForUnknownBlock()
+    {
+        var method = typeof(ChunkSurfaceMeshFactory).GetMethod("EncodeMaterialChannel", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var value = Assert.IsType<byte>(method!.Invoke(null, [(BlockType)99])!);
+
+        Assert.Equal(255, value);
     }
 
     [Fact(DisplayName = "Бюджет сборки новых chunk mesh зависит от качества графики")]

@@ -35,7 +35,8 @@ internal static class ChunkSurfaceMeshFactory
         WorldTextureAtlas.WorldAtlasTile Tile,
         byte Shade,
         byte Sun,
-        byte Accent);
+        byte Accent,
+        byte Material);
 
     public static ChunkSurfaceMeshData Build(WorldMap world, IReadOnlyList<WorldMap.SurfaceBlock> surfaces)
     {
@@ -68,7 +69,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Side,
                 ApplyLight(206, sunLight, occlusion),
                 EncodeSunChannel(surface, topBias: -0.02f, visibilityBias: 0.05f),
-                EncodeAccentChannel(surface, ridgeBias: 0.04f, cavityBias: 0.09f)),
+                EncodeAccentChannel(surface, ridgeBias: 0.04f, cavityBias: 0.09f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X + 1, surface.Y, surface.Z),
                 vertices,
                 texCoords,
@@ -85,7 +87,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Side,
                 ApplyLight(188, sunLight, occlusion),
                 EncodeSunChannel(surface, topBias: -0.04f, visibilityBias: 0.02f),
-                EncodeAccentChannel(surface, ridgeBias: 0.02f, cavityBias: 0.11f)),
+                EncodeAccentChannel(surface, ridgeBias: 0.02f, cavityBias: 0.11f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X - 1, surface.Y, surface.Z),
                 vertices,
                 texCoords,
@@ -102,7 +105,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Top,
                 ApplyLight(255, sunLight, relief),
                 EncodeSunChannel(surface, topBias: 0.18f, visibilityBias: 0.12f),
-                EncodeAccentChannel(surface, ridgeBias: 0.18f, cavityBias: 0.05f)),
+                EncodeAccentChannel(surface, ridgeBias: 0.18f, cavityBias: 0.05f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y + 1, surface.Z),
                 vertices,
                 texCoords,
@@ -119,7 +123,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Bottom,
                 ApplyLight(142, sunLight, occlusion),
                 EncodeSunChannel(surface, topBias: -0.28f, visibilityBias: -0.08f),
-                EncodeAccentChannel(surface, ridgeBias: -0.10f, cavityBias: 0.14f)),
+                EncodeAccentChannel(surface, ridgeBias: -0.10f, cavityBias: 0.14f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y - 1, surface.Z),
                 vertices,
                 texCoords,
@@ -136,7 +141,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Side,
                 ApplyLight(222, sunLight, occlusion),
                 EncodeSunChannel(surface, topBias: 0.02f, visibilityBias: 0.08f),
-                EncodeAccentChannel(surface, ridgeBias: 0.05f, cavityBias: 0.08f)),
+                EncodeAccentChannel(surface, ridgeBias: 0.05f, cavityBias: 0.08f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y, surface.Z + 1),
                 vertices,
                 texCoords,
@@ -153,7 +159,8 @@ internal static class ChunkSurfaceMeshFactory
                 tiles.Side,
                 ApplyLight(172, sunLight, occlusion),
                 EncodeSunChannel(surface, topBias: -0.08f, visibilityBias: -0.02f),
-                EncodeAccentChannel(surface, ridgeBias: 0.01f, cavityBias: 0.12f)),
+                EncodeAccentChannel(surface, ridgeBias: 0.01f, cavityBias: 0.12f),
+                EncodeMaterialChannel(surface.Block)),
                 !world.IsSurfaceMeshingSolid(surface.X, surface.Y, surface.Z - 1),
                 vertices,
                 texCoords,
@@ -191,10 +198,10 @@ internal static class ChunkSurfaceMeshFactory
             return;
         }
 
-        AddVertex(face.V0, face.Normal, face.Shade, face.Sun, face.Accent, uv.U0, uv.V1, vertices, texCoords, normals, colors);
-        AddVertex(face.V1, face.Normal, face.Shade, face.Sun, face.Accent, uv.U1, uv.V1, vertices, texCoords, normals, colors);
-        AddVertex(face.V2, face.Normal, face.Shade, face.Sun, face.Accent, uv.U1, uv.V0, vertices, texCoords, normals, colors);
-        AddVertex(face.V3, face.Normal, face.Shade, face.Sun, face.Accent, uv.U0, uv.V0, vertices, texCoords, normals, colors);
+        AddVertex(face.V0, face.Normal, face.Shade, face.Sun, face.Accent, face.Material, uv.U0, uv.V1, vertices, texCoords, normals, colors);
+        AddVertex(face.V1, face.Normal, face.Shade, face.Sun, face.Accent, face.Material, uv.U1, uv.V1, vertices, texCoords, normals, colors);
+        AddVertex(face.V2, face.Normal, face.Shade, face.Sun, face.Accent, face.Material, uv.U1, uv.V0, vertices, texCoords, normals, colors);
+        AddVertex(face.V3, face.Normal, face.Shade, face.Sun, face.Accent, face.Material, uv.U0, uv.V0, vertices, texCoords, normals, colors);
 
         indices.Add((ushort)(vertexBase + 0));
         indices.Add((ushort)(vertexBase + 2));
@@ -210,6 +217,7 @@ internal static class ChunkSurfaceMeshFactory
         byte shade,
         byte sun,
         byte accent,
+        byte material,
         float u,
         float v,
         List<float> vertices,
@@ -231,7 +239,7 @@ internal static class ChunkSurfaceMeshFactory
         colors.Add(shade);
         colors.Add(sun);
         colors.Add(accent);
-        colors.Add(255);
+        colors.Add(material);
     }
 
     private static byte ApplyLight(byte baseShade, float sunLight, float accent)
@@ -265,6 +273,19 @@ internal static class ChunkSurfaceMeshFactory
             - cavity * (0.20f + cavityBias)
             + (surface.TopVisible ? 0.06f : -0.02f);
         return EncodeUnit(value);
+    }
+
+    private static byte EncodeMaterialChannel(BlockType block)
+    {
+        return block switch
+        {
+            BlockType.Grass => 32,
+            BlockType.Dirt => 72,
+            BlockType.Stone => 128,
+            BlockType.Wood => 184,
+            BlockType.Leaves => 232,
+            _ => 255
+        };
     }
 
     private static byte EncodeUnit(float value)

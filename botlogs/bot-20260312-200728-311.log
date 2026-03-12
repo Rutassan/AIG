@@ -1,0 +1,76 @@
+2026-03-12T20:07:28.3200772Z [diag] session-start
+2026-03-12T20:07:28.3217878Z [app] run-start world=2304x72x2304 seed=777
+2026-03-12T20:07:28.4787327Z [bot] spawn pos=1155,50,41,20,1155,50
+2026-03-12T20:07:28.4788406Z [app] player-spawn pos=1152,50,40,20,1152,50
+2026-03-12T20:07:28.4788934Z [app] bot-log-file path=/home/rutasan/AIG/botlogs/bot-20260312-200728-311.log
+2026-03-12T20:07:30.4701430Z [bot] follow-route waypoints=1 desired=1155,50,40,02,1157,50 radius=1
+2026-03-12T20:07:30.4770347Z [bot] status Idle->Moving pos=1155,19,41,10,1155,95 active=none
+2026-03-12T20:07:30.7816997Z [bot] status Moving->Idle pos=1155,52,42,08,1156,52 active=none
+2026-03-12T20:07:30.7978224Z [bot] follow-route waypoints=1 desired=1156,50,41,02,1155,50 radius=1
+2026-03-12T20:07:30.7978929Z [bot] status Idle->Moving pos=1155,57,42,09,1156,51 active=none
+2026-03-12T20:07:30.8689273Z [bot] follow-route waypoints=5 desired=1157,50,42,02,1152,50 radius=1
+2026-03-12T20:07:31.3041064Z [bot] follow-route waypoints=6 desired=1157,50,42,02,1149,50 radius=1
+2026-03-12T20:07:32.1376290Z [bot] status Moving->Idle pos=1157,27,42,06,1152,07 active=none
+2026-03-12T20:07:32.2217462Z [bot] follow-route waypoints=2 desired=1155,50,41,02,1151,50 radius=1
+2026-03-12T20:07:32.2218428Z [bot] status Idle->Moving pos=1157,25,42,09,1152,11 active=none
+2026-03-12T20:07:32.6948121Z [bot] follow-route waypoints=4 desired=1154,50,40,02,1149,50 radius=1
+2026-03-12T20:07:32.7370268Z [bot] follow-route waypoints=8 desired=1152,50,39,02,1147,50 radius=1
+2026-03-12T20:07:32.7793426Z [bot] follow-route waypoints=13 desired=1150,50,38,02,1146,50 radius=1
+2026-03-12T20:07:33.2965764Z [bot] follow-route waypoints=12 desired=1147,50,37,02,1145,50 radius=1
+2026-03-12T20:07:33.8792070Z [bot] follow-route waypoints=10 desired=1145,50,37,02,1147,50 radius=1
+2026-03-12T20:07:34.2968161Z [bot] follow-route waypoints=6 desired=1145,50,36,02,1150,50 radius=1
+2026-03-12T20:07:34.7230638Z [bot] follow-route waypoints=1 desired=1147,50,37,02,1152,50 radius=1
+2026-03-12T20:07:34.7985160Z [bot] status Moving->Idle pos=1149,01,38,05,1152,47 active=none
+2026-03-12T20:07:34.8241967Z [bot] follow-route waypoints=1 desired=1147,50,37,02,1152,50 radius=1
+2026-03-12T20:07:34.8242854Z [bot] status Idle->Moving pos=1148,96,38,10,1152,48 active=none
+2026-03-12T20:07:35.1589206Z [bot] follow-route waypoints=3 desired=1146,50,36,02,1154,50 radius=1
+2026-03-12T20:07:35.6107989Z [bot] follow-route waypoints=5 desired=1145,50,35,02,1156,50 radius=1
+2026-03-12T20:07:36.0348329Z [bot] follow-route waypoints=4 desired=1147,50,36,02,1158,50 radius=1
+2026-03-12T20:07:36.3838318Z [bot] follow-route waypoints=6 desired=1147,50,36,02,1161,50 radius=1
+2026-03-12T20:07:36.6645493Z [bot] follow-route waypoints=5 desired=1145,50,34,02,1162,50 radius=1
+2026-03-12T20:07:37.1513903Z [bot] follow-route waypoints=7 desired=1145,50,34,02,1165,50 radius=1
+2026-03-12T20:07:37.5845394Z [bot] follow-route waypoints=10 desired=1143,50,32,02,1166,50 radius=1
+2026-03-12T20:07:38.0129467Z [bot] follow-route waypoints=12 desired=1141,50,31,02,1167,50 radius=1
+2026-03-12T20:07:38.6397586Z [bot] follow-route waypoints=11 desired=1138,50,31,02,1167,50 radius=1
+2026-03-12T20:07:39.3112366Z [bot] follow-route waypoints=13 desired=1133,50,31,02,1167,50 radius=2
+2026-03-12T20:07:40.3555117Z [bot] follow-route waypoints=17 desired=1129,50,31,02,1170,50 radius=2
+2026-03-12T20:07:41.2905282Z [bot] follow-route waypoints=16 desired=1124,50,32,02,1170,50 radius=2
+2026-03-12T20:07:42.2703988Z [bot] follow-route waypoints=17 desired=1121,50,32,02,1174,50 radius=2
+2026-03-12T20:07:42.7259846Z [bot] follow-route waypoints=21 desired=1116,50,33,02,1175,50 radius=2
+2026-03-12T20:07:43.2840658Z [bot] follow-route waypoints=17 desired=1115,50,33,02,1172,50 radius=1
+2026-03-12T20:07:43.4517650Z [bot] follow-route waypoints=16 desired=1113,50,33,02,1170,50 radius=1
+2026-03-12T20:07:44.0695240Z [bot] follow-route waypoints=17 desired=1114,50,33,02,1167,50 radius=1
+2026-03-12T20:07:44.3608348Z [bot] follow-route waypoints=7 desired=1116,50,34,02,1168,50 radius=1
+2026-03-12T20:07:44.3940073Z [bot] follow-route waypoints=6 desired=1118,50,33,02,1169,50 radius=1
+2026-03-12T20:07:44.7060808Z [bot] status Moving->Idle pos=1121,95,33,04,1167,50 active=none
+2026-03-12T20:07:44.9021045Z [bot] follow-route waypoints=1 desired=1120,50,33,02,1166,50 radius=1
+2026-03-12T20:07:44.9022059Z [bot] status Idle->Moving pos=1121,91,33,03,1167,50 active=none
+2026-03-12T20:07:45.0959623Z [bot] status Moving->Idle pos=1120,88,33,01,1167,50 active=none
+2026-03-12T20:07:45.1044088Z [bot] follow-route waypoints=2 desired=1119,50,33,02,1165,50 radius=1
+2026-03-12T20:07:45.1044606Z [bot] status Idle->Moving pos=1120,84,33,01,1167,50 active=none
+2026-03-12T20:07:45.4051116Z [bot] status Moving->Idle pos=1119,68,33,00,1166,87 active=none
+2026-03-12T20:07:45.4134538Z [bot] follow-route waypoints=2 desired=1119,50,33,02,1163,50 radius=1
+2026-03-12T20:07:45.4134891Z [bot] status Idle->Moving pos=1119,68,33,00,1166,82 active=none
+2026-03-12T20:07:45.7728844Z [bot] status Moving->Idle pos=1119,52,33,00,1164,91 active=none
+2026-03-12T20:07:45.7812557Z [bot] follow-route waypoints=2 desired=1118,50,33,02,1162,50 radius=1
+2026-03-12T20:07:45.7812909Z [bot] status Idle->Moving pos=1119,47,33,00,1164,92 active=none
+2026-03-12T20:07:46.0602000Z [bot] status Moving->Idle pos=1118,63,33,00,1163,88 active=none
+2026-03-12T20:07:46.0686844Z [bot] follow-route waypoints=3 desired=1117,50,33,02,1160,50 radius=1
+2026-03-12T20:07:46.0687217Z [bot] status Idle->Moving pos=1118,59,33,00,1163,89 active=none
+2026-03-12T20:07:46.4353189Z [bot] follow-route waypoints=4 desired=1116,50,32,02,1158,50 radius=1
+2026-03-12T20:07:46.8981387Z [bot] follow-route waypoints=5 desired=1114,50,31,02,1156,50 radius=1
+2026-03-12T20:07:47.5009922Z [bot] follow-route waypoints=7 desired=1113,50,30,02,1153,50 radius=1
+2026-03-12T20:07:47.8305785Z [bot] follow-route waypoints=9 desired=1112,50,29,02,1151,50 radius=1
+2026-03-12T20:07:48.0930722Z [bot] follow-route waypoints=10 desired=1111,50,28,02,1149,50 radius=1
+2026-03-12T20:07:48.5230096Z [bot] follow-route waypoints=12 desired=1109,50,27,02,1148,50 radius=1
+2026-03-12T20:07:49.2528932Z [bot] follow-route waypoints=14 desired=1106,50,25,02,1145,50 radius=2
+2026-03-12T20:07:50.3948295Z [bot] follow-route waypoints=17 desired=1102,50,24,02,1143,50 radius=2
+2026-03-12T20:07:51.7192940Z [bot] follow-route waypoints=18 desired=1101,50,25,02,1138,50 radius=2
+2026-03-12T20:07:52.4746533Z [bot] follow-route waypoints=33 desired=1101,50,27,02,1133,50 radius=2
+2026-03-12T20:07:52.8602568Z [bot] follow-route waypoints=29 desired=1101,50,26,02,1128,50 radius=2
+2026-03-12T20:07:53.2954028Z [bot] follow-route waypoints=36 desired=1096,50,26,02,1125,50 radius=2
+2026-03-12T20:07:53.3792012Z [bot] follow-route waypoints=40 desired=1091,50,29,02,1126,50 radius=2
+2026-03-12T20:07:54.3010706Z [bot] follow-route waypoints=33 desired=1088,50,29,02,1130,50 radius=2
+2026-03-12T20:07:55.4151696Z [bot] follow-route waypoints=27 desired=1086,50,27,02,1134,50 radius=2
+2026-03-12T20:07:55.9181251Z [bot] follow-route waypoints=20 desired=1086,50,25,02,1138,50 radius=1
+2026-03-12T20:08:00.1395359Z [app] run-stop

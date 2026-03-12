@@ -34,19 +34,20 @@ internal static class TexturedBlockMeshFactory
         WorldTextureAtlas.WorldAtlasTile Tile,
         byte Shade,
         byte Sun,
-        byte Accent);
+        byte Accent,
+        byte Material);
 
     public static TexturedBlockMeshData Build(BlockType block)
     {
         var tiles = WorldTextureAtlas.GetFaceTiles(block);
         var faces = new[]
         {
-            new FaceDefinition(new Vector3(1f, 0f, 0f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, -0.5f), tiles.Side, 206, 204, 156),
-            new FaceDefinition(new Vector3(-1f, 0f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(-0.5f, 0.5f, 0.5f), tiles.Side, 188, 186, 148),
-            new FaceDefinition(new Vector3(0f, 1f, 0f),  new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(-0.5f, 0.5f, 0.5f), tiles.Top, 255, 255, 228),
-            new FaceDefinition(new Vector3(0f, -1f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(-0.5f, -0.5f, -0.5f), tiles.Bottom, 142, 82, 122),
-            new FaceDefinition(new Vector3(0f, 0f, 1f),  new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f), tiles.Side, 222, 214, 166),
-            new FaceDefinition(new Vector3(0f, 0f, -1f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, -0.5f),  new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(-0.5f, 0.5f, -0.5f), tiles.Side, 172, 172, 136)
+            new FaceDefinition(new Vector3(1f, 0f, 0f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, -0.5f), tiles.Side, 206, 204, 156, EncodeMaterialChannel(block)),
+            new FaceDefinition(new Vector3(-1f, 0f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(-0.5f, 0.5f, 0.5f), tiles.Side, 188, 186, 148, EncodeMaterialChannel(block)),
+            new FaceDefinition(new Vector3(0f, 1f, 0f),  new Vector3(-0.5f, 0.5f, -0.5f), new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(0.5f, 0.5f, 0.5f),  new Vector3(-0.5f, 0.5f, 0.5f), tiles.Top, 255, 255, 228, EncodeMaterialChannel(block)),
+            new FaceDefinition(new Vector3(0f, -1f, 0f), new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(0.5f, -0.5f, -0.5f), new Vector3(-0.5f, -0.5f, -0.5f), tiles.Bottom, 142, 82, 122, EncodeMaterialChannel(block)),
+            new FaceDefinition(new Vector3(0f, 0f, 1f),  new Vector3(0.5f, -0.5f, 0.5f),  new Vector3(-0.5f, -0.5f, 0.5f), new Vector3(-0.5f, 0.5f, 0.5f),  new Vector3(0.5f, 0.5f, 0.5f), tiles.Side, 222, 214, 166, EncodeMaterialChannel(block)),
+            new FaceDefinition(new Vector3(0f, 0f, -1f), new Vector3(-0.5f, -0.5f, -0.5f), new Vector3(0.5f, -0.5f, -0.5f),  new Vector3(0.5f, 0.5f, -0.5f),  new Vector3(-0.5f, 0.5f, -0.5f), tiles.Side, 172, 172, 136, EncodeMaterialChannel(block))
         };
 
         var vertices = new float[faces.Length * 4 * 3];
@@ -89,7 +90,7 @@ internal static class TexturedBlockMeshFactory
                 colors[colorOffset + i * 4 + 0] = face.Shade;
                 colors[colorOffset + i * 4 + 1] = face.Sun;
                 colors[colorOffset + i * 4 + 2] = face.Accent;
-                colors[colorOffset + i * 4 + 3] = 255;
+                colors[colorOffset + i * 4 + 3] = face.Material;
             }
 
             indices[indexOffset + 0] = (ushort)(vertexBase + 0);
@@ -115,5 +116,18 @@ internal static class TexturedBlockMeshFactory
         target[offset + 0] = value.X;
         target[offset + 1] = value.Y;
         target[offset + 2] = value.Z;
+    }
+
+    private static byte EncodeMaterialChannel(BlockType block)
+    {
+        return block switch
+        {
+            BlockType.Grass => 32,
+            BlockType.Dirt => 72,
+            BlockType.Stone => 128,
+            BlockType.Wood => 184,
+            BlockType.Leaves => 232,
+            _ => 255
+        };
     }
 }

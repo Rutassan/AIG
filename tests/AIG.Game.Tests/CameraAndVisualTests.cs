@@ -180,7 +180,7 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(12, platform.DrawCubeCalls);
+        Assert.Equal(13, platform.DrawCubeCalls);
         Assert.Contains(platform.DrawnCubes, cube => cube.Width <= 0.09f && cube.Color.R >= 200);
     }
 
@@ -206,7 +206,7 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(12, platform.DrawCubeCalls);
+        Assert.Equal(13, platform.DrawCubeCalls);
     }
 
     [Fact(DisplayName = "DrawSunShaftOverlay безопасно выходит при нулевом размере экрана")]
@@ -934,7 +934,6 @@ public sealed class CameraAndVisualTests
             Vector3.Normalize(new Vector3(0.62f, 0.74f, 0.24f)));
 
         method!.Invoke(towardSunApp, [towardSunView]);
-        Assert.True(towardSunPlatform.DrawRectangleCalls > 33);
 
         var awayPlatform = new FakeGamePlatform();
         var awayApp = new GameApp(
@@ -954,7 +953,8 @@ public sealed class CameraAndVisualTests
             Vector3.Normalize(new Vector3(-0.62f, -0.74f, -0.24f)));
 
         method.Invoke(awayApp, [awayView]);
-        Assert.Equal(33, awayPlatform.DrawRectangleCalls);
+        Assert.True(awayPlatform.DrawRectangleCalls >= 50);
+        Assert.True(towardSunPlatform.DrawRectangleCalls > awayPlatform.DrawRectangleCalls);
     }
 
     [Fact(DisplayName = "TryProjectDirectionToScreen покрывает guard-ветки и успешную проекцию")]
@@ -1051,6 +1051,105 @@ public sealed class CameraAndVisualTests
             },
             new Vector3(4f, 3f, 4f),
             Vector3.Normalize(new Vector3(0.62f, 0.74f, 0.24f)));
+
+        method!.Invoke(app, [view]);
+
+        Assert.Equal(0, platform.DrawRectangleCalls);
+    }
+
+    [Fact(DisplayName = "DrawSkyCloudBands завершает работу при невалидном размере экрана")]
+    public void DrawSkyCloudBands_ReturnsForInvalidViewport()
+    {
+        var platform = new FakeGamePlatform
+        {
+            ScreenWidth = 0,
+            ScreenHeight = 720
+        };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawSkyCloudBands", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4f, 3f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.UnitZ);
+
+        method!.Invoke(app, [view]);
+
+        Assert.Equal(0, platform.DrawRectangleCalls);
+    }
+
+    [Fact(DisplayName = "DrawFarHorizonRidges завершает работу при невалидном размере экрана")]
+    public void DrawFarHorizonRidges_ReturnsForInvalidViewport()
+    {
+        var platform = new FakeGamePlatform
+        {
+            ScreenWidth = 1280,
+            ScreenHeight = 0
+        };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawFarHorizonRidges", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4f, 3f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.UnitZ);
+
+        method!.Invoke(app, [view]);
+
+        Assert.Equal(0, platform.DrawRectangleCalls);
+    }
+
+    [Fact(DisplayName = "DrawFarHorizonRidges завершает работу и при нулевой ширине экрана")]
+    public void DrawFarHorizonRidges_ReturnsForZeroWidthViewport()
+    {
+        var platform = new FakeGamePlatform
+        {
+            ScreenWidth = 0,
+            ScreenHeight = 720
+        };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod("DrawFarHorizonRidges", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4f, 3f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.UnitZ);
 
         method!.Invoke(app, [view]);
 
