@@ -326,6 +326,8 @@ public sealed class WorldRenderPipelineTests
         Assert.True(settings.SkyBlendStrength > 0.30f);
         Assert.True(settings.SunScatterStrength > 0.40f);
         Assert.True(settings.AmbientLiftStrength > 0.28f);
+        Assert.True(settings.HazeStrength > 0.30f);
+        Assert.True(settings.MaterialShadowStrength > 0.28f);
     }
 
     [Fact(DisplayName = "ChunkSurfaceMeshFactory кодирует отдельные каналы света, солнца и relief")]

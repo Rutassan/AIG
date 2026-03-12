@@ -25,6 +25,8 @@ uniform float shadowDepthStrength;
 uniform float skyBlendStrength;
 uniform float sunScatterStrength;
 uniform float ambientLiftStrength;
+uniform float hazeStrength;
+uniform float materialShadowStrength;
 
 void main()
 {
@@ -55,6 +57,7 @@ void main()
     float reliefLift = mix(0.92, 1.08, reliefAccent);
     float skyBounce = mix(0.92, 1.10 + ambientLiftStrength * 0.08, reliefAccent) * mix(0.88, 1.06 + ambientLiftStrength * 0.05, sunVisibility);
     float ambientLift = mix(0.88, 1.0 + ambientLiftStrength * 0.12, reliefAccent * 0.62 + sunVisibility * 0.38);
+    float shadowPresence = clamp((1.0 - sunVisibility) * (0.58 + (1.0 - reliefAccent) * 0.28), 0.0, 1.0);
     float lightMix = baseShade
         * mix(1.0, wrapDiffuse, clamp(shaderStrength * 0.88, 0.0, 1.0))
         * mix(1.0, directShadow, clamp(shaderStrength, 0.0, 1.0))
@@ -81,12 +84,19 @@ void main()
     materialTint += stoneMask * vec3(-0.04, -0.01, 0.04) * materialSeparationStrength;
     materialTint += woodMask * vec3(0.06, 0.02, -0.05) * materialSeparationStrength;
     materialTint += leavesMask * vec3(-0.03, 0.04, -0.02) * materialSeparationStrength;
+    vec3 shadowMaterialTint = vec3(1.0);
+    shadowMaterialTint += grassMask * vec3(-0.03, 0.05, -0.01) * materialShadowStrength;
+    shadowMaterialTint += dirtMask * vec3(0.05, 0.00, -0.04) * materialShadowStrength;
+    shadowMaterialTint += stoneMask * vec3(-0.05, -0.02, 0.06) * materialShadowStrength;
+    shadowMaterialTint += woodMask * vec3(0.07, 0.01, -0.06) * materialShadowStrength;
+    shadowMaterialTint += leavesMask * vec3(-0.04, 0.04, -0.02) * materialShadowStrength;
 
     vec3 viewDir = normalize(cameraPos - fragWorldPos);
     float rim = pow(1.0 - max(dot(viewDir, normal), 0.0), 2.0);
     float sunScatter = pow(max(dot(viewDir, sunDir), 0.0), 11.0) * (0.16 + sunVisibility * 0.26 + reliefAccent * 0.08) * warmLightStrength * (0.88 + sunScatterStrength * 0.55);
     vec3 lit = albedo.rgb * lightMix * materialBrightness;
     lit *= materialTint;
+    lit = mix(lit, lit * shadowMaterialTint, shadowPresence * 0.55);
     vec3 shadowTint = mix(vec3(1.0), vec3(0.84, 0.91, 1.06), coolShadowStrength * (1.0 - sunVisibility) * (0.55 + stoneMask * 0.25 + leavesMask * 0.12));
     lit *= shadowTint;
     lit = mix(lit, lit * vec3(1.03, 1.01, 0.97), materialWarmth * warmLightStrength);
@@ -106,8 +116,9 @@ void main()
     }
 
     float heightFog = clamp((cameraPos.y - fragWorldPos.y) * 0.022, 0.0, 1.0);
-    float atmosphereFog = clamp(fogFactor * (0.38 + shaderStrength * 0.52 + ambientLiftStrength * 0.10) + heightFog * atmosphereStrength * (0.22 + ambientLiftStrength * 0.06), 0.0, 1.0);
+    float atmosphereFog = clamp(fogFactor * (0.38 + shaderStrength * 0.52 + ambientLiftStrength * 0.10 + hazeStrength * 0.12) + heightFog * atmosphereStrength * (0.22 + ambientLiftStrength * 0.06 + hazeStrength * 0.04), 0.0, 1.0);
     lit = mix(lit, fogColor.rgb, atmosphereFog);
+    lit = mix(lit, mix(lit, fogColor.rgb, 0.16 + hazeStrength * 0.18), fogFactor * hazeStrength * 0.42);
 
     float luminance = dot(lit, vec3(0.2126, 0.7152, 0.0722));
     vec3 contrasted = vec3(0.5) + (lit - vec3(0.5)) * (1.0 + contrastStrength * 0.18);
