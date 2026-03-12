@@ -1,7 +1,18 @@
 using System.Numerics;
+using System.Diagnostics.CodeAnalysis;
 using Raylib_cs;
+using AIG.Game.World;
 
 namespace AIG.Game.Core;
+
+[ExcludeFromCodeCoverage]
+public readonly record struct WorldMaterialPassSettings(
+    Vector3 CameraPosition,
+    Vector3 SunDirection,
+    Color FogColor,
+    float FogStart,
+    float FogEnd,
+    float Strength);
 
 public interface IGamePlatform
 {
@@ -13,6 +24,7 @@ public interface IGamePlatform
     void SetTargetFps(int fps);
     void DisableCursor();
     void EnableCursor();
+    void WarmupWorldRenderResources();
     void CloseWindow();
     bool WindowShouldClose();
     float GetFrameTime();
@@ -29,6 +41,9 @@ public interface IGamePlatform
     void EndMode3D();
     void DrawCube(Vector3 position, float width, float height, float length, Color color);
     void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color);
+    void ConfigureWorldMaterialPass(WorldMaterialPassSettings settings);
+    void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms);
+    void DrawTexturedChunkMesh(int chunkX, int chunkZ, int revision, ChunkSurfaceMeshData mesh);
     void DrawCubeWires(Vector3 position, float width, float height, float length, Color color);
     int GetScreenWidth();
     int GetScreenHeight();

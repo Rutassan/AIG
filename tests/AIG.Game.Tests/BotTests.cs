@@ -1963,6 +1963,88 @@ public sealed class BotTests
         Assert.NotEmpty((Vector3[])GetPrivateField(bot, "_navigationWaypoints")!);
     }
 
+    [Fact(DisplayName = "CompanionBot пропускает временно заблокированный build-step и выбирает следующий достижимый")]
+    public void CompanionBot_TrySelectReachableBuildStep_SkipsBlockedBuildStep()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Blocked-build-step",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps:
+            [
+                new HouseBuildStep(4, 2, 4, BlockType.Wood),
+                new HouseBuildStep(8, 2, 5, BlockType.Wood),
+                new HouseBuildStep(10, 2, 5, BlockType.Wood)
+            ]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        InvokePrivate(bot, "AddStockpile", BlockType.Wood, 2);
+        InvokePrivate(bot, "BlockBuildStep", blueprint.Steps[1], 1.25f);
+
+        var selection = InvokePrivateWithArgs(bot, "TrySelectReachableBuildStep", world, blueprint, 0, default(HouseBuildStep));
+
+        Assert.True((bool)selection.Result!);
+        Assert.Equal(2, Assert.IsType<int>(selection.Args[2]));
+        Assert.Equal(new HouseBuildStep(10, 2, 5, BlockType.Wood), Assert.IsType<HouseBuildStep>(selection.Args[3]!));
+    }
+
+    [Fact(DisplayName = "CompanionBot снимает блокировку build-step после истечения cooldown")]
+    public void CompanionBot_UpdateBlockedBuildStepCooldowns_ExpiresBlockedStep()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var blockedStep = new HouseBuildStep(8, 2, 5, BlockType.Wood);
+
+        InvokePrivate(bot, "BlockBuildStep", blockedStep, 0.5f);
+        Assert.True((bool)InvokePrivate(bot, "IsBuildStepBlocked", blockedStep)!);
+
+        InvokePrivate(bot, "UpdateBlockedBuildStepCooldowns", 0.2f);
+        Assert.True((bool)InvokePrivate(bot, "IsBuildStepBlocked", blockedStep)!);
+
+        InvokePrivate(bot, "UpdateBlockedBuildStepCooldowns", 0.35f);
+        Assert.False((bool)InvokePrivate(bot, "IsBuildStepBlocked", blockedStep)!);
+    }
+
+    [Fact(DisplayName = "CompanionBot BlockBuildStep игнорирует нулевую длительность и не укорачивает более длинную блокировку")]
+    public void CompanionBot_BlockBuildStep_IgnoresZeroAndShorterDuration()
+    {
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        var blockedStep = new HouseBuildStep(8, 2, 5, BlockType.Wood);
+
+        InvokePrivate(bot, "BlockBuildStep", blockedStep, 0f);
+        Assert.False((bool)InvokePrivate(bot, "IsBuildStepBlocked", blockedStep)!);
+
+        InvokePrivate(bot, "BlockBuildStep", blockedStep, 1.2f);
+        var before = new Dictionary<HouseBuildStep, float>(Assert.IsType<Dictionary<HouseBuildStep, float>>(GetPrivateField(bot, "_blockedBuildSteps")));
+        InvokePrivate(bot, "BlockBuildStep", blockedStep, 0.3f);
+        var after = Assert.IsType<Dictionary<HouseBuildStep, float>>(GetPrivateField(bot, "_blockedBuildSteps"));
+
+        Assert.Equal(before[blockedStep], after[blockedStep]);
+    }
+
+    [Fact(DisplayName = "CompanionBot при заблокированном текущем build-step и отсутствии альтернатив честно уходит в NoPath")]
+    public void CompanionBot_UpdateBuildCommand_BlockedCurrentStepWithoutAlternative_SetsNoPath()
+    {
+        var world = CreateFlatWorld(24, 12);
+        var blueprint = new HouseBlueprint(
+            HouseTemplateKind.CabinS,
+            "Blocked-current-step",
+            originX: 4,
+            floorY: 2,
+            originZ: 4,
+            steps: [new HouseBuildStep(8, 2, 5, BlockType.Wood)]);
+
+        var bot = new CompanionBot(new GameConfig(), new Vector3(5.5f, 2.02f, 5.5f));
+        SetPrivateField(bot, "_activeCommand", BotCommand.BuildHouse(blueprint));
+        InvokePrivate(bot, "BlockBuildStep", blueprint.Steps[0], 1.25f);
+
+        InvokePrivate(bot, "UpdateBuildCommand", world, 1f / 30f);
+
+        Assert.Equal(BotStatus.NoPath, bot.Status);
+    }
+
     [Fact(DisplayName = "CompanionBot считает нерасходуемый альтернативный шаг доступным по ресурсам")]
     public void CompanionBot_TrySelectReachableBuildStep_CoversNonConsumingCandidate()
     {

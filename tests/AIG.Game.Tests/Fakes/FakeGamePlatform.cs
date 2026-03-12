@@ -1,5 +1,6 @@
 using System.Numerics;
 using AIG.Game.Core;
+using AIG.Game.World;
 using Raylib_cs;
 
 namespace AIG.Game.Tests.Fakes;
@@ -9,6 +10,8 @@ internal sealed class FakeGamePlatform : IGamePlatform
     internal sealed record CubeCall(Vector3 Position, float Width, float Height, float Length, Color Color);
     internal sealed record CubeWireCall(Vector3 Position, float Width, float Height, float Length, Color Color);
     internal sealed record RectangleCall(int X, int Y, int Width, int Height, Color Color);
+    internal sealed record TexturedBlockCall(BlockType Block, int InstanceCount);
+    internal sealed record TexturedChunkMeshCall(int ChunkX, int ChunkZ, int Revision, int TriangleCount);
 
     private sealed record FrameInput(
         Vector2 MousePosition,
@@ -27,11 +30,20 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly List<CubeCall> _cubeCalls = [];
     private readonly List<CubeWireCall> _cubeWireCalls = [];
     private readonly List<RectangleCall> _rectangleCalls = [];
+    private readonly List<TexturedBlockCall> _texturedBlockCalls = [];
+    private readonly List<TexturedChunkMeshCall> _texturedChunkMeshCalls = [];
+    private readonly List<WorldMaterialPassSettings> _worldMaterialPassCalls = [];
     private readonly List<string> _screenshots = [];
 
     public int DrawCubeCalls { get; private set; }
     public int DrawCubeInstancedCalls { get; private set; }
     public int DrawCubeInstancedInstances { get; private set; }
+    public int LegacyDrawCubeInstancedCalls { get; private set; }
+    public int LegacyDrawCubeInstancedInstances { get; private set; }
+    public int DrawTexturedBlockInstancedCalls { get; private set; }
+    public int DrawTexturedBlockInstancedInstances { get; private set; }
+    public int DrawTexturedChunkMeshCalls { get; private set; }
+    public int ConfigureWorldMaterialPassCalls { get; private set; }
     public int DrawCubeWiresCalls { get; private set; }
     public int DrawTextCalls { get; private set; }
     public int DrawLineCalls { get; private set; }
@@ -42,6 +54,7 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public bool EnableCursorCalled { get; private set; }
     public bool InitWindowCalled { get; private set; }
     public bool CloseWindowCalled { get; private set; }
+    public bool WarmupWorldRenderResourcesCalled { get; private set; }
     public bool SetExitKeyCalled { get; private set; }
     public bool ToggleFullscreenCalled { get; private set; }
     public bool IsFullscreen { get; private set; }
@@ -61,6 +74,9 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public IReadOnlyList<CubeCall> DrawnCubes => _cubeCalls;
     public IReadOnlyList<CubeWireCall> DrawnCubeWires => _cubeWireCalls;
     public IReadOnlyList<RectangleCall> DrawnRectangles => _rectangleCalls;
+    public IReadOnlyList<TexturedBlockCall> DrawnTexturedBlocks => _texturedBlockCalls;
+    public IReadOnlyList<TexturedChunkMeshCall> DrawnTexturedChunkMeshes => _texturedChunkMeshCalls;
+    public IReadOnlyList<WorldMaterialPassSettings> WorldMaterialPasses => _worldMaterialPassCalls;
     public IReadOnlyList<string> SavedScreenshots => _screenshots;
 
     public void EnqueueWindowShouldClose(params bool[] values)
@@ -142,6 +158,11 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public void EnableCursor()
     {
         EnableCursorCalled = true;
+    }
+
+    public void WarmupWorldRenderResources()
+    {
+        WarmupWorldRenderResourcesCalled = true;
     }
 
     public void CloseWindow()
@@ -246,11 +267,50 @@ internal sealed class FakeGamePlatform : IGamePlatform
     {
         DrawCubeInstancedCalls++;
         DrawCubeInstancedInstances += transforms.Count;
+        LegacyDrawCubeInstancedCalls++;
+        LegacyDrawCubeInstancedInstances += transforms.Count;
         DrawCubeCalls += transforms.Count;
         foreach (var t in transforms)
         {
             _cubeCalls.Add(new CubeCall(new Vector3(t.M41, t.M42, t.M43), 1f, 1f, 1f, color));
         }
+    }
+
+    public void ConfigureWorldMaterialPass(WorldMaterialPassSettings settings)
+    {
+        ConfigureWorldMaterialPassCalls++;
+        _worldMaterialPassCalls.Add(settings);
+    }
+
+    public void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms)
+    {
+        DrawTexturedBlockInstancedCalls++;
+        DrawTexturedBlockInstancedInstances += transforms.Count;
+        DrawCubeInstancedCalls++;
+        DrawCubeInstancedInstances += transforms.Count;
+        DrawCubeCalls += transforms.Count;
+        _texturedBlockCalls.Add(new TexturedBlockCall(block, transforms.Count));
+
+        var color = block switch
+        {
+            BlockType.Grass => new Color(98, 144, 82, 255),
+            BlockType.Dirt => new Color(148, 111, 76, 255),
+            BlockType.Stone => new Color(134, 129, 121, 255),
+            BlockType.Wood => new Color(132, 98, 61, 255),
+            BlockType.Leaves => new Color(82, 130, 74, 255),
+            _ => Color.White
+        };
+
+        foreach (var t in transforms)
+        {
+            _cubeCalls.Add(new CubeCall(new Vector3(t.M41, t.M42, t.M43), 1f, 1f, 1f, color));
+        }
+    }
+
+    public void DrawTexturedChunkMesh(int chunkX, int chunkZ, int revision, ChunkSurfaceMeshData mesh)
+    {
+        DrawTexturedChunkMeshCalls++;
+        _texturedChunkMeshCalls.Add(new TexturedChunkMeshCall(chunkX, chunkZ, revision, mesh.TriangleCount));
     }
 
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color)

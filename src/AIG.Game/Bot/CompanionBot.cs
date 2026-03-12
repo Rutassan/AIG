@@ -31,6 +31,7 @@ internal sealed class CompanionBot
     private const float PlayerRouteFrontDistance = 3.35f;
     private const float PlayerRouteFrontDot = 0.8f;
     private const float GatherTargetBlockDuration = 1.75f;
+    private const float BuildStepBlockDuration = 1.25f;
     private const float RouteProgressThreshold = 0.015f;
     private const float RouteMicroMoveThreshold = 0.05f;
     private const int BuildReachableLookahead = 256;
@@ -53,6 +54,7 @@ internal sealed class CompanionBot
     private readonly Action<string> _diagnostics;
     private readonly Dictionary<BlockType, int> _stockpile = new();
     private readonly Dictionary<ResourceTarget, float> _blockedResourceTargets = new();
+    private readonly Dictionary<HouseBuildStep, float> _blockedBuildSteps = new();
 
     private BotCommand? _activeCommand;
     private BotCommand? _queuedCommand;
@@ -144,6 +146,7 @@ internal sealed class CompanionBot
         _noPathTimer = MathF.Max(0f, _noPathTimer - safeDelta);
         _followRetryTimer = MathF.Max(0f, _followRetryTimer - safeDelta);
         UpdateBlockedResourceTargetCooldowns(safeDelta);
+        UpdateBlockedBuildStepCooldowns(safeDelta);
 
         if (_activeCommand is null)
         {
@@ -314,6 +317,14 @@ internal sealed class CompanionBot
 
         var stepIndex = _buildStepIndex;
         var step = blueprint.Steps[stepIndex];
+        if (IsBuildStepBlocked(step) && !TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+        {
+            Status = BotStatus.NoPath;
+            _noPathTimer = 0.35f;
+            StepIdle(world, deltaTime);
+            return;
+        }
+
         if (TryContinueBuildGatherBatch(world, blueprint, stepIndex, deltaTime))
         {
             return;
@@ -334,14 +345,17 @@ internal sealed class CompanionBot
             return;
         }
 
-        if (!TryEnsureActionRoute(world, NavigationPurpose.BuildAction, step.X, step.Y, step.Z, searchRadius: 7, blueprint)
-            && !TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+        if (!TryEnsureActionRoute(world, NavigationPurpose.BuildAction, step.X, step.Y, step.Z, searchRadius: 7, blueprint))
         {
-            Trace($"build-no-path step={FormatBuildStep(step)}");
-            Status = BotStatus.NoPath;
-            _noPathTimer = 0.35f;
-            StepIdle(world, deltaTime);
-            return;
+            BlockBuildStep(step, BuildStepBlockDuration);
+            if (!TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
+            {
+                Trace($"build-no-path step={FormatBuildStep(step)}");
+                Status = BotStatus.NoPath;
+                _noPathTimer = 0.35f;
+                StepIdle(world, deltaTime);
+                return;
+            }
         }
 
         if (step.ConsumesResource && GetStockpile(step.Block) <= 0)
@@ -362,6 +376,7 @@ internal sealed class CompanionBot
         if (buildMove == MoveResult.Arrived && !CanActOnBlock(step.X, step.Y, step.Z))
         {
             ResetNavigationRoute();
+            BlockBuildStep(step, BuildStepBlockDuration);
             Trace($"build-arrived-out-of-range step={FormatBuildStep(step)}");
             if (!TrySelectReachableBuildStep(world, blueprint, out stepIndex, out step))
             {
@@ -391,6 +406,7 @@ internal sealed class CompanionBot
         if (buildMove == MoveResult.Blocked)
         {
             Trace($"build-move-blocked step={FormatBuildStep(step)}");
+            BlockBuildStep(step, BuildStepBlockDuration);
             Status = BotStatus.NoPath;
             _noPathTimer = 0.35f;
         }
@@ -803,9 +819,29 @@ internal sealed class CompanionBot
         _blockedResourceTargets[target] = duration;
     }
 
+    private void BlockBuildStep(HouseBuildStep step, float duration)
+    {
+        if (duration <= 0f)
+        {
+            return;
+        }
+
+        if (_blockedBuildSteps.TryGetValue(step, out var existingDuration) && existingDuration >= duration)
+        {
+            return;
+        }
+
+        _blockedBuildSteps[step] = duration;
+    }
+
     private bool IsResourceTargetBlocked(ResourceTarget target)
     {
         return _blockedResourceTargets.TryGetValue(target, out var remaining) && remaining > 0f;
+    }
+
+    private bool IsBuildStepBlocked(HouseBuildStep step)
+    {
+        return _blockedBuildSteps.TryGetValue(step, out var remaining) && remaining > 0f;
     }
 
     private void UpdateBlockedResourceTargetCooldowns(float deltaTime)
@@ -848,6 +884,49 @@ internal sealed class CompanionBot
         for (var i = 0; i < expiredTargets.Count; i++)
         {
             _blockedResourceTargets.Remove(expiredTargets[i]);
+        }
+    }
+
+    private void UpdateBlockedBuildStepCooldowns(float deltaTime)
+    {
+        if (_blockedBuildSteps.Count == 0 || deltaTime <= 0f)
+        {
+            return;
+        }
+
+        List<(HouseBuildStep Step, float Remaining)>? updatedSteps = null;
+        List<HouseBuildStep>? expiredSteps = null;
+        foreach (var entry in _blockedBuildSteps)
+        {
+            var remaining = entry.Value - deltaTime;
+            if (remaining > 0f)
+            {
+                updatedSteps ??= [];
+                updatedSteps.Add((entry.Key, remaining));
+                continue;
+            }
+
+            expiredSteps ??= [];
+            expiredSteps.Add(entry.Key);
+        }
+
+        if (updatedSteps is not null)
+        {
+            for (var i = 0; i < updatedSteps.Count; i++)
+            {
+                var updated = updatedSteps[i];
+                _blockedBuildSteps[updated.Step] = updated.Remaining;
+            }
+        }
+
+        if (expiredSteps is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < expiredSteps.Count; i++)
+        {
+            _blockedBuildSteps.Remove(expiredSteps[i]);
         }
     }
 
@@ -958,6 +1037,7 @@ internal sealed class CompanionBot
         _resourceFocusTarget = null;
         ClearBuildGatherBatch();
         _blockedResourceTargets.Clear();
+        _blockedBuildSteps.Clear();
         ResetNavigationRoute();
         _activeGatheredAmount = 0;
         _buildStepIndex = 0;
@@ -1444,7 +1524,9 @@ internal sealed class CompanionBot
         for (var candidateIndex = _buildStepIndex + 1; candidateIndex < lookaheadEnd; candidateIndex++)
         {
             var candidate = blueprint.Steps[candidateIndex];
-            if (blueprint.IsSupersededStep(candidateIndex) || IsBuildStepSatisfied(world, candidate))
+            if (blueprint.IsSupersededStep(candidateIndex)
+                || IsBuildStepSatisfied(world, candidate)
+                || IsBuildStepBlocked(candidate))
             {
                 continue;
             }

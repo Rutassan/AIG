@@ -197,6 +197,70 @@ public sealed class GameCaptureTests
         }
     }
 
+    [Fact(DisplayName = "GameCaptureManager cleanup возвращает 0, если рабочая директория отсутствует")]
+    public void GameCaptureManager_CleanupLegacyRootScreenshots_ReturnsZeroWhenWorkingDirectoryMissing()
+    {
+        var manager = new GameCaptureManager(
+            "/tmp/screens",
+            "/tmp/videos",
+            30,
+            workingDirectory: "/tmp/definitely-missing-aig-dir",
+            directoryExists: _ => false);
+
+        var removed = manager.CleanupLegacyRootScreenshots();
+
+        Assert.Equal(0, removed);
+    }
+
+    [Fact(DisplayName = "GameCaptureManager cleanup возвращает 0 и для пустого workingDirectory")]
+    public void GameCaptureManager_CleanupLegacyRootScreenshots_ReturnsZeroWhenWorkingDirectoryBlank()
+    {
+        var manager = new GameCaptureManager(
+            "/tmp/screens",
+            "/tmp/videos",
+            30,
+            workingDirectory: "   ",
+            directoryExists: _ => true,
+            getFiles: (_, _, _) => []);
+
+        var removed = manager.CleanupLegacyRootScreenshots();
+
+        Assert.Equal(0, removed);
+    }
+
+    [Fact(DisplayName = "GameCaptureManager cleanup игнорирует IOException и UnauthorizedAccessException")]
+    public void GameCaptureManager_CleanupLegacyRootScreenshots_IgnoresDeleteExceptions()
+    {
+        var deleted = new List<string>();
+        var manager = new GameCaptureManager(
+            "/tmp/screens",
+            "/tmp/videos",
+            30,
+            workingDirectory: "/tmp/aig-root",
+            directoryExists: _ => true,
+            getFiles: (_, _, _) => ["/tmp/aig-root/screenshot000.png", "/tmp/aig-root/screenshot001.png", "/tmp/aig-root/screenshot002.png"],
+            deleteFile: path =>
+            {
+                if (path.EndsWith("000.png", StringComparison.Ordinal))
+                {
+                    throw new IOException("busy");
+                }
+
+                if (path.EndsWith("001.png", StringComparison.Ordinal))
+                {
+                    throw new UnauthorizedAccessException("denied");
+                }
+
+                deleted.Add(path);
+            });
+
+        var removed = manager.CleanupLegacyRootScreenshots();
+
+        Assert.Equal(1, removed);
+        Assert.Single(deleted);
+        Assert.EndsWith("002.png", deleted[0], StringComparison.Ordinal);
+    }
+
     [Fact(DisplayName = "GameCaptureManager записывает BMP-кадры и очищает временные кадры после успешной сборки видео")]
     public void GameCaptureManager_StartAndStopRecording_CleansFramesDirectoryOnSuccess()
     {

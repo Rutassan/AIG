@@ -31,6 +31,7 @@ public sealed class WorldMap
     private readonly record struct SurfaceRebuildResult(int ChunkX, int ChunkZ, int Revision, IReadOnlyList<SurfaceBlock> Blocks);
     private readonly Dictionary<(int ChunkX, int ChunkZ), Chunk> _chunks = new();
     private readonly Dictionary<(int ChunkX, int ChunkZ), IReadOnlyList<SurfaceBlock>> _chunkSurfaceCache = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), int> _chunkSurfaceCacheRevision = new();
     private readonly HashSet<(int ChunkX, int ChunkZ)> _dirtySurfaceChunks = new();
     private readonly Dictionary<(int ChunkX, int ChunkZ), int> _surfaceRevisions = new();
     private readonly Dictionary<(int X, int Y, int Z), BlockType> _overrides = new();
@@ -362,6 +363,7 @@ public sealed class WorldMap
             }
 
             _chunkSurfaceCache[key] = surfaceResult.Blocks;
+            _chunkSurfaceCacheRevision[key] = surfaceResult.Revision;
             _dirtySurfaceChunks.Remove(key);
             applied++;
         }
@@ -380,6 +382,7 @@ public sealed class WorldMap
         {
             _chunks.Clear();
             _chunkSurfaceCache.Clear();
+            _chunkSurfaceCacheRevision.Clear();
             _dirtySurfaceChunks.Clear();
             _surfaceRevisions.Clear();
             return;
@@ -401,6 +404,7 @@ public sealed class WorldMap
             {
                 _chunks.Remove(key);
                 _chunkSurfaceCache.Remove(key);
+                _chunkSurfaceCacheRevision.Remove(key);
                 _dirtySurfaceChunks.Remove(key);
                 _surfaceRevisions.Remove(key);
                 removedChunks.Add(key);
@@ -441,6 +445,24 @@ public sealed class WorldMap
         }
 
         blocks = cached!;
+        return true;
+    }
+
+    internal bool TryGetChunkSurfaceState(int chunkX, int chunkZ, out IReadOnlyList<SurfaceBlock> blocks, out int cacheRevision, out bool isDirty)
+    {
+        var key = (chunkX, chunkZ);
+        if (!_chunks.ContainsKey(key))
+        {
+            blocks = EmptySurfaceBlocks;
+            cacheRevision = 0;
+            isDirty = false;
+            return false;
+        }
+
+        var hasCachedSurface = _chunkSurfaceCache.TryGetValue(key, out var cached);
+        blocks = hasCachedSurface ? cached! : EmptySurfaceBlocks;
+        cacheRevision = _chunkSurfaceCacheRevision.TryGetValue(key, out var revision) ? revision : 0;
+        isDirty = _dirtySurfaceChunks.Contains(key);
         return true;
     }
 
@@ -504,6 +526,7 @@ public sealed class WorldMap
         if (!_chunks.TryGetValue(key, out var chunk))
         {
             _chunkSurfaceCache.Remove(key);
+            _chunkSurfaceCacheRevision.Remove(key);
             _dirtySurfaceChunks.Remove(key);
             return EmptySurfaceBlocks;
         }
@@ -552,9 +575,12 @@ public sealed class WorldMap
         }
 
         _chunkSurfaceCache[key] = blocks;
+        _chunkSurfaceCacheRevision[key] = GetSurfaceRevision(key);
         _dirtySurfaceChunks.Remove(key);
         return blocks;
     }
+
+    internal bool IsSurfaceMeshingSolid(int x, int y, int z) => IsSolidNoLoad(x, y, z);
 
     private bool IsSolidNoLoad(int x, int y, int z)
     {
@@ -1209,6 +1235,7 @@ public sealed class WorldMap
             {
                 _dirtySurfaceChunks.Remove(staleKeys[i]);
                 _chunkSurfaceCache.Remove(staleKeys[i]);
+                _chunkSurfaceCacheRevision.Remove(staleKeys[i]);
             }
         }
 
@@ -1260,6 +1287,7 @@ public sealed class WorldMap
             {
                 _dirtySurfaceChunks.Remove(staleKeys[i]);
                 _chunkSurfaceCache.Remove(staleKeys[i]);
+                _chunkSurfaceCacheRevision.Remove(staleKeys[i]);
                 _surfaceRevisions.Remove(staleKeys[i]);
             }
         }
@@ -1342,6 +1370,7 @@ public sealed class WorldMap
 
             _dirtySurfaceChunks.Remove(key);
             _chunkSurfaceCache.Remove(key);
+            _chunkSurfaceCacheRevision.Remove(key);
             _surfaceRevisions.Remove(key);
             return false;
         }

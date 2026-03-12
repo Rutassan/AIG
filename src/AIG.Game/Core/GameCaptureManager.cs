@@ -96,6 +96,9 @@ internal sealed class GameCaptureManager
     private readonly Func<DateTimeOffset> _clock;
     private readonly Func<VideoEncodingRequest, VideoEncodingResult> _encoder;
     private readonly string _workingDirectory;
+    private readonly Func<string, bool> _directoryExists;
+    private readonly Func<string, string, SearchOption, string[]> _getFiles;
+    private readonly Action<string> _deleteFile;
 
     private RecordingSession? _recordingSession;
     private float _recordingAccumulator;
@@ -107,7 +110,10 @@ internal sealed class GameCaptureManager
         int videoFramesPerSecond,
         Func<VideoEncodingRequest, VideoEncodingResult>? encoder = null,
         Func<DateTimeOffset>? clock = null,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        Func<string, bool>? directoryExists = null,
+        Func<string, string, SearchOption, string[]>? getFiles = null,
+        Action<string>? deleteFile = null)
     {
         _screenshotsDirectory = screenshotsDirectory;
         _videosDirectory = videosDirectory;
@@ -117,6 +123,9 @@ internal sealed class GameCaptureManager
         _workingDirectory = string.IsNullOrWhiteSpace(workingDirectory)
             ? Directory.GetCurrentDirectory()
             : workingDirectory;
+        _directoryExists = directoryExists ?? Directory.Exists;
+        _getFiles = getFiles ?? Directory.GetFiles;
+        _deleteFile = deleteFile ?? File.Delete;
     }
 
     internal bool IsRecording => _recordingSession is not null;
@@ -204,17 +213,17 @@ internal sealed class GameCaptureManager
 
     internal int CleanupLegacyRootScreenshots()
     {
-        if (string.IsNullOrWhiteSpace(_workingDirectory) || !Directory.Exists(_workingDirectory))
+        if (!_directoryExists(_workingDirectory))
         {
             return 0;
         }
 
         var removed = 0;
-        foreach (var path in Directory.GetFiles(_workingDirectory, LegacyScreenshotPattern, SearchOption.TopDirectoryOnly))
+        foreach (var path in _getFiles(_workingDirectory, LegacyScreenshotPattern, SearchOption.TopDirectoryOnly))
         {
             try
             {
-                File.Delete(path);
+                _deleteFile(path);
                 removed++;
             }
             catch (IOException)

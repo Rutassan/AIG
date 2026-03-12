@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Text;
 using Raylib_cs;
+using AIG.Game.World;
 
 namespace AIG.Game.Core;
 
@@ -22,6 +23,21 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private Mesh _instancedCubeMesh;
     private Material _instancedCubeMaterial;
     private bool _hasInstancedCubeResources;
+    private readonly Dictionary<BlockType, Mesh> _texturedBlockMeshes = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), (int Revision, Mesh Mesh)> _texturedChunkMeshes = new();
+    private Material _texturedChunkMaterial;
+    private bool _hasTexturedChunkMaterial;
+    private Shader _worldAtlasShader;
+    private bool _hasWorldAtlasShader;
+    private int _worldAtlasCameraPosLoc = -1;
+    private int _worldAtlasSunDirectionLoc = -1;
+    private int _worldAtlasFogColorLoc = -1;
+    private int _worldAtlasFogRangeLoc = -1;
+    private int _worldAtlasStrengthLoc = -1;
+    private WorldMaterialPassSettings _worldMaterialPassSettings;
+    private bool _hasWorldMaterialPassSettings;
+    private Texture2D _worldAtlasTexture;
+    private bool _hasWorldAtlasTexture;
 
     public void SetConfigFlags(ConfigFlags flags) => Raylib.SetConfigFlags(flags);
     public void SetExitKey(KeyboardKey key) => Raylib.SetExitKey(key);
@@ -31,8 +47,19 @@ public sealed class RaylibGamePlatform : IGamePlatform
     public void SetTargetFps(int fps) => Raylib.SetTargetFPS(fps);
     public void DisableCursor() => Raylib.DisableCursor();
     public void EnableCursor() => Raylib.EnableCursor();
+    public void WarmupWorldRenderResources()
+    {
+        EnsureWorldAtlasTexture();
+        _ = EnsureTexturedBlockResources(BlockType.Grass, out _, out _);
+        _ = EnsureTexturedBlockResources(BlockType.Dirt, out _, out _);
+        _ = EnsureTexturedBlockResources(BlockType.Stone, out _, out _);
+        _ = EnsureTexturedBlockResources(BlockType.Wood, out _, out _);
+        _ = EnsureTexturedBlockResources(BlockType.Leaves, out _, out _);
+    }
+
     public void CloseWindow()
     {
+        ReleaseTexturedBlockResources();
         ReleaseInstancedCubeResources();
         Raylib.CloseWindow();
     }
@@ -87,6 +114,49 @@ public sealed class RaylibGamePlatform : IGamePlatform
             var center = new Vector3(t.M41, t.M42, t.M43);
             Raylib.DrawCube(center, 1f, 1f, 1f, color);
         }
+    }
+
+    public void ConfigureWorldMaterialPass(WorldMaterialPassSettings settings)
+    {
+        _worldMaterialPassSettings = settings;
+        _hasWorldMaterialPassSettings = true;
+        EnsureWorldAtlasTexture();
+        EnsureWorldMaterialShader();
+        ApplyWorldMaterialPassSettings();
+    }
+
+    public void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms)
+    {
+        if (transforms.Count == 0)
+        {
+            return;
+        }
+
+        if (!EnsureTexturedBlockResources(block, out var mesh, out var material))
+        {
+            DrawCubeInstanced(transforms, GetFallbackBlockColor(block));
+            return;
+        }
+
+        for (var i = 0; i < transforms.Count; i++)
+        {
+            Raylib.DrawMesh(mesh, material, Matrix4x4.Transpose(transforms[i]));
+        }
+    }
+
+    public void DrawTexturedChunkMesh(int chunkX, int chunkZ, int revision, ChunkSurfaceMeshData meshData)
+    {
+        if (meshData.IsEmpty)
+        {
+            return;
+        }
+
+        if (!EnsureTexturedChunkMeshResource(chunkX, chunkZ, revision, meshData, out var mesh, out var material))
+        {
+            return;
+        }
+
+        Raylib.DrawMesh(mesh, material, Matrix4x4.Identity);
     }
 
     public void DrawCubeWires(Vector3 position, float width, float height, float length, Color color) => Raylib.DrawCubeWires(position, width, height, length, color);
@@ -150,5 +220,280 @@ public sealed class RaylibGamePlatform : IGamePlatform
         var result = new int[unique.Count];
         unique.CopyTo(result);
         return result;
+    }
+
+    private bool EnsureTexturedBlockResources(BlockType block, out Mesh mesh, out Material material)
+    {
+        EnsureWorldAtlasTexture();
+        EnsureWorldMaterialShader();
+
+        EnsureTexturedChunkMaterial();
+
+        if (_hasWorldAtlasTexture && _hasTexturedChunkMaterial && _texturedBlockMeshes.TryGetValue(block, out mesh))
+        {
+            material = _texturedChunkMaterial;
+            return true;
+        }
+
+        if (!_hasWorldAtlasTexture || !_hasTexturedChunkMaterial)
+        {
+            mesh = default;
+            material = default;
+            return false;
+        }
+
+        var meshData = TexturedBlockMeshFactory.Build(block);
+        mesh = new Mesh(meshData.VertexCount, meshData.TriangleCount);
+        mesh.AllocVertices();
+        mesh.AllocTexCoords();
+        mesh.AllocNormals();
+        mesh.AllocColors();
+        mesh.AllocIndices();
+
+        meshData.Vertices.AsSpan().CopyTo(mesh.VerticesAs<float>().Slice(0, meshData.Vertices.Length));
+        meshData.TexCoords.AsSpan().CopyTo(mesh.TexCoordsAs<float>().Slice(0, meshData.TexCoords.Length));
+        meshData.Normals.AsSpan().CopyTo(mesh.NormalsAs<float>().Slice(0, meshData.Normals.Length));
+        meshData.Colors.AsSpan().CopyTo(mesh.ColorsAs<byte>().Slice(0, meshData.Colors.Length));
+        meshData.Indices.AsSpan().CopyTo(mesh.IndicesAs<ushort>().Slice(0, meshData.Indices.Length));
+        Raylib.UploadMesh(ref mesh, false);
+
+        material = _texturedChunkMaterial;
+        _texturedBlockMeshes[block] = mesh;
+        return true;
+    }
+
+    private bool EnsureTexturedChunkMeshResource(int chunkX, int chunkZ, int revision, ChunkSurfaceMeshData meshData, out Mesh mesh, out Material material)
+    {
+        EnsureWorldAtlasTexture();
+        EnsureWorldMaterialShader();
+        EnsureTexturedChunkMaterial();
+
+        if (!_hasWorldAtlasTexture || !_hasTexturedChunkMaterial)
+        {
+            mesh = default;
+            material = default;
+            return false;
+        }
+
+        var key = (chunkX, chunkZ);
+        if (_texturedChunkMeshes.TryGetValue(key, out var cached) && cached.Revision == revision)
+        {
+            mesh = cached.Mesh;
+            material = _texturedChunkMaterial;
+            ApplyWorldShader(ref material);
+            return true;
+        }
+
+        if (_texturedChunkMeshes.TryGetValue(key, out cached))
+        {
+            Raylib.UnloadMesh(cached.Mesh);
+            _texturedChunkMeshes.Remove(key);
+        }
+
+        mesh = UploadMesh(meshData.Vertices, meshData.TexCoords, meshData.Normals, meshData.Colors, meshData.Indices, meshData.VertexCount, meshData.TriangleCount);
+        _texturedChunkMeshes[key] = (revision, mesh);
+        material = _texturedChunkMaterial;
+        ApplyWorldShader(ref material);
+        return true;
+    }
+
+    private void EnsureWorldAtlasTexture()
+    {
+        if (_hasWorldAtlasTexture)
+        {
+            return;
+        }
+
+        var atlasPath = ResolveAssetPath(WorldTextureAtlas.RelativePath);
+        if (!File.Exists(atlasPath))
+        {
+            return;
+        }
+
+        _worldAtlasTexture = Raylib.LoadTexture(atlasPath);
+        Raylib.SetTextureFilter(_worldAtlasTexture, TextureFilter.Point);
+        _hasWorldAtlasTexture = true;
+    }
+
+    private void EnsureTexturedChunkMaterial()
+    {
+        if (_hasTexturedChunkMaterial || !_hasWorldAtlasTexture)
+        {
+            return;
+        }
+
+        _texturedChunkMaterial = Raylib.LoadMaterialDefault();
+        Raylib.SetMaterialTexture(ref _texturedChunkMaterial, MaterialMapIndex.Albedo, _worldAtlasTexture);
+        ApplyWorldShader(ref _texturedChunkMaterial);
+        _hasTexturedChunkMaterial = true;
+    }
+
+    private void EnsureWorldMaterialShader()
+    {
+        if (_hasWorldAtlasShader)
+        {
+            return;
+        }
+
+        var vertexPath = ResolveAssetPath("assets/shaders/world_atlas.vs");
+        var fragmentPath = ResolveAssetPath("assets/shaders/world_atlas.fs");
+        if (!File.Exists(vertexPath) || !File.Exists(fragmentPath))
+        {
+            return;
+        }
+
+        _worldAtlasShader = Raylib.LoadShader(vertexPath, fragmentPath);
+        if (_worldAtlasShader.Id <= 0)
+        {
+            return;
+        }
+
+        _worldAtlasCameraPosLoc = Raylib.GetShaderLocation(_worldAtlasShader, "cameraPos");
+        _worldAtlasSunDirectionLoc = Raylib.GetShaderLocation(_worldAtlasShader, "sunDirection");
+        _worldAtlasFogColorLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogColor");
+        _worldAtlasFogRangeLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogRange");
+        _worldAtlasStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shaderStrength");
+        _hasWorldAtlasShader = true;
+        ApplyWorldMaterialPassSettings();
+    }
+
+    private void ApplyWorldShader(ref Material material)
+    {
+        if (!_hasWorldAtlasShader)
+        {
+            return;
+        }
+
+        material.Shader = _worldAtlasShader;
+    }
+
+    private void ApplyWorldMaterialPassSettings()
+    {
+        if (!_hasWorldAtlasShader || !_hasWorldMaterialPassSettings)
+        {
+            return;
+        }
+
+        if (_worldAtlasCameraPosLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasCameraPosLoc, new[]
+            {
+                _worldMaterialPassSettings.CameraPosition.X,
+                _worldMaterialPassSettings.CameraPosition.Y,
+                _worldMaterialPassSettings.CameraPosition.Z
+            }, ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasSunDirectionLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSunDirectionLoc, new[]
+            {
+                _worldMaterialPassSettings.SunDirection.X,
+                _worldMaterialPassSettings.SunDirection.Y,
+                _worldMaterialPassSettings.SunDirection.Z
+            }, ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasFogColorLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFogColorLoc, new[]
+            {
+                _worldMaterialPassSettings.FogColor.R / 255f,
+                _worldMaterialPassSettings.FogColor.G / 255f,
+                _worldMaterialPassSettings.FogColor.B / 255f,
+                _worldMaterialPassSettings.FogColor.A / 255f
+            }, ShaderUniformDataType.Vec4);
+        }
+
+        if (_worldAtlasFogRangeLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFogRangeLoc, new[]
+            {
+                _worldMaterialPassSettings.FogStart,
+                _worldMaterialPassSettings.FogEnd
+            }, ShaderUniformDataType.Vec2);
+        }
+
+        if (_worldAtlasStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasStrengthLoc, _worldMaterialPassSettings.Strength, ShaderUniformDataType.Float);
+        }
+    }
+
+    private void ReleaseTexturedBlockResources()
+    {
+        foreach (var mesh in _texturedBlockMeshes.Values)
+        {
+            Raylib.UnloadMesh(mesh);
+        }
+
+        foreach (var mesh in _texturedChunkMeshes.Values)
+        {
+            Raylib.UnloadMesh(mesh.Mesh);
+        }
+
+        _texturedBlockMeshes.Clear();
+        _texturedChunkMeshes.Clear();
+
+        if (_hasTexturedChunkMaterial)
+        {
+            Raylib.UnloadMaterial(_texturedChunkMaterial);
+            _hasTexturedChunkMaterial = false;
+        }
+
+        _hasWorldAtlasShader = false;
+        _worldAtlasCameraPosLoc = -1;
+        _worldAtlasSunDirectionLoc = -1;
+        _worldAtlasFogColorLoc = -1;
+        _worldAtlasFogRangeLoc = -1;
+        _worldAtlasStrengthLoc = -1;
+
+        if (_hasWorldAtlasTexture)
+        {
+            Raylib.UnloadTexture(_worldAtlasTexture);
+            _hasWorldAtlasTexture = false;
+        }
+    }
+
+    private static Mesh UploadMesh(float[] vertices, float[] texCoords, float[] normals, byte[] colors, ushort[] indices, int vertexCount, int triangleCount)
+    {
+        var mesh = new Mesh(vertexCount, triangleCount);
+        mesh.AllocVertices();
+        mesh.AllocTexCoords();
+        mesh.AllocNormals();
+        mesh.AllocColors();
+        mesh.AllocIndices();
+
+        vertices.AsSpan().CopyTo(mesh.VerticesAs<float>().Slice(0, vertices.Length));
+        texCoords.AsSpan().CopyTo(mesh.TexCoordsAs<float>().Slice(0, texCoords.Length));
+        normals.AsSpan().CopyTo(mesh.NormalsAs<float>().Slice(0, normals.Length));
+        colors.AsSpan().CopyTo(mesh.ColorsAs<byte>().Slice(0, colors.Length));
+        indices.AsSpan().CopyTo(mesh.IndicesAs<ushort>().Slice(0, indices.Length));
+        Raylib.UploadMesh(ref mesh, false);
+        return mesh;
+    }
+
+    private static string ResolveAssetPath(string relativePath)
+    {
+        var basePath = Path.Combine(AppContext.BaseDirectory, relativePath);
+        if (File.Exists(basePath))
+        {
+            return basePath;
+        }
+
+        return Path.GetFullPath(relativePath);
+    }
+
+    private static Color GetFallbackBlockColor(BlockType block)
+    {
+        return block switch
+        {
+            BlockType.Grass => new Color(98, 144, 82, 255),
+            BlockType.Dirt => new Color(148, 111, 76, 255),
+            BlockType.Stone => new Color(134, 129, 121, 255),
+            BlockType.Wood => new Color(132, 98, 61, 255),
+            BlockType.Leaves => new Color(82, 130, 74, 255),
+            _ => Color.White
+        };
     }
 }

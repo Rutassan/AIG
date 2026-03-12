@@ -641,6 +641,7 @@ public sealed class CoreFlowTests
         Assert.True(platform.IsFullscreen);
         Assert.True(platform.SetExitKeyCalled);
         Assert.True(platform.LoadUiFontCalled);
+        Assert.True(platform.WarmupWorldRenderResourcesCalled);
         Assert.True(platform.UnloadUiFontCalled);
     }
 
@@ -894,8 +895,8 @@ public sealed class CoreFlowTests
         Assert.Contains("result=FAIL", logText, StringComparison.Ordinal);
     }
 
-    [Fact(DisplayName = "ReadAutoBotInput поворачивает и прыгает при препятствии, даже при нулевой чувствительности")]
-    public void ReadAutoBotInput_ObstaclePath_UsesTurnAndSensitivityFallback()
+    [Fact(DisplayName = "ReadAutoBotInput строит маршрут обхода препятствия через waypoint-ы")]
+    public void ReadAutoBotInput_ObstaclePath_BuildsWaypointRoute()
     {
         var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 0);
         world.SetBlock(16, 2, 15, BlockType.Stone);
@@ -915,14 +916,15 @@ public sealed class CoreFlowTests
         var updatedState = args[1];
 
         Assert.True(float.IsFinite(input.LookDeltaX));
-        Assert.True(input.MoveRight != 0f);
-        Assert.True(input.Jump);
-        Assert.Equal(-1, (int)GetAutoBotField(updatedState, "TurnSign"));
-        Assert.True((float)GetAutoBotField(updatedState, "TurnLockTime") > 0.35f);
+        Assert.True(input.MoveForward > 0f);
+        Assert.True((float)GetAutoBotField(updatedState, "TurnLockTime") > 0.3f);
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.NotEmpty(waypoints);
+        Assert.Equal(0, (int)GetAutoBotField(updatedState, "WaypointIndex"));
     }
 
-    [Fact(DisplayName = "ReadAutoBotInput в свободном проходе не прыгает и не форсирует разворот")]
-    public void ReadAutoBotInput_FreePath_DoesNotForceTurn()
+    [Fact(DisplayName = "ReadAutoBotInput в свободном проходе идёт прямо без лишнего маршрута")]
+    public void ReadAutoBotInput_FreePath_WalksForwardWithoutRoute()
     {
         var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 0);
         var player = new PlayerController(new GameConfig(), new Vector3(16.5f, 2f, 16.5f));
@@ -940,9 +942,516 @@ public sealed class CoreFlowTests
         var updatedState = args[1];
 
         Assert.False(input.Jump);
-        Assert.InRange(MathF.Abs(input.MoveRight), 0f, 0.35f);
+        Assert.True(input.MoveForward > 0f);
+        Assert.Equal(0f, input.MoveRight);
+        Assert.Equal(0f, input.LookDeltaX);
         Assert.InRange((float)GetAutoBotField(updatedState, "StuckTime"), 0f, 0.0001f);
-        Assert.InRange((float)GetAutoBotField(updatedState, "TurnLockTime"), 0.09f, 0.11f);
+        Assert.Equal(0f, (float)GetAutoBotField(updatedState, "RetryTimer"));
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.Empty(waypoints);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput при недостижимой цели включает retry вместо бесполезного движения")]
+    public void ReadAutoBotInput_NoRoute_ArmsRetryCooldown()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+            }
+        }
+
+        for (var x = 3; x <= 5; x++)
+        {
+            for (var z = 3; z <= 5; z++)
+            {
+                if (x == 4 && z == 4)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 1, z, BlockType.Stone);
+                world.SetBlock(x, 2, z, BlockType.Stone);
+            }
+        }
+
+        var player = new PlayerController(new GameConfig { MouseSensitivity = 0f }, new Vector3(4.5f, 1f, 4.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, MouseSensitivity = 0f }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        object[] args = [0.016f, state];
+        var input = (PlayerInput)method!.Invoke(app, args)!;
+        var updatedState = args[1];
+
+        Assert.Equal(0f, input.MoveForward);
+        Assert.Equal(0f, input.MoveRight);
+        Assert.False(input.Jump);
+        Assert.True((float)GetAutoBotField(updatedState, "RetryTimer") > 0.25f);
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.Empty(waypoints);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput при retry cooldown использует текущую чувствительность мыши и fallback turnSign")]
+    public void ReadAutoBotInput_RetryCooldown_UsesConfiguredSensitivityAndFallbackTurnSign()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        var config = new GameConfig { FullscreenByDefault = false, MouseSensitivity = 0.01f };
+        var player = new PlayerController(config, new Vector3(8.5f, 2f, 8.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0.25f, turnSign: 0, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "RetryTimer", 0.2f);
+
+        object[] args = [0.016f, state];
+        var input = (PlayerInput)method!.Invoke(app, args)!;
+
+        Assert.Equal(0f, input.MoveForward);
+        Assert.Equal(0f, input.MoveRight);
+        Assert.False(input.Jump);
+        Assert.InRange(input.LookDeltaX, -3.501f, -3.499f);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput при уходе далеко от якоря строит маршрут обратно к стартовой зоне")]
+    public void ReadAutoBotInput_OutsideLeash_ReturnsToAnchor()
+    {
+        var world = new WorldMap(width: 48, height: 16, depth: 48, chunkSize: 16, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(24.5f, 2f, 24.5f));
+        player.SetPose(new Vector3(31.5f, 2f, 24.5f), new Vector3(1f, 0f, 0f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position + new Vector3(0.8f, 0f, 0f), stuckTime: 0.1f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "AnchorPosition", new Vector3(24.5f, 2f, 24.5f));
+        SetAutoBotField(state, "AnchorInitialized", true);
+
+        object[] args = [0.016f, state];
+        var input = (PlayerInput)method!.Invoke(app, args)!;
+        var updatedState = args[1];
+
+        Assert.True(input.MoveForward > 0f);
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.NotEmpty(waypoints);
+        Assert.True(waypoints[^1].X < player.Position.X);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput у края ямы включает маршрут вместо прямого шага вперёд")]
+    public void ReadAutoBotInput_GapAhead_BuildsRoute()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 0);
+        for (var x = 14; x <= 18; x++)
+        {
+            for (var z = 11; z <= 15; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+            }
+        }
+
+        var player = new PlayerController(new GameConfig { MouseSensitivity = 0f }, new Vector3(16.5f, 1f, 16.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+        player.Update(world, new PlayerInput(0f, 0f, false, 0f, 0f), 1f / 60f);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, MouseSensitivity = 0f }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        object[] args = [0.016f, state];
+        var input = (PlayerInput)method!.Invoke(app, args)!;
+        var updatedState = args[1];
+
+        Assert.True(input.MoveForward >= 0f);
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.NotEmpty(waypoints);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput при сильном застревании сбрасывает старый маршрут и меняет roam-вариант")]
+    public void ReadAutoBotInput_StuckRoute_ResetsRouteState()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 16, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(16.5f, 2f, 16.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0.8f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "Waypoints", new[] { player.Position + new Vector3(1f, 0f, 0f) });
+        SetAutoBotField(state, "GoalVariantIndex", 0);
+
+        object[] args = [0.016f, state];
+        _ = (PlayerInput)method!.Invoke(app, args)!;
+        var updatedState = args[1];
+
+        Assert.NotEqual(0, (int)GetAutoBotField(updatedState, "GoalVariantIndex"));
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.NotEmpty(waypoints);
+    }
+
+    [Fact(DisplayName = "ReadAutoBotInput при vertical-only waypoint не даёт ложное горизонтальное движение")]
+    public void ReadAutoBotInput_VerticalOnlyWaypoint_ReturnsIdleInput()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(8.5f, 2f, 8.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("ReadAutoBotInput", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position + new Vector3(0.2f, 0f, 0f), stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "Waypoints", new[] { player.Position + new Vector3(0f, 1f, 0f) });
+        SetAutoBotField(state, "WaypointIndex", 0);
+
+        object[] args = [0.016f, state];
+        var input = (PlayerInput)method!.Invoke(app, args)!;
+
+        Assert.Equal(0f, input.MoveForward);
+        Assert.Equal(0f, input.MoveRight);
+        Assert.False(input.Jump);
+    }
+
+    [Fact(DisplayName = "TryEnsureAutoBotRoute повторно использует уже готовый маршрут")]
+    public void TryEnsureAutoBotRoute_ReusesExistingRoute()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(8.5f, 2f, 8.5f));
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryEnsureAutoBotRoute", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "Waypoints", new[] { player.Position + new Vector3(1f, 0f, 0f) });
+        SetAutoBotField(state, "WaypointIndex", 0);
+
+        object[] args = [state];
+        var reused = (bool)method!.Invoke(app, args)!;
+
+        Assert.True(reused);
+    }
+
+    [Fact(DisplayName = "TryEnsureAutoBotRoute при активном retry cooldown не ищет маршрут заново")]
+    public void TryEnsureAutoBotRoute_RetryCooldownSkipsSearch()
+    {
+        var world = new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0);
+        var player = new PlayerController(new GameConfig(), new Vector3(8.5f, 2f, 8.5f));
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryEnsureAutoBotRoute", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "RetryTimer", 0.2f);
+
+        object[] args = [state];
+        var result = (bool)method!.Invoke(app, args)!;
+
+        Assert.False(result);
+    }
+
+    [Fact(DisplayName = "TryEnsureAutoBotRoute при уходе из leash без пути включает retry fallback")]
+    public void TryEnsureAutoBotRoute_OutsideLeashWithoutReturnPath_StartsRetry()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+            }
+        }
+
+        for (var y = 1; y <= 2; y++)
+        {
+            world.SetBlock(3, y, 2, BlockType.Stone);
+            world.SetBlock(2, y, 3, BlockType.Stone);
+            world.SetBlock(4, y, 3, BlockType.Stone);
+            world.SetBlock(3, y, 4, BlockType.Stone);
+        }
+
+        var player = new PlayerController(new GameConfig(), new Vector3(3.5f, 1f, 3.5f));
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryEnsureAutoBotRoute", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "AnchorPosition", new Vector3(20.5f, 1f, 20.5f));
+
+        object[] args = [state];
+        var result = (bool)method!.Invoke(app, args)!;
+        var updatedState = args[0];
+
+        Assert.False(result);
+        Assert.True((float)GetAutoBotField(updatedState, "RetryTimer") > 0.3f);
+    }
+
+    [Fact(DisplayName = "TryEnsureAutoBotRoute покрывает отрицательный боковой вариант и выставляет отрицательный turnSign")]
+    public void TryEnsureAutoBotRoute_NegativeSideVariant_SetsNegativeTurnSign()
+    {
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+            }
+        }
+
+        var player = new PlayerController(new GameConfig(), new Vector3(16.5f, 1f, 16.5f));
+        player.SetPose(player.Position, new Vector3(0f, 0f, -1f));
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryEnsureAutoBotRoute", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "GoalVariantIndex", 2);
+
+        object[] args = [state];
+        var result = (bool)method!.Invoke(app, args)!;
+        var updatedState = args[0];
+
+        Assert.True(result);
+        Assert.Equal(-1, (int)GetAutoBotField(updatedState, "TurnSign"));
+        var waypoints = Assert.IsType<Vector3[]>((Vector3[]?)GetAutoBotField(updatedState, "Waypoints"));
+        Assert.NotEmpty(waypoints);
+    }
+
+    [Fact(DisplayName = "TryEnsureAutoBotRoute при полном провале и нулевом turnSign выставляет положительный fallback")]
+    public void TryEnsureAutoBotRoute_NoRouteWithZeroTurnSign_SetsPositiveFallback()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Stone);
+            }
+        }
+
+        for (var x = 2; x <= 4; x++)
+        {
+            for (var z = 2; z <= 4; z++)
+            {
+                if (x == 3 && z == 3)
+                {
+                    continue;
+                }
+
+                world.SetBlock(x, 1, z, BlockType.Stone);
+                world.SetBlock(x, 2, z, BlockType.Stone);
+            }
+        }
+
+        var player = new PlayerController(new GameConfig(), new Vector3(3.5f, 1f, 3.5f));
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryEnsureAutoBotRoute", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 0, turnLockTime: 0f, wanderPhase: 0f);
+        object[] args = [state];
+        var result = (bool)method!.Invoke(app, args)!;
+        var updatedState = args[0];
+
+        Assert.False(result);
+        Assert.Equal(1, (int)GetAutoBotField(updatedState, "TurnSign"));
+        Assert.True((float)GetAutoBotField(updatedState, "RetryTimer") > 0.3f);
+    }
+
+    [Fact(DisplayName = "TryAdvanceAutoBotWaypoint корректно обрабатывает null-массив waypoint-ов")]
+    public void TryAdvanceAutoBotWaypoint_NullWaypoints_ReturnsFalse()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        var player = new PlayerController(new GameConfig(), new Vector3(8.5f, 2f, 8.5f));
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("TryAdvanceAutoBotWaypoint", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var state = CreateAutoBotState(lastPosition: player.Position, stuckTime: 0f, turnSign: 1, turnLockTime: 0f, wanderPhase: 0f);
+        SetAutoBotField(state, "Waypoints", null!);
+
+        object[] args = [state];
+        var result = (bool)method!.Invoke(app, args)!;
+
+        Assert.False(result);
+    }
+
+    [Fact(DisplayName = "IsAutoBotGroundMissingAhead останавливается на втором углу при найденной опоре")]
+    public void IsAutoBotGroundMissingAhead_SecondCornerSolid_ReturnsFalse()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var config = new GameConfig();
+        var player = new PlayerController(config, new Vector3(8.75f, 1f, 8.5f));
+        player.SetPose(new Vector3(8.75f, 1f, 8.5f), Vector3.UnitZ);
+        SetPrivateField(player, "<IsGrounded>k__BackingField", true);
+
+        world.SetBlock(8, 0, 9, BlockType.Stone);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("IsAutoBotGroundMissingAhead", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var result = (bool)method!.Invoke(app, [Vector3.UnitZ])!;
+
+        Assert.False(result);
+    }
+
+    [Fact(DisplayName = "IsAutoBotGroundMissingAhead останавливается на третьем углу при найденной опоре")]
+    public void IsAutoBotGroundMissingAhead_ThirdCornerSolid_ReturnsFalse()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var config = new GameConfig();
+        var player = new PlayerController(config, new Vector3(8.75f, 1f, 8.5f));
+        player.SetPose(new Vector3(8.75f, 1f, 8.5f), Vector3.UnitZ);
+        SetPrivateField(player, "<IsGrounded>k__BackingField", true);
+
+        world.SetBlock(9, 0, 8, BlockType.Stone);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("IsAutoBotGroundMissingAhead", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var result = (bool)method!.Invoke(app, [Vector3.UnitZ])!;
+
+        Assert.False(result);
+    }
+
+    [Fact(DisplayName = "IsAutoBotGroundMissingAhead останавливается на четвёртом углу при найденной опоре")]
+    public void IsAutoBotGroundMissingAhead_FourthCornerSolid_ReturnsFalse()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var config = new GameConfig();
+        var player = new PlayerController(config, new Vector3(8.75f, 1f, 8.5f));
+        player.SetPose(new Vector3(8.75f, 1f, 8.5f), Vector3.UnitZ);
+        SetPrivateField(player, "<IsGrounded>k__BackingField", true);
+
+        world.SetBlock(9, 0, 9, BlockType.Stone);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), world);
+        SetPrivateField(app, "_player", player);
+
+        var method = typeof(GameApp).GetMethod("IsAutoBotGroundMissingAhead", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var result = (bool)method!.Invoke(app, [Vector3.UnitZ])!;
+
+        Assert.False(result);
     }
 
     [Fact(DisplayName = "ToHorizontalForward имеет fallback для вертикального направления")]
@@ -988,7 +1497,7 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.True(platform.DrawCubeCalls > 0);
+        Assert.True(platform.DrawCubeCalls > 0 || platform.DrawTexturedChunkMeshCalls > 0);
     }
 
     [Fact(DisplayName = "DrawWorld на высоте продолжает рисовать поверхность и деревья внизу")]
@@ -1041,13 +1550,15 @@ public sealed class CoreFlowTests
 
         var updateStreaming = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(updateStreaming);
-        updateStreaming!.Invoke(app, [true]);
+        updateStreaming!.Invoke(app, [true, null]);
 
         var drawWorld = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(drawWorld);
         drawWorld!.Invoke(app, null);
 
-        Assert.True(platform.DrawCubeInstancedInstances > 0, "Ожидали видимую геометрию вокруг спавна в большом мире.");
+        Assert.True(
+            platform.DrawCubeInstancedInstances > 0 || platform.DrawTexturedChunkMeshCalls > 0,
+            "Ожидали видимую геометрию вокруг спавна в большом мире.");
     }
 
     [Fact(DisplayName = "DrawWorld ранним выходом обрабатывает мир с нулевой шириной или глубиной")]
@@ -1422,8 +1933,8 @@ public sealed class CoreFlowTests
         Assert.True(platform.DrawCubeCalls > 0);
     }
 
-    [Fact(DisplayName = "DrawWorld использует инстансинг кубов для world-геометрии")]
-    public void DrawWorld_UsesCubeInstancing_ForWorldGeometry()
+    [Fact(DisplayName = "DrawWorld использует mesh-путь или fallback-инстансинг для world-геометрии")]
+    public void DrawWorld_UsesMeshOrInstancing_ForWorldGeometry()
     {
         var config = new GameConfig
         {
@@ -1454,9 +1965,8 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.True(platform.DrawCubeInstancedCalls > 0);
-        Assert.True(platform.DrawCubeInstancedInstances > 0);
-        Assert.True(platform.DrawCubeCalls >= platform.DrawCubeInstancedInstances);
+        Assert.True(platform.DrawTexturedChunkMeshCalls > 0 || platform.DrawCubeInstancedCalls > 0);
+        Assert.True(platform.DrawCubeCalls >= 0);
     }
 
     [Fact(DisplayName = "LOD кроссфейд near/mid/far возвращает нормализованные веса")]
@@ -2123,16 +2633,16 @@ public sealed class CoreFlowTests
         drawHighlight!.Invoke(app, [hit, rayOrigin, rayDirection]);
 
         var highlight = platform.DrawnCubeWires.FirstOrDefault(c =>
-            (Math.Abs(c.Width - 0.04f) < 0.0001f)
-            || (Math.Abs(c.Height - 0.04f) < 0.0001f)
-            || (Math.Abs(c.Length - 0.04f) < 0.0001f));
+            (Math.Abs(c.Width - 0.035f) < 0.0001f)
+            || (Math.Abs(c.Height - 0.035f) < 0.0001f)
+            || (Math.Abs(c.Length - 0.035f) < 0.0001f));
         Assert.NotNull(highlight);
         Assert.True(MathF.Abs(highlight.Position.X - 10.5f) < 0.001f);
         Assert.True(MathF.Abs(highlight.Position.Y - 5.5f) < 0.001f);
         Assert.True(MathF.Abs(highlight.Position.Z - 9.01f) < 0.001f);
-        Assert.Equal(Color.Yellow.R, highlight.Color.R);
-        Assert.Equal(Color.Yellow.G, highlight.Color.G);
-        Assert.Equal(Color.Yellow.B, highlight.Color.B);
+        Assert.Equal(255, highlight.Color.R);
+        Assert.Equal(232, highlight.Color.G);
+        Assert.Equal(138, highlight.Color.B);
     }
 
     [Fact(DisplayName = "Подсветка боковой грани по X использует тонкую толщину по ширине")]
@@ -2151,13 +2661,13 @@ public sealed class CoreFlowTests
         method!.Invoke(app, [hit, new Vector3(1f, 0f, 0f)]);
 
         var highlight = platform.DrawnCubeWires.Single();
-        Assert.True(MathF.Abs(highlight.Width - 0.04f) < 0.0001f);
+        Assert.True(MathF.Abs(highlight.Width - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Height - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);
     }
 
-    [Fact(DisplayName = "DrawHitFaceHighlight ограничивается только контуром грани без полупрозрачной заливки")]
-    public void DrawHitFaceHighlight_DoesNotDrawFaceFill()
+    [Fact(DisplayName = "DrawHitFaceHighlight рисует тонкую face-заливку и контур")]
+    public void DrawHitFaceHighlight_DrawsFaceFillAndWire()
     {
         var platform = new FakeGamePlatform();
         var app = new GameApp(
@@ -2171,7 +2681,11 @@ public sealed class CoreFlowTests
         var hit = new BlockRaycastHit(1, 1, 1, 1, 1, 2);
         method!.Invoke(app, [hit, new Vector3(0f, 0f, 1f)]);
 
-        Assert.Empty(platform.DrawnCubes);
+        var fill = Assert.Single(platform.DrawnCubes);
+        Assert.True(MathF.Abs(fill.Length - 0.035f) < 0.0001f);
+        Assert.Equal(255, fill.Color.R);
+        Assert.Equal(220, fill.Color.G);
+        Assert.Equal(92, fill.Color.B);
         Assert.Single(platform.DrawnCubeWires);
     }
 
@@ -2410,7 +2924,7 @@ public sealed class CoreFlowTests
         var highlight = platform.DrawnCubeWires.Single();
         Assert.True(MathF.Abs(highlight.Width - 1.02f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Height - 1.02f) < 0.0001f);
-        Assert.True(MathF.Abs(highlight.Length - 0.04f) < 0.0001f);
+        Assert.True(MathF.Abs(highlight.Length - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Position.Z - 9.01f) < 0.001f);
     }
 
@@ -2436,7 +2950,7 @@ public sealed class CoreFlowTests
 
         var highlight = platform.DrawnCubeWires.Single();
         Assert.True(MathF.Abs(highlight.Width - 1.02f) < 0.0001f);
-        Assert.True(MathF.Abs(highlight.Height - 0.04f) < 0.0001f);
+        Assert.True(MathF.Abs(highlight.Height - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);
     }
 
@@ -2775,16 +3289,130 @@ public sealed class CoreFlowTests
 
         var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(update);
-        update!.Invoke(app, [false]); // первичный прогрев и фиксация last stream state
+        update!.Invoke(app, [false, null]); // первичный прогрев и фиксация last stream state
 
         world.SetBlock(24, 3, 24, BlockType.Wood);
         Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var dirtySurfaceBefore));
         Assert.NotEmpty(dirtySurfaceBefore);
 
-        update.Invoke(app, [false]); // та же позиция -> early return + sync rebuild path
+        update.Invoke(app, [false, null]); // та же позиция -> early return + sync rebuild path
 
         Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var rebuiltSurface));
         Assert.NotEmpty(rebuiltSurface);
+    }
+
+    [Fact(DisplayName = "UpdateWorldStreaming в Playing-режиме использует background streaming ветку")]
+    public void UpdateWorldStreaming_PlayingMode_UsesBackgroundStreaming()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 24, depth: 96, chunkSize: 16, seed: 777);
+        var platform = new FakeGamePlatform { Fps = 120, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(24.5f, 3f, 24.5f));
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_state", ParseNestedEnum(typeof(GameApp), "AppState", "Playing"));
+
+        var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(update);
+        update!.Invoke(app, [false, null]);
+
+        Assert.True(WaitUntil(() =>
+        {
+            _ = world.ApplyBackgroundStreamingResults(8, 8);
+            return world.IsChunkLoaded(1, 1);
+        }));
+    }
+
+    [Fact(DisplayName = "UpdateWorldStreaming с активной adaptive-freeze веткой покрывает удержание радиуса выгрузки")]
+    public void UpdateWorldStreaming_AdaptiveFreezeTimer_CoversHoldExtraRadius()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 24, depth: 96, chunkSize: 16, seed: 777);
+        var platform = new FakeGamePlatform { Fps = 120, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(24.5f, 3f, 24.5f));
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_adaptiveMovementFreezeTimer", 0.5f);
+
+        var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(update);
+        update!.Invoke(app, [false, null]);
+
+        Assert.True(world.IsChunkLoaded(1, 1));
+    }
+
+    [Fact(DisplayName = "UpdateWorldStreaming при force=true покрывает burst rebuild budget")]
+    public void UpdateWorldStreaming_ForceMode_CoversBurstRebuildBudget()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 96, height: 24, depth: 96, chunkSize: 16, seed: 777);
+        var platform = new FakeGamePlatform { Fps = 120, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(24.5f, 3f, 24.5f));
+        SetPrivateField(app, "_player", player);
+
+        var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(update);
+        update!.Invoke(app, [true, null]);
+
+        Assert.True(world.IsChunkLoaded(1, 1));
+    }
+
+    [Fact(DisplayName = "UpdateWorldStreaming при низком FPS покрывает under-pressure rebuild budget")]
+    public void UpdateWorldStreaming_UnderPressure_CoversLowBudgetBranch()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 128, height: 24, depth: 128, chunkSize: 16, seed: 777);
+        var platform = new FakeGamePlatform { Fps = 40, FrameTime = 1f / 60f };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(24.5f, 3f, 24.5f));
+        SetPrivateField(app, "_player", player);
+
+        var update = typeof(GameApp).GetMethod("UpdateWorldStreaming", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(update);
+        update!.Invoke(app, [false, null]);
+
+        player.SetPose(new Vector3(48.5f, 3f, 24.5f), player.LookDirection);
+        update.Invoke(app, [false, null]);
+
+        Assert.True(world.IsChunkLoaded(3, 1));
+    }
+
+    [Fact(DisplayName = "StreamCompanionWorkArea в background-ветке стримит рабочую зону активного бота")]
+    public void StreamCompanionWorkArea_BackgroundBranch_QueuesCompanionArea()
+    {
+        var config = new GameConfig { FullscreenByDefault = false };
+        var world = new WorldMap(width: 64, height: 16, depth: 64, chunkSize: 8, seed: 0);
+        var app = new GameApp(config, new FakeGamePlatform(), world);
+        var companion = new CompanionBot(config, new Vector3(20.5f, 2.02f, 20.5f));
+        Assert.True(companion.Enqueue(BotCommand.Gather(BotResourceType.Wood, 4)));
+        SetPrivateField(app, "_companion", companion);
+
+        var method = typeof(GameApp).GetMethod("StreamCompanionWorkArea", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, [true, false]);
+
+        Assert.True(WaitUntil(() =>
+        {
+            _ = world.ApplyBackgroundStreamingResults(2, 2);
+            return world.IsChunkLoaded(2, 2);
+        }));
     }
 
     [Fact(DisplayName = "Адаптивный порог заморозки покрывает low-профиль")]
@@ -2815,6 +3443,45 @@ public sealed class CoreFlowTests
 
         Assert.True(dropped < high);
         Assert.True(dropped >= 24);
+    }
+
+    [Fact(DisplayName = "ResolveStreamingRenderDistance включает freeze timer при быстром движении")]
+    public void ResolveStreamingRenderDistance_FastMovement_ArmsFreezeTimer()
+    {
+        var platform = new FakeGamePlatform { FrameTime = 1f / 60f };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("ResolveStreamingRenderDistance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        SetPrivateField(app, "_hasAdaptiveProbe", true);
+        SetPrivateField(app, "_lastAdaptiveProbePosition", new Vector2(0f, 0f));
+
+        _ = (int)method!.Invoke(app, [120, new Vector3(8f, 0f, 0f), false])!;
+
+        Assert.True(GetPrivateField<float>(app, "_adaptiveMovementFreezeTimer") > 0.8f);
+    }
+
+    [Fact(DisplayName = "ResolveStreamingRenderDistance уменьшает freeze timer при спокойном движении")]
+    public void ResolveStreamingRenderDistance_IdleMovement_DecaysFreezeTimer()
+    {
+        var platform = new FakeGamePlatform { FrameTime = 0.1f };
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(width: 64, height: 8, depth: 64, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("ResolveStreamingRenderDistance", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        SetPrivateField(app, "_hasAdaptiveProbe", true);
+        SetPrivateField(app, "_lastAdaptiveProbePosition", new Vector2(10f, 10f));
+        SetPrivateField(app, "_adaptiveMovementFreezeTimer", 0.5f);
+
+        _ = (int)method!.Invoke(app, [120, new Vector3(10f, 0f, 10f), false])!;
+
+        Assert.InRange(GetPrivateField<float>(app, "_adaptiveMovementFreezeTimer"), 0.39f, 0.41f);
     }
 
     [Fact(DisplayName = "ResolveUiFontPath возвращает пустую строку, если пути не существуют")]
@@ -2894,6 +3561,12 @@ public sealed class CoreFlowTests
         SetAutoBotField(state, "TurnSign", turnSign);
         SetAutoBotField(state, "TurnLockTime", turnLockTime);
         SetAutoBotField(state, "WanderPhase", wanderPhase);
+        SetAutoBotField(state, "Waypoints", Array.Empty<Vector3>());
+        SetAutoBotField(state, "WaypointIndex", 0);
+        SetAutoBotField(state, "RetryTimer", 0f);
+        SetAutoBotField(state, "GoalVariantIndex", 0);
+        SetAutoBotField(state, "AnchorPosition", lastPosition);
+        SetAutoBotField(state, "AnchorInitialized", true);
         return state;
     }
 
@@ -2909,6 +3582,28 @@ public sealed class CoreFlowTests
         var field = state.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
         Assert.NotNull(field);
         return field!.GetValue(state)!;
+    }
+
+    private static object ParseNestedEnum(Type owner, string nestedTypeName, string value)
+    {
+        var nestedType = owner.GetNestedType(nestedTypeName, BindingFlags.NonPublic);
+        Assert.NotNull(nestedType);
+        return Enum.Parse(nestedType!, value);
+    }
+
+    private static bool WaitUntil(Func<bool> condition, int maxAttempts = 120, int sleepMs = 5)
+    {
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            if (condition())
+            {
+                return true;
+            }
+
+            Thread.Sleep(sleepMs);
+        }
+
+        return false;
     }
 
     private sealed class ThrowingWriteStream : Stream

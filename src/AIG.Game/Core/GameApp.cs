@@ -22,10 +22,26 @@ public class GameApp : IGameRunner
     private const float BotDeviceTapArmThreshold = 0.08f;
     private const float BotDeviceActionDelay = 0.10f;
     private const int BotDeviceTapPalmSize = 28;
+    private const float AutoBotGoalDistance = 4.75f;
+    private const float AutoBotGoalSideDistance = 2.75f;
+    private const float AutoBotRetryCooldown = 0.45f;
+    private const float AutoBotStuckRepathTime = 0.60f;
+    private const float AutoBotWaypointArrivalDistance = 0.40f;
+    private const float AutoBotWaypointVerticalTolerance = 0.45f;
+    private const float AutoBotLeashDistance = 6.50f;
+    private static readonly (float Forward, float Side)[] AutoBotGoalVariants =
+    [
+        (1.00f, 0.00f),
+        (0.90f, 0.40f),
+        (0.90f, -0.40f),
+        (0.68f, 0.78f),
+        (0.68f, -0.78f)
+    ];
     private readonly record struct AutoCaptureShot(string FileName, Vector3 Position, Vector3 LookTarget);
     private readonly record struct LodBlendWeights(float Near, float Mid, float Far);
     private readonly record struct InstancedBatchKey(byte R, byte G, byte B, byte A, WorldLodTier LodTier);
     private readonly record struct WristDevicePose(float RaiseBlend, float TapBlend);
+    private readonly record struct CachedChunkMesh(int Revision, ChunkSurfaceMeshData Mesh);
 
     private enum WorldLodTier : byte
     {
@@ -49,6 +65,12 @@ public class GameApp : IGameRunner
         public int TurnSign;
         public float TurnLockTime;
         public float WanderPhase;
+        public Vector3[]? Waypoints;
+        public int WaypointIndex;
+        public float RetryTimer;
+        public int GoalVariantIndex;
+        public Vector3 AnchorPosition;
+        public bool AnchorInitialized;
     }
 
     private readonly GameConfig _config;
@@ -83,6 +105,8 @@ public class GameApp : IGameRunner
     private bool _debugHudEnabled;
     private readonly Dictionary<(int ChunkX, int ChunkZ), float> _chunkRevealStartedAt = new();
     private readonly Dictionary<InstancedBatchKey, List<Matrix4x4>> _worldInstanceBatches = new();
+    private readonly Dictionary<BlockType, List<Matrix4x4>> _worldTexturedBlockBatches = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), CachedChunkMesh> _worldChunkMeshCache = new();
     private string? _pendingScreenshotPath;
     private BotDeviceAction _pendingBotDeviceAction;
     private float _pendingBotDeviceActionDelay;
@@ -397,8 +421,10 @@ public class GameApp : IGameRunner
             _player.SetPose(_player.Position, startLook);
         }
         _playerVisual.Reset(_player.Position);
-        ResetAdaptiveTracking(_player.Position);
-        UpdateWorldStreaming(force: true);
+        var autoPerfStreamingAnchor = _player.Position;
+        ResetAdaptiveTracking(autoPerfStreamingAnchor);
+        UpdateWorldStreaming(force: true, centerOverride: autoPerfStreamingAnchor);
+        WarmupAutoPerfVisualCache(autoPerfStreamingAnchor);
 
         var duration = Math.Clamp(durationSeconds, 1f, 300f);
         var fpsThreshold = Math.Clamp(minAllowedFps, 1, 240);
@@ -447,7 +473,7 @@ public class GameApp : IGameRunner
             var botInput = ReadAutoBotInput(delta, ref bot);
             _player.Update(_world, botInput, delta);
             _playerVisual.Update(_player.Position, delta, _config.MoveSpeed);
-            UpdateWorldStreaming(force: false);
+            UpdateWorldStreaming(force: false, centerOverride: autoPerfStreamingAnchor);
 
             var walkBob = _playerVisual.WalkBlend * _graphics.ViewBobScale;
             _cameraBobPhase += delta * (7f + walkBob * 6f);
@@ -558,6 +584,29 @@ public class GameApp : IGameRunner
 
         ShutdownPlatform();
         _sceneMetricsEnabled = false;
+    }
+
+    private void WarmupAutoPerfVisualCache(Vector3 streamingAnchor)
+    {
+        var originalPosition = _player.Position;
+        var originalLook = _player.LookDirection;
+        var originalMode = _cameraMode;
+        _cameraMode = CameraMode.FirstPerson;
+
+        const int warmupDirections = 16;
+        for (var i = 0; i < warmupDirections; i++)
+        {
+            var yaw = MathF.Tau * i / warmupDirections;
+            var lookDirection = Vector3.Normalize(new Vector3(MathF.Sin(yaw), -0.08f, MathF.Cos(yaw)));
+            _player.SetPose(originalPosition, lookDirection);
+            UpdateWorldStreaming(force: false, centerOverride: streamingAnchor);
+            var view = CameraViewBuilder.Build(_player, _world, _cameraMode, 0f);
+            var hit = VoxelRaycaster.Raycast(_world, view.RayOrigin, view.RayDirection, _config.InteractionDistance);
+            DrawFrame(hit, view);
+        }
+
+        _player.SetPose(originalPosition, originalLook);
+        _cameraMode = originalMode;
     }
 
     private void DrawAutoDeviceFrame(float deltaTime)
@@ -995,12 +1044,6 @@ public class GameApp : IGameRunner
 
     private PlayerInput ReadAutoBotInput(float deltaTime, ref AutoBotState state)
     {
-        var forward = ToHorizontalForward(_player.LookDirection);
-        var aheadEye = _player.EyePosition - new Vector3(0f, 0.7f, 0f);
-        var obstacleAhead = VoxelRaycaster.Raycast(_world, aheadEye, forward, 1.1f) is not null;
-        var aheadPoint = _player.Position + forward * 0.9f;
-        var hasGroundAhead = _world.IsSolidAt(new Vector3(aheadPoint.X, _player.Position.Y - 0.25f, aheadPoint.Z));
-
         var movedXZ = new Vector2(_player.Position.X - state.LastPosition.X, _player.Position.Z - state.LastPosition.Z).Length();
         if (movedXZ < 0.015f)
         {
@@ -1011,39 +1054,245 @@ public class GameApp : IGameRunner
             state.StuckTime = 0f;
         }
         state.LastPosition = _player.Position;
-
-        var needTurn = obstacleAhead || !hasGroundAhead || state.StuckTime > 0.35f;
-        if (needTurn && state.TurnLockTime <= 0f)
-        {
-            state.TurnSign = -state.TurnSign;
-            state.TurnLockTime = 0.4f;
-        }
-        else
-        {
-            state.TurnLockTime = MathF.Max(0f, state.TurnLockTime - deltaTime);
-        }
-
+        state.TurnLockTime = MathF.Max(0f, state.TurnLockTime - deltaTime);
+        state.RetryTimer = MathF.Max(0f, state.RetryTimer - deltaTime);
         state.WanderPhase += deltaTime * 1.15f;
+        state.Waypoints ??= Array.Empty<Vector3>();
+        if (!state.AnchorInitialized)
+        {
+            state.AnchorPosition = _player.Position;
+            state.AnchorInitialized = true;
+        }
 
-        var strafe = needTurn
-            ? state.TurnSign * 0.75f
-            : MathF.Sin(state.WanderPhase * 0.7f) * 0.28f;
-        var yawSpeed = needTurn
-            ? state.TurnSign * 2.8f
-            : MathF.Sin(state.WanderPhase) * 0.45f;
+        if (state.StuckTime > AutoBotStuckRepathTime)
+        {
+            state.Waypoints = Array.Empty<Vector3>();
+            state.WaypointIndex = 0;
+            state.GoalVariantIndex = (state.GoalVariantIndex + 1) % AutoBotGoalVariants.Length;
+            state.RetryTimer = 0f;
+        }
 
+        var hasWaypointRoute = TryAdvanceAutoBotWaypoint(ref state);
+        if (!hasWaypointRoute)
+        {
+            var leashOffset = _player.Position - state.AnchorPosition;
+            var horizontalLeashDistance = new Vector2(leashOffset.X, leashOffset.Z).Length();
+            var forward = ToHorizontalForward(_player.LookDirection);
+            var needsRoute = horizontalLeashDistance > AutoBotLeashDistance
+                || state.StuckTime > 0.18f
+                || IsAutoBotForwardBlocked(forward)
+                || IsAutoBotGroundMissingAhead(forward);
+
+            if (!needsRoute)
+            {
+                return new PlayerInput(
+                    MoveForward: 1f,
+                    MoveRight: 0f,
+                    Jump: false,
+                    LookDeltaX: 0f,
+                    LookDeltaY: 0f);
+            }
+
+            if (!TryEnsureAutoBotRoute(ref state))
+            {
+                var sensitivityFallback = MathF.Abs(_config.MouseSensitivity) < 0.00001f ? 0.0025f : _config.MouseSensitivity;
+                var idleTurn = (state.TurnSign == 0 ? 1 : state.TurnSign) * 0.035f;
+                return new PlayerInput(
+                    MoveForward: 0f,
+                    MoveRight: 0f,
+                    Jump: false,
+                    LookDeltaX: -idleTurn / sensitivityFallback,
+                    LookDeltaY: 0f);
+            }
+        }
+
+        var activeWaypoints = state.Waypoints!;
+        var waypoint = activeWaypoints[state.WaypointIndex];
+        var toWaypoint = waypoint - _player.Position;
+        var horizontalToWaypoint = new Vector3(toWaypoint.X, 0f, toWaypoint.Z);
+        if (horizontalToWaypoint.LengthSquared() < 0.00001f)
+        {
+            return new PlayerInput(0f, 0f, false, 0f, 0f);
+        }
+
+        var desiredDirection = Vector3.Normalize(horizontalToWaypoint);
+        var currentForward = ToHorizontalForward(_player.LookDirection);
+        var currentRight = new Vector3(-currentForward.Z, 0f, currentForward.X);
+        var desiredYaw = MathF.Atan2(desiredDirection.X, desiredDirection.Z);
+        var yawDelta = NormalizeAngle(desiredYaw - _player.Yaw);
         var sensitivity = MathF.Abs(_config.MouseSensitivity) < 0.00001f
             ? 0.0025f
             : _config.MouseSensitivity;
-        var lookDeltaX = -(yawSpeed * deltaTime) / sensitivity;
-        var jump = obstacleAhead && _player.IsGrounded;
+        var lookDeltaX = -Math.Clamp(yawDelta, -0.11f, 0.11f) / sensitivity;
+
+        var moveForward = Math.Clamp(Vector3.Dot(desiredDirection, currentForward), 0.15f, 1f);
+        var moveRight = Math.Clamp(Vector3.Dot(desiredDirection, currentRight), -0.85f, 0.85f);
+        var jump = _player.IsGrounded && waypoint.Y - _player.Position.Y > 0.38f;
 
         return new PlayerInput(
-            MoveForward: 1f,
-            MoveRight: strafe,
+            MoveForward: moveForward,
+            MoveRight: moveRight,
             Jump: jump,
             LookDeltaX: lookDeltaX,
             LookDeltaY: 0f);
+    }
+
+    private bool TryEnsureAutoBotRoute(ref AutoBotState state)
+    {
+        if (state.Waypoints is { Length: > 0 } && state.WaypointIndex < state.Waypoints.Length)
+        {
+            return true;
+        }
+
+        if (state.RetryTimer > 0f)
+        {
+            return false;
+        }
+
+        var forward = ToHorizontalForward(_player.LookDirection);
+        var right = new Vector3(-forward.Z, 0f, forward.X);
+        var settings = GetAutoBotNavigationSettings();
+        var leashOffset = _player.Position - state.AnchorPosition;
+        var horizontalLeashDistance = new Vector2(leashOffset.X, leashOffset.Z).Length();
+
+        if (horizontalLeashDistance > AutoBotLeashDistance)
+        {
+            if (BotNavigator.TryBuildStandRoute(_world, settings, _player.Position, state.AnchorPosition, goalRadius: 2, out var returnWaypoints)
+                && returnWaypoints.Length > 0)
+            {
+                state.Waypoints = returnWaypoints;
+                state.WaypointIndex = 0;
+                state.RetryTimer = 0f;
+                state.TurnSign = 1;
+                state.TurnLockTime = 0.35f;
+                return true;
+            }
+        }
+
+        for (var attempt = 0; attempt < AutoBotGoalVariants.Length; attempt++)
+        {
+            var variantIndex = (state.GoalVariantIndex + attempt) % AutoBotGoalVariants.Length;
+            var variant = AutoBotGoalVariants[variantIndex];
+            var goalPose = _player.Position
+                + forward * (variant.Forward * AutoBotGoalDistance)
+                + right * (variant.Side * AutoBotGoalSideDistance);
+
+            if (!BotNavigator.TryBuildStandRoute(_world, settings, _player.Position, goalPose, goalRadius: 2, out var waypoints)
+                || waypoints.Length == 0)
+            {
+                continue;
+            }
+
+            state.Waypoints = waypoints;
+            state.WaypointIndex = 0;
+            state.GoalVariantIndex = (variantIndex + 1) % AutoBotGoalVariants.Length;
+            state.RetryTimer = 0f;
+            state.TurnSign = variant.Side >= 0f ? 1 : -1;
+            state.TurnLockTime = 0.35f;
+            return true;
+        }
+
+        state.RetryTimer = AutoBotRetryCooldown;
+        state.TurnSign = state.TurnSign == 0 ? 1 : -state.TurnSign;
+        state.TurnLockTime = 0.35f;
+        return false;
+    }
+
+    private bool TryAdvanceAutoBotWaypoint(ref AutoBotState state)
+    {
+        if (state.Waypoints is not { Length: > 0 } waypoints)
+        {
+            return false;
+        }
+
+        while (state.WaypointIndex < waypoints.Length)
+        {
+            var waypoint = waypoints[state.WaypointIndex];
+            var horizontalDelta = new Vector2(waypoint.X - _player.Position.X, waypoint.Z - _player.Position.Z).Length();
+            var verticalDelta = MathF.Abs(waypoint.Y - _player.Position.Y);
+            if (horizontalDelta > AutoBotWaypointArrivalDistance || verticalDelta > AutoBotWaypointVerticalTolerance)
+            {
+                return true;
+            }
+
+            state.WaypointIndex++;
+        }
+
+        state.Waypoints = Array.Empty<Vector3>();
+        state.WaypointIndex = 0;
+        return false;
+    }
+
+    private BotNavigationSettings GetAutoBotNavigationSettings()
+    {
+        return new BotNavigationSettings(_player.ColliderHalfWidth, _player.ColliderHeight, _config.InteractionDistance);
+    }
+
+    private bool IsAutoBotForwardBlocked(Vector3 forward)
+    {
+        var probe = _player.Position + forward * 0.85f;
+        return CollidesWithWorldAt(probe);
+    }
+
+    private bool IsAutoBotGroundMissingAhead(Vector3 forward)
+    {
+        if (!_player.IsGrounded)
+        {
+            return false;
+        }
+
+        var probe = _player.Position + forward * 0.65f;
+        var groundY = probe.Y - 0.08f;
+        var halfWidth = _player.ColliderHalfWidth - 0.03f;
+        return !_world.IsSolidAt(new Vector3(probe.X - halfWidth, groundY, probe.Z - halfWidth))
+            && !_world.IsSolidAt(new Vector3(probe.X - halfWidth, groundY, probe.Z + halfWidth))
+            && !_world.IsSolidAt(new Vector3(probe.X + halfWidth, groundY, probe.Z - halfWidth))
+            && !_world.IsSolidAt(new Vector3(probe.X + halfWidth, groundY, probe.Z + halfWidth));
+    }
+
+    private bool CollidesWithWorldAt(Vector3 position)
+    {
+        var halfWidth = _player.ColliderHalfWidth;
+        var min = new Vector3(position.X - halfWidth, position.Y, position.Z - halfWidth);
+        var max = new Vector3(position.X + halfWidth, position.Y + _player.ColliderHeight, position.Z + halfWidth);
+
+        var minX = (int)MathF.Floor(min.X);
+        var maxX = (int)MathF.Floor(max.X);
+        var minY = (int)MathF.Floor(min.Y);
+        var maxY = (int)MathF.Floor(max.Y);
+        var minZ = (int)MathF.Floor(min.Z);
+        var maxZ = (int)MathF.Floor(max.Z);
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var y = minY; y <= maxY; y++)
+            {
+                for (var z = minZ; z <= maxZ; z++)
+                {
+                    if (_world.IsSolid(x, y, z))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static float NormalizeAngle(float angle)
+    {
+        while (angle > MathF.PI)
+        {
+            angle -= MathF.Tau;
+        }
+
+        while (angle < -MathF.PI)
+        {
+            angle += MathF.Tau;
+        }
+
+        return angle;
     }
 
     private static Vector3 ToHorizontalForward(Vector3 direction)
@@ -1405,11 +1654,14 @@ public class GameApp : IGameRunner
         _lastDrawnSurfaceCount = 0;
         _lastDrawSceneHash = 0UL;
         _worldInstanceBatches.Clear();
+        _worldTexturedBlockBatches.Clear();
 
         if (_world.ChunkCountX == 0 || _world.ChunkCountZ == 0)
         {
             return;
         }
+
+        ConfigureWorldMaterialPass();
 
         var measuredFps = _platform.GetFps();
         var renderDistance = GetAdaptiveRenderDistance(measuredFps, advanceSmoothing: false);
@@ -1482,6 +1734,9 @@ public class GameApp : IGameRunner
             GraphicsQuality.Medium => 12,
             _ => 14
         };
+        var textureRenderDistance = GetWorldTextureRenderDistance();
+        var chunkMeshRenderDistance = Math.Min(textureRenderDistance, GetWorldChunkMeshRenderDistance());
+        var remainingChunkMeshBuildBudget = GetWorldChunkMeshBuildBudget();
         var chunkRadius = Math.Max(1, ((int)MathF.Ceiling(softRenderDistance) + _world.ChunkSize - 1) / _world.ChunkSize);
         if (_state != AppState.Playing)
         {
@@ -1496,6 +1751,12 @@ public class GameApp : IGameRunner
         var maxChunkX = Math.Min(_world.ChunkCountX - 1, centerChunkX + chunkRadius);
         var minChunkZ = Math.Max(0, centerChunkZ - chunkRadius);
         var maxChunkZ = Math.Min(_world.ChunkCountZ - 1, centerChunkZ + chunkRadius);
+        var chunkMeshCachePadding = GetWorldChunkMeshCachePadding();
+        TrimWorldChunkMeshCache(
+            Math.Max(0, minChunkX - chunkMeshCachePadding),
+            Math.Min(_world.ChunkCountX - 1, maxChunkX + chunkMeshCachePadding),
+            Math.Max(0, minChunkZ - chunkMeshCachePadding),
+            Math.Min(_world.ChunkCountZ - 1, maxChunkZ + chunkMeshCachePadding));
 
         if (_state != AppState.Playing)
         {
@@ -1542,8 +1803,12 @@ public class GameApp : IGameRunner
                     }
                 }
 
-                _world.TryGetChunkSurfaceBlocks(chunkX, chunkZ, out var surfaceBlocks);
+                _world.TryGetChunkSurfaceState(chunkX, chunkZ, out var surfaceBlocks, out var surfaceRevision, out var surfaceDirty);
                 var chunkReveal = GetChunkRevealFactor(chunkX, chunkZ);
+                var useChunkAtlasMesh = !surfaceDirty
+                    && (!progressiveChunkReveal || chunkReveal >= 0.999f)
+                    && chunkDistSq <= chunkMeshRenderDistance * chunkMeshRenderDistance
+                    && TryDrawChunkAtlasMesh(chunkX, chunkZ, surfaceRevision, surfaceBlocks, ref remainingChunkMeshBuildBudget);
 
                 for (var i = 0; i < surfaceBlocks.Count; i++)
                 {
@@ -1641,27 +1906,51 @@ public class GameApp : IGameRunner
                         distance = MathF.Sqrt(distSq);
                     }
 
+                    if (useChunkAtlasMesh && IsTextureAtlasBlock(surface.Block))
+                    {
+                        DrawDecorativeVegetationAccent(surface, distance, chunkReveal);
+
+                        if (collectSceneMetrics)
+                        {
+                            drawnSurfaceCount++;
+                            if ((drawnSurfaceCount & 7) == 0)
+                            {
+                                sceneHash = MixSceneHash(sceneHash, surface.X, surface.Y, surface.Z, surface.Block);
+                            }
+                        }
+
+                        continue;
+                    }
+
                     var lodBlend = GetLodBlendWeights(distance, lodNearDistance, lodMidDistance, lodBlendBand);
                     keepChance *= GetLodKeepChance(surface, lodBlend);
 
-                    var distanceFactor = distSq / Math.Max(1f, baseRenderDistSq);
                     var center = new Vector3(surface.X + 0.5f, surface.Y + 0.5f, surface.Z + 0.5f);
-                    var baseColor = surface.Block switch
+                    if (IsTextureAtlasBlock(surface.Block) && distance <= textureRenderDistance)
                     {
-                        BlockType.Grass => new Color(98, 144, 82, 255),
-                        BlockType.Dirt => new Color(148, 111, 76, 255),
-                        BlockType.Stone => new Color(134, 129, 121, 255),
-                        BlockType.Wood => new Color(132, 98, 61, 255),
-                        BlockType.Leaves => new Color(82, 130, 74, 255),
-                        _ => Color.White
-                    };
-                    var color = BuildLodBlendedColor(baseColor, surface, distance, distanceFactor, lodBlend);
-                    if (chunkReveal < 0.999f)
+                        QueueTexturedWorldBlockInstance(surface.Block, center);
+                    }
+                    else
                     {
-                        color = LerpColor(_graphics.FogColor, color, chunkReveal);
+                        var distanceFactor = distSq / Math.Max(1f, baseRenderDistSq);
+                        var baseColor = surface.Block switch
+                        {
+                            BlockType.Grass => new Color(98, 144, 82, 255),
+                            BlockType.Dirt => new Color(148, 111, 76, 255),
+                            BlockType.Stone => new Color(134, 129, 121, 255),
+                            BlockType.Wood => new Color(132, 98, 61, 255),
+                            BlockType.Leaves => new Color(82, 130, 74, 255),
+                            _ => Color.White
+                        };
+                        var color = BuildLodBlendedColor(baseColor, surface, distance, distanceFactor, lodBlend);
+                        if (chunkReveal < 0.999f)
+                        {
+                            color = LerpColor(_graphics.FogColor, color, chunkReveal);
+                        }
+
+                        QueueWorldCubeInstance(center, color, GetDominantLodTier(lodBlend));
                     }
 
-                    QueueWorldCubeInstance(center, color, GetDominantLodTier(lodBlend));
                     DrawDecorativeVegetationAccent(surface, distance, chunkReveal);
 
                     if (collectSceneMetrics)
@@ -1676,6 +1965,7 @@ public class GameApp : IGameRunner
             }
         }
 
+        FlushWorldTexturedBlockInstances();
         FlushWorldCubeInstances();
 
         if (collectSceneMetrics)
@@ -1865,6 +2155,145 @@ public class GameApp : IGameRunner
         transforms.Add(Matrix4x4.CreateTranslation(center));
     }
 
+    private void QueueTexturedWorldBlockInstance(BlockType block, Vector3 center)
+    {
+        if (!_worldTexturedBlockBatches.TryGetValue(block, out var transforms))
+        {
+            transforms = [];
+            _worldTexturedBlockBatches[block] = transforms;
+        }
+
+        transforms.Add(Matrix4x4.CreateTranslation(center));
+    }
+
+    private void FlushWorldTexturedBlockInstances()
+    {
+        foreach (var pair in _worldTexturedBlockBatches)
+        {
+            var transforms = pair.Value;
+            if (transforms.Count == 0)
+            {
+                continue;
+            }
+
+            _platform.DrawTexturedBlockInstanced(pair.Key, transforms);
+            if (_graphics.DrawBlockWires)
+            {
+                for (var i = 0; i < transforms.Count; i++)
+                {
+                    var transform = transforms[i];
+                    var center = new Vector3(transform.M41, transform.M42, transform.M43);
+                    _platform.DrawCubeWires(center, 1f, 1f, 1f, new Color(0, 0, 0, 35));
+                }
+            }
+        }
+
+        _worldTexturedBlockBatches.Clear();
+    }
+
+    internal static bool IsTextureAtlasBlock(BlockType block)
+    {
+        return block is BlockType.Grass or BlockType.Dirt or BlockType.Stone or BlockType.Wood or BlockType.Leaves;
+    }
+
+    private bool TryDrawChunkAtlasMesh(int chunkX, int chunkZ, int surfaceRevision, IReadOnlyList<WorldMap.SurfaceBlock> surfaceBlocks, ref int remainingBuildBudget)
+    {
+        if (surfaceRevision <= 0 || surfaceBlocks.Count == 0)
+        {
+            return false;
+        }
+
+        var key = (chunkX, chunkZ);
+        if (!_worldChunkMeshCache.TryGetValue(key, out var cached) || cached.Revision != surfaceRevision)
+        {
+            if (remainingBuildBudget <= 0)
+            {
+                return false;
+            }
+
+            var mesh = ChunkSurfaceMeshFactory.Build(_world, surfaceBlocks);
+            if (mesh.IsEmpty)
+            {
+                _worldChunkMeshCache.Remove(key);
+                return false;
+            }
+
+            cached = new CachedChunkMesh(surfaceRevision, mesh);
+            _worldChunkMeshCache[key] = cached;
+            remainingBuildBudget--;
+        }
+
+        _platform.DrawTexturedChunkMesh(chunkX, chunkZ, cached.Revision, cached.Mesh);
+        return true;
+    }
+
+    private void TrimWorldChunkMeshCache(int minChunkX, int maxChunkX, int minChunkZ, int maxChunkZ)
+    {
+        if (_worldChunkMeshCache.Count == 0)
+        {
+            return;
+        }
+
+        List<(int ChunkX, int ChunkZ)>? stale = null;
+        foreach (var pair in _worldChunkMeshCache)
+        {
+            var key = pair.Key;
+            if (key.ChunkX >= minChunkX && key.ChunkX <= maxChunkX
+                && key.ChunkZ >= minChunkZ && key.ChunkZ <= maxChunkZ
+                && _world.IsChunkLoaded(key.ChunkX, key.ChunkZ))
+            {
+                continue;
+            }
+
+            stale ??= [];
+            stale.Add(key);
+        }
+
+        if (stale is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < stale.Count; i++)
+        {
+            _worldChunkMeshCache.Remove(stale[i]);
+        }
+    }
+
+    private float GetWorldTextureRenderDistance()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 8f,
+            GraphicsQuality.Medium => 12f,
+            _ => 18f
+        };
+    }
+
+    private float GetWorldChunkMeshRenderDistance()
+    {
+        return GetWorldTextureRenderDistance();
+    }
+
+    private int GetWorldChunkMeshBuildBudget()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 1,
+            GraphicsQuality.Medium => 2,
+            _ => 4
+        };
+    }
+
+    private int GetWorldChunkMeshCachePadding()
+    {
+        return _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0,
+            _ => 1
+        };
+    }
+
     private void FlushWorldCubeInstances()
     {
         foreach (var pair in _worldInstanceBatches)
@@ -1890,6 +2319,31 @@ public class GameApp : IGameRunner
         }
 
         _worldInstanceBatches.Clear();
+    }
+
+    private void ConfigureWorldMaterialPass()
+    {
+        var fogStart = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 4.5f,
+            GraphicsQuality.Medium => 6.5f,
+            _ => 8.5f
+        };
+        var fogEnd = GetWorldTextureRenderDistance() + (_graphics.Quality == GraphicsQuality.High ? 5f : 4f);
+        var strength = _graphics.Quality switch
+        {
+            GraphicsQuality.Low => 0.45f,
+            GraphicsQuality.Medium => 0.72f,
+            _ => 1f
+        };
+
+        _platform.ConfigureWorldMaterialPass(new WorldMaterialPassSettings(
+            CameraPosition: _player.EyePosition,
+            SunDirection: WorldMap.GetSunLightDirection(),
+            FogColor: _graphics.FogColor,
+            FogStart: fogStart,
+            FogEnd: fogEnd,
+            Strength: strength));
     }
 
     private Color QuantizeInstanceColor(Color color)
@@ -2912,13 +3366,16 @@ public class GameApp : IGameRunner
         var faceCenter = center + faceNormal * 0.51f;
 
         const float faceSize = 1.02f;
-        const float faceThickness = 0.04f;
+        const float faceThickness = 0.035f;
 
         var width = MathF.Abs(faceNormal.X) > 0.5f ? faceThickness : faceSize;
         var height = MathF.Abs(faceNormal.Y) > 0.5f ? faceThickness : faceSize;
         var length = MathF.Abs(faceNormal.Z) > 0.5f ? faceThickness : faceSize;
 
-        _platform.DrawCubeWires(faceCenter, width, height, length, Color.Yellow);
+        var fillColor = new Color(255, 220, 92, 34);
+        var outlineColor = new Color(255, 232, 138, 220);
+        _platform.DrawCube(faceCenter, width, height, length, fillColor);
+        _platform.DrawCubeWires(faceCenter, width, height, length, outlineColor);
     }
 
     private static bool TryGetHitFaceNormal(BlockRaycastHit hit, out Vector3 faceNormal)
@@ -3607,6 +4064,7 @@ public class GameApp : IGameRunner
         }
 
         _platform.LoadUiFont(ResolveUiFontPath(), 42);
+        _platform.WarmupWorldRenderResources();
         _platform.EnableCursor();
     }
 
@@ -3878,9 +4336,9 @@ public class GameApp : IGameRunner
         _adaptiveMovementFreezeTimer = 0f;
     }
 
-    private void UpdateWorldStreaming(bool force)
+    private void UpdateWorldStreaming(bool force, Vector3? centerOverride = null)
     {
-        var center = _player.Position;
+        var center = centerOverride ?? _player.Position;
         var chunkX = Math.Clamp((int)MathF.Floor(center.X), 0, _world.Width - 1) / _world.ChunkSize;
         var chunkZ = Math.Clamp((int)MathF.Floor(center.Z), 0, _world.Depth - 1) / _world.ChunkSize;
 
