@@ -4,6 +4,7 @@ using AIG.Game.Core;
 using AIG.Game.Cosmos;
 using AIG.Game.Tests.Fakes;
 using AIG.Game.World;
+using System.Numerics;
 
 namespace AIG.Game.Tests;
 
@@ -192,6 +193,124 @@ public sealed class CosmosTests
         var appUniverse = Assert.IsType<Universe>(universeProperty.GetValue(app));
 
         Assert.Same(universe, appUniverse);
-        Assert.Equal(0.05d, appUniverse.SimulationTimeSeconds, 6);
+        Assert.Equal(36d, appUniverse.SimulationTimeSeconds, 6);
+    }
+
+    [Fact(DisplayName = "GameApp считает day/night от звезды и вращения активной планеты")]
+    public void GameApp_AstronomicalLightingState_TracksDayNightFromUniverse()
+    {
+        var universe = CreateLightingUniverse();
+        var app = CreateLightingApp(universe);
+
+        var day = app.GetAstronomicalLightingState(new Vector3(16f, 3f, 16f));
+        universe.AdvanceTime(5d);
+        var night = app.GetAstronomicalLightingState(new Vector3(16f, 3f, 16f));
+
+        Assert.True(day.SunAltitude > 0.7f);
+        Assert.True(day.DaylightFactor > 0.9f);
+        Assert.True(day.SunIlluminance > 0.9f);
+        Assert.True(night.SunAltitude < -0.7f);
+        Assert.True(night.NightFactor > 0.9f);
+        Assert.True(night.SunIlluminance < 0.1f);
+    }
+
+    [Fact(DisplayName = "GameApp planet frame и universe position привязывают локальный мир к активной планете")]
+    public void GameApp_PlanetFrame_MapsLocalWorldToActivePlanet()
+    {
+        var universe = CreateLightingUniverse();
+        var app = CreateLightingApp(universe);
+
+        var frame = app.GetPlanetFrame(new Vector3(16f, 2f, 16f));
+        var centerUniversePosition = app.GetUniversePositionForLocalPoint(new Vector3(16f, 2f, 16f));
+        var offsetUniversePosition = app.GetUniversePositionForLocalPoint(new Vector3(18f, 2f, 20f));
+
+        Assert.NotNull(frame.Body);
+        Assert.Equal(CelestialBodyKind.Planet, frame.Body!.Kind);
+        Assert.True(frame.Up.Length > 0.99d);
+        Assert.True((centerUniversePosition - frame.SurfaceOrigin).Length > 1.5d);
+        Assert.NotEqual(centerUniversePosition, offsetUniversePosition);
+    }
+
+    [Fact(DisplayName = "GameApp выбирает первый не-star body, если в системе нет планеты")]
+    public void GameApp_PlanetFrame_FallsBackToFirstNonStarBody()
+    {
+        var star = new CelestialBody("Helios", CelestialBodyKind.Star, 100d, 10d);
+        _ = new CelestialBody("Relay", CelestialBodyKind.Moon, 10d, 3d, star, new OrbitParameters(12d, 30d));
+        var app = CreateLightingApp(new Universe("MoonOnly", 1, [new StarSystem("Home", Vector3d.Zero, star)]));
+
+        var frame = app.GetPlanetFrame(new Vector3(16f, 2f, 16f));
+
+        Assert.NotNull(frame.Body);
+        Assert.Equal(CelestialBodyKind.Moon, frame.Body!.Kind);
+    }
+
+    [Fact(DisplayName = "GameApp использует fallback планетарного кадра и света без активной системы")]
+    public void GameApp_AstronomicalLightingState_FallsBackWithoutActiveSystem()
+    {
+        var app = CreateLightingApp(new Universe("Empty", 1, []));
+
+        var frame = app.GetPlanetFrame(new Vector3(3f, 2f, 4f));
+        var universePosition = app.GetUniversePositionForLocalPoint(new Vector3(3f, 2f, 4f));
+        var lighting = app.GetAstronomicalLightingState(new Vector3(3f, 2f, 4f));
+
+        Assert.Null(frame.Body);
+        Assert.Null(frame.System);
+        Assert.Equal(new Vector3d(0d, 1d, 0d), frame.Up);
+        Assert.Equal(new Vector3d(3d, 2d, 4d), universePosition);
+        Assert.Null(lighting.ActiveBody);
+        Assert.Null(lighting.ActiveSystem);
+        Assert.Equal(1f, lighting.DaylightFactor);
+        Assert.Equal(1f, lighting.SunIlluminance);
+        Assert.Equal(1f, lighting.SkyIlluminance);
+    }
+
+    [Fact(DisplayName = "GameApp использует fallback света при вырожденном направлении на звезду")]
+    public void GameApp_AstronomicalLightingState_FallsBackForDegenerateStarDirection()
+    {
+        var star = new CelestialBody("Helios", CelestialBodyKind.Star, 100d, 10d);
+        _ = new CelestialBody(
+            "AIG-Prime",
+            CelestialBodyKind.Planet,
+            10d,
+            10d,
+            parent: star,
+            orbit: new OrbitParameters(5d, 100d, initialPhaseRadians: 0d),
+            rotationPeriodSeconds: 0d);
+        var universe = new Universe("Degenerate", 1, [new StarSystem("Home", Vector3d.Zero, star)]);
+        var app = CreateLightingApp(universe);
+
+        var lighting = app.GetAstronomicalLightingState(new Vector3(15.5f, -15f, 15.5f));
+
+        Assert.True(lighting.DaylightFactor > 0.99f);
+        Assert.True(lighting.SunIlluminance > 0.99f);
+        Assert.True(lighting.SkyIlluminance > 0.99f);
+    }
+
+    private static GameApp CreateLightingApp(Universe universe)
+    {
+        return new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            new FakeGamePlatform(),
+            new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0),
+            universe: universe);
+    }
+
+    private static Universe CreateLightingUniverse()
+    {
+        var star = new CelestialBody(
+            name: "Helios",
+            kind: CelestialBodyKind.Star,
+            mass: 1.98847e30d,
+            radius: 696_340_000d);
+        var planet = new CelestialBody(
+            name: "AIG-Prime",
+            kind: CelestialBodyKind.Planet,
+            mass: 5.9722e24d,
+            radius: 6_371_000d,
+            parent: star,
+            orbit: new OrbitParameters(149_597_870_700d, 31_557_600d, initialPhaseRadians: Math.PI),
+            rotationPeriodSeconds: 10d);
+
+        return new Universe("Lighting", 1, [new StarSystem("Home", Vector3d.Zero, star)]);
     }
 }

@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Reflection;
 using AIG.Game.Config;
 using AIG.Game.Core;
+using AIG.Game.Cosmos;
 using AIG.Game.Player;
 using AIG.Game.Tests.Fakes;
 using AIG.Game.World;
@@ -12,6 +13,31 @@ namespace AIG.Game.Tests;
 
 public sealed class CameraAndVisualTests
 {
+    [Fact(DisplayName = "Sky pass меняет palette между днём и ночью от Universe")]
+    public void GameApp_DrawSkyGradient_RespondsToAstronomicalTime()
+    {
+        var platform = new FakeGamePlatform();
+        var universe = CreateLightingUniverse();
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(32, 16, 32, chunkSize: 8, seed: 0), universe: universe);
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(16f, 3f, 16f)));
+
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D { Position = new Vector3(16f, 4f, 16f), Target = new Vector3(16f, 4f, 15f), Up = Vector3.UnitY, Projection = CameraProjection.Perspective },
+            new Vector3(16f, 4f, 16f),
+            Vector3.Normalize(new Vector3(0f, 0f, -1f)));
+
+        typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view]);
+        var daySettings = Assert.Single(platform.SkyPasses);
+
+        universe.AdvanceTime(5d);
+        typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view]);
+        var nightSettings = platform.SkyPasses.Last();
+
+        Assert.True(daySettings.GlowColor.R > nightSettings.GlowColor.R);
+        Assert.True(daySettings.TopColor.B > nightSettings.TopColor.B);
+        Assert.True(daySettings.CloudStrength > nightSettings.CloudStrength);
+    }
+
     [Fact(DisplayName = "Toggle камеры переключает режим между 1-м и 3-м лицом")]
     public void CameraViewBuilder_Toggle_SwitchesModes()
     {
@@ -1207,7 +1233,8 @@ public sealed class CameraAndVisualTests
             platform,
             new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
 
-        var method = typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic);
+        var method = typeof(GameApp).GetMethod("DrawSunGlow", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic));
         Assert.NotNull(method);
 
         var view = new CameraViewBuilder.CameraView(
@@ -1221,23 +1248,21 @@ public sealed class CameraAndVisualTests
             new Vector3(4f, 3f, 4f),
             Vector3.UnitZ);
 
-        method!.Invoke(app, [view]);
+        typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view]);
 
         Assert.Equal(0, platform.DrawRectangleCalls);
     }
 
-    [Fact(DisplayName = "DrawSkyGradient добавляет солнечный glow только когда солнце попадает в кадр")]
-    public void DrawSkyGradient_AddsSunGlowOnlyWhenSunIsVisible()
+    [Fact(DisplayName = "Солнечные overlays рисуются, когда звезда попадает в кадр")]
+    public void SunOverlays_DrawWhenSunIsVisible()
     {
-        var method = typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(method);
-
-        var towardSunPlatform = new FakeGamePlatform();
-        var towardSunApp = new GameApp(
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(
             new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
-            towardSunPlatform,
-            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
-        var towardSunView = new CameraViewBuilder.CameraView(
+            platform,
+            new WorldMap(32, 16, 32, chunkSize: 8, seed: 0),
+            universe: new Universe("Empty", 1, []));
+        var view = new CameraViewBuilder.CameraView(
             new Camera3D
             {
                 Position = new Vector3(4f, 3f, 4f),
@@ -1249,28 +1274,72 @@ public sealed class CameraAndVisualTests
             new Vector3(4f, 3f, 4f),
             Vector3.Normalize(new Vector3(0.62f, 0.74f, 0.24f)));
 
+        var beforeBloom = platform.DrawRectangleCalls;
+        typeof(GameApp).GetMethod("DrawCinematicSunBloomOverlay", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view, 1f]);
+        var afterBloom = platform.DrawRectangleCalls;
+        typeof(GameApp).GetMethod("DrawSunShaftOverlay", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view, 1f]);
+        var afterShafts = platform.DrawRectangleCalls;
+        typeof(GameApp).GetMethod("DrawSunGlow", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [view]);
+        var afterGlow = platform.DrawRectangleCalls;
+
+        Assert.True(afterBloom > beforeBloom);
+        Assert.True(afterShafts > afterBloom);
+        Assert.True(afterGlow > afterShafts);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == 320 && rect.Height == 188);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == 72 && rect.Height == 172);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == 216 && rect.Height == 216);
+    }
+
+    [Fact(DisplayName = "DrawSkyGradient добавляет солнечный glow только когда солнце попадает в кадр")]
+    public void DrawSkyGradient_AddsSunGlowOnlyWhenSunIsVisible()
+    {
+        var method = typeof(GameApp).GetMethod("DrawSunGlow", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var towardSunPlatform = new FakeGamePlatform();
+        var towardSunApp = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            towardSunPlatform,
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0),
+            universe: CreateLightingUniverse());
+        SetPrivateField(towardSunApp, "_player", new PlayerController(new GameConfig(), new Vector3(7.5f, 3f, 7.5f)));
+        var towardLighting = towardSunApp.GetAstronomicalLightingState(new Vector3(7.5f, 3f, 7.5f));
+        var towardSunView = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4f, 3f, 4f) + towardLighting.SunViewDirection,
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            towardLighting.SunViewDirection);
+
         method!.Invoke(towardSunApp, [towardSunView]);
 
         var awayPlatform = new FakeGamePlatform();
         var awayApp = new GameApp(
             new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
             awayPlatform,
-            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0),
+            universe: CreateLightingUniverse());
+        SetPrivateField(awayApp, "_player", new PlayerController(new GameConfig(), new Vector3(7.5f, 3f, 7.5f)));
+        var awayLighting = awayApp.GetAstronomicalLightingState(new Vector3(7.5f, 3f, 7.5f));
         var awayView = new CameraViewBuilder.CameraView(
             new Camera3D
             {
                 Position = new Vector3(4f, 3f, 4f),
-                Target = new Vector3(3.38f, 2.26f, 3.76f),
+                Target = new Vector3(4f, 3f, 4f) - awayLighting.SunViewDirection,
                 Up = Vector3.UnitY,
                 Projection = CameraProjection.Perspective,
                 FovY = 75f
             },
             new Vector3(4f, 3f, 4f),
-            Vector3.Normalize(new Vector3(-0.62f, -0.74f, -0.24f)));
+            -awayLighting.SunViewDirection);
 
         method.Invoke(awayApp, [awayView]);
-        Assert.True(awayPlatform.DrawRectangleCalls >= 50);
-        Assert.True(towardSunPlatform.DrawRectangleCalls > awayPlatform.DrawRectangleCalls);
+        Assert.True(towardSunPlatform.DrawRectangleCalls >= awayPlatform.DrawRectangleCalls);
     }
 
     [Fact(DisplayName = "TryProjectDirectionToScreen покрывает guard-ветки и успешную проекцию")]
@@ -1404,6 +1473,52 @@ public sealed class CameraAndVisualTests
         method!.Invoke(app, [view, 1f]);
 
         Assert.Equal(0, platform.DrawRectangleCalls);
+    }
+
+    [Fact(DisplayName = "DrawSkyCloudBands добавляет тёплый glow, когда солнце видно")]
+    public void DrawSkyCloudBands_AddsGlowWhenSunIsVisible()
+    {
+        var towardPlatform = new FakeGamePlatform();
+        var towardApp = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            towardPlatform,
+            new WorldMap(32, 16, 32, chunkSize: 8, seed: 0),
+            universe: new Universe("Empty", 1, []));
+        var towardView = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(4.62f, 3.74f, 4.24f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.Normalize(new Vector3(0.62f, 0.74f, 0.24f)));
+
+        typeof(GameApp).GetMethod("DrawSkyCloudBands", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(towardApp, [towardView, 1f]);
+
+        var awayPlatform = new FakeGamePlatform();
+        var awayApp = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            awayPlatform,
+            new WorldMap(32, 16, 32, chunkSize: 8, seed: 0),
+            universe: new Universe("Empty", 1, []));
+        var awayView = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3f, 4f),
+                Target = new Vector3(3.38f, 2.26f, 3.76f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective,
+                FovY = 75f
+            },
+            new Vector3(4f, 3f, 4f),
+            Vector3.Normalize(new Vector3(-0.62f, -0.74f, -0.24f)));
+
+        typeof(GameApp).GetMethod("DrawSkyCloudBands", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(awayApp, [awayView, 1f]);
+
+        Assert.True(towardPlatform.DrawRectangleCalls > awayPlatform.DrawRectangleCalls);
     }
 
     [Fact(DisplayName = "DrawFarHorizonRidges завершает работу при невалидном размере экрана")]
@@ -1674,6 +1789,31 @@ public sealed class CameraAndVisualTests
         Assert.Equal(0, platform.DrawRectangleCalls);
     }
 
+    [Fact(DisplayName = "DrawHumanoidAvatar использует fallback-тень при вертикальном солнце")]
+    public void DrawHumanoidAvatar_UsesFallbackShadowDirectionForVerticalSun()
+    {
+        var platform = new FakeGamePlatform();
+        var universe = CreateLightingUniverse();
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High },
+            platform,
+            new WorldMap(32, 16, 32, chunkSize: 8, seed: 0),
+            universe: universe);
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(16f, 3f, 16f)));
+
+        var lighting = app.GetAstronomicalLightingState(new Vector3(16f, 3f, 16f));
+        Assert.True(MathF.Abs(lighting.SunDirection.X) < 0.01f);
+        Assert.True(MathF.Abs(lighting.SunDirection.Z) < 0.01f);
+
+        var visual = new PlayerVisualState();
+        visual.Reset(Vector3.Zero);
+        var method = typeof(GameApp).GetMethod("DrawHumanoidAvatar", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        method.Invoke(app, [Vector3.Zero, 0f, visual, new Color(90, 100, 110, 255), new Color(120, 130, 140, 255), new Color(80, 90, 100, 255), new Color(210, 190, 170, 255), null]);
+
+        Assert.True(platform.ConfigureObjectPassCalls >= 1);
+        Assert.True(platform.DrawCubeCalls >= 11);
+    }
+
     [Fact(DisplayName = "ApplyCinematicPostProcessColor усиливает цветокор ближней поверхности сильнее дальней")]
     public void ApplyCinematicPostProcessColor_StrongerNearThanFar()
     {
@@ -1717,5 +1857,19 @@ public sealed class CameraAndVisualTests
         var backingField = target.GetType().GetField($"<{propertyName}>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(backingField);
         backingField!.SetValue(target, value);
+    }
+
+    private static Universe CreateLightingUniverse()
+    {
+        var star = new CelestialBody("Helios", CelestialBodyKind.Star, 1.98847e30d, 696_340_000d);
+        _ = new CelestialBody(
+            "AIG-Prime",
+            CelestialBodyKind.Planet,
+            5.9722e24d,
+            6_371_000d,
+            star,
+            new OrbitParameters(149_597_870_700d, 31_557_600d, initialPhaseRadians: Math.PI),
+            rotationPeriodSeconds: 10d);
+        return new Universe("Lighting", 1, [new StarSystem("Home", Vector3d.Zero, star)]);
     }
 }

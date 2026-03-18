@@ -9,6 +9,8 @@ namespace AIG.Game.Core;
 public readonly record struct WorldMaterialPassSettings(
     Vector3 CameraPosition,
     Vector3 SunDirection,
+    float SunIlluminance,
+    float SkyIlluminance,
     Color FogColor,
     float FogStart,
     float FogEnd,

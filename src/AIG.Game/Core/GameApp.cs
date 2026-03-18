@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.IO;
 using System.Collections.Generic;
+using System.Linq;
 using AIG.Game.Bot;
 using AIG.Game.Cosmos;
 using AIG.Game.Config;
@@ -46,6 +47,8 @@ public class GameApp : IGameRunner
     private readonly record struct CachedChunkMesh(int Revision, int Variant, ChunkSurfaceMeshData Mesh);
     private readonly record struct WorldVisibilityProfile(float NearDistance, float MidDistance, float FarDistance, float AtmosphericDistance, float NearBlendBand, float MidBlendBand, float FarBlendBand);
     private readonly record struct RenderPolishProfile(float CoherenceStrength, float ShadowSoftnessStrength, float AtmosphereStabilityStrength, float FinalCompositeStrength);
+    internal readonly record struct PlanetFrame(CelestialBody? Body, StarSystem? System, Vector3d BodyPosition, Vector3d SurfaceOrigin, Vector3d Up, Vector3d East, Vector3d North);
+    internal readonly record struct AstronomicalLightingState(CelestialBody? ActiveBody, StarSystem? ActiveSystem, Vector3 SunDirection, Vector3 SunViewDirection, float SunAltitude, float DaylightFactor, float TwilightFactor, float NightFactor, float SunIlluminance, float SkyIlluminance);
     private readonly record struct ViewFrustum(Vector3 Position, Vector3 Forward, Vector3 Right, Vector3 Up, float TanHalfFov, float Aspect, float HorizontalMargin, float VerticalMargin);
     private readonly record struct ShadowVolume(Vector3 Origin, Vector3 Right, Vector3 Up, Vector3 Forward, float HalfWidth, float HalfHeight, float HalfDepth, int Resolution, float DistanceLimit);
     private readonly record struct ShadowPassBuildResult(WorldShadowPassSettings Settings, byte[] NearShadowMap, byte[] FarShadowMap);
@@ -1437,7 +1440,7 @@ public class GameApp : IGameRunner
     private void DrawFrame(BlockRaycastHit? hit, CameraViewBuilder.CameraView view)
     {
         _platform.BeginDrawing();
-        _platform.ClearBackground(GetSkyTopColor());
+        _platform.ClearBackground(GetSkyTopColor(GetCurrentAstronomicalLightingState()));
         DrawSkyGradient(view);
 
         if (_state != AppState.MainMenu)
@@ -1593,6 +1596,7 @@ public class GameApp : IGameRunner
 
     private SkyPassSettings BuildSkyPassSettings(CameraViewBuilder.CameraView view, int width, int height)
     {
+        var lighting = GetCurrentAstronomicalLightingState();
         var viewY = Math.Clamp(view.RayDirection.Y, -1f, 1f);
         var horizonY = (int)MathF.Round(height * (0.56f + viewY * 0.2f));
         horizonY = Math.Clamp(horizonY, 0, Math.Max(0, height - 1));
@@ -1610,13 +1614,13 @@ public class GameApp : IGameRunner
         };
 
         return new SkyPassSettings(
-            TopColor: GetSkyTopColor(),
-            MidColor: GetSkyMidColor(),
-            HorizonColor: GetSkyHorizonColor(),
-            GlowColor: GetSkyGlowColor(),
+            TopColor: GetSkyTopColor(lighting),
+            MidColor: GetSkyMidColor(lighting),
+            HorizonColor: GetSkyHorizonColor(lighting),
+            GlowColor: GetSkyGlowColor(lighting),
             HorizonY: horizonY,
-            CloudStrength: cloudStrength,
-            RidgeStrength: ridgeStrength);
+            CloudStrength: cloudStrength * (0.45f + lighting.SkyIlluminance * 0.55f),
+            RidgeStrength: ridgeStrength * (0.62f + lighting.SkyIlluminance * 0.38f));
     }
 
     private ScreenSpacePassSettings BuildScreenSpacePassSettings(CameraViewBuilder.CameraView view, int width, int height)
@@ -1717,7 +1721,8 @@ public class GameApp : IGameRunner
             return;
         }
 
-        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        var lighting = GetCurrentAstronomicalLightingState();
+        if (lighting.SunAltitude <= -0.18f || !TryProjectDirectionToScreen(view.Camera, -lighting.SunDirection, width, height, out var sunScreen))
         {
             return;
         }
@@ -1736,7 +1741,8 @@ public class GameApp : IGameRunner
             return;
         }
 
-        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        var lighting = GetCurrentAstronomicalLightingState();
+        if (lighting.SunAltitude <= -0.12f || !TryProjectDirectionToScreen(view.Camera, -lighting.SunDirection, width, height, out var sunScreen))
         {
             return;
         }
@@ -1773,7 +1779,8 @@ public class GameApp : IGameRunner
             return;
         }
 
-        if (!TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen))
+        var lighting = GetCurrentAstronomicalLightingState();
+        if (lighting.SunAltitude <= -0.10f || !TryProjectDirectionToScreen(view.Camera, -lighting.SunDirection, width, height, out var sunScreen))
         {
             return;
         }
@@ -1793,8 +1800,10 @@ public class GameApp : IGameRunner
             return;
         }
 
+        var lighting = GetCurrentAstronomicalLightingState();
         var horizonBase = height * (0.32f + Math.Clamp(view.RayDirection.Y, -1f, 1f) * 0.08f);
-        var sunVisible = TryProjectDirectionToScreen(view.Camera, -WorldMap.GetSunLightDirection(), width, height, out var sunScreen);
+        var sunScreen = Vector2.Zero;
+        var sunVisible = lighting.SunAltitude > -0.10f && TryProjectDirectionToScreen(view.Camera, -lighting.SunDirection, width, height, out sunScreen);
 
         for (var layer = 0; layer < 4; layer++)
         {
@@ -2120,7 +2129,43 @@ public class GameApp : IGameRunner
         var farProxyStartDistance = GetWorldShadowFarProxyStartDistance();
         var farProxyEndDistance = GetWorldShadowFarProxyEndDistance();
         var center = new Vector3(_player.Position.X, (minY + maxY) * 0.5f, _player.Position.Z);
-        var lightDirection = Vector3.Normalize(WorldMap.GetSunLightDirection());
+        var lighting = GetCurrentAstronomicalLightingState();
+        var lightDirection = Vector3.Normalize(lighting.SunDirection);
+        if (lighting.SunAltitude <= -0.02f || lighting.SunIlluminance <= 0.04f)
+        {
+            return new ShadowPassBuildResult(
+                new WorldShadowPassSettings(
+                    Enabled: false,
+                    NearResolution: nearResolution,
+                    FarResolution: farResolution,
+                    NearFilterRadius: GetWorldShadowNearFilterRadius(),
+                    FarFilterRadius: GetWorldShadowFarFilterRadius(),
+                    NearOrigin: center,
+                    NearRight: Vector3.UnitX,
+                    NearUp: Vector3.UnitY,
+                    NearForward: Vector3.UnitZ,
+                    NearHalfWidth: 1f,
+                    NearHalfHeight: 1f,
+                    NearHalfDepth: 1f,
+                    FarOrigin: center,
+                    FarRight: Vector3.UnitX,
+                    FarUp: Vector3.UnitY,
+                    FarForward: Vector3.UnitZ,
+                    FarHalfWidth: 1f,
+                    FarHalfHeight: 1f,
+                    FarHalfDepth: 1f,
+                    NearDistance: nearDistance,
+                    FarDistance: farDistance,
+                    FarProxyStartDistance: farProxyStartDistance,
+                    FarProxyEndDistance: farProxyEndDistance,
+                    FarProxyStrength: GetWorldShadowFarProxyStrength(),
+                    CascadeBlendWidth: GetWorldShadowCascadeBlendWidth(),
+                    Bias: GetWorldShadowMapBias(),
+                    SlopeBiasStrength: GetWorldShadowSlopeBiasStrength(),
+                    Strength: 0f),
+                CreateEmptyShadowMap(nearResolution),
+                CreateEmptyShadowMap(farResolution));
+        }
         var nearVolume = BuildShadowVolume(center, lightDirection, nearDistance, Math.Max(12f, (maxY - minY) * 0.5f + 6f), nearDistance + 16f, nearResolution, nearDistance);
         var farVolume = BuildShadowVolume(center, lightDirection, farDistance, Math.Max(16f, (maxY - minY) * 0.5f + 10f), farDistance + 28f, farResolution, farDistance);
         var nearMap = CreateEmptyShadowMap(nearResolution);
@@ -2214,7 +2259,7 @@ public class GameApp : IGameRunner
         in ViewFrustum viewFrustum)
     {
         var center = new Vector3(_player.Position.X, (minY + maxY) * 0.5f, _player.Position.Z);
-        var lightDirection = Vector3.Normalize(WorldMap.GetSunLightDirection());
+        var lightDirection = Vector3.Normalize(GetCurrentAstronomicalLightingState().SunDirection);
         var boundsChanged =
             !_hasCachedWorldShadowPass
             || _cachedWorldShadowMinChunkX != minChunkX
@@ -3470,10 +3515,13 @@ public class GameApp : IGameRunner
         var viewMaterialStrength = GetWorldViewMaterialStrength();
         var shadowCascadeBlendStrength = GetWorldShadowCascadeBlendStrength();
         var farWorldCohesionStrength = GetWorldFarWorldCohesionStrength();
+        var lighting = GetCurrentAstronomicalLightingState();
 
         _platform.ConfigureWorldMaterialPass(new WorldMaterialPassSettings(
             CameraPosition: _player.EyePosition,
-            SunDirection: WorldMap.GetSunLightDirection(),
+            SunDirection: lighting.SunDirection,
+            SunIlluminance: lighting.SunIlluminance,
+            SkyIlluminance: lighting.SkyIlluminance,
             FogColor: _graphics.FogColor,
             FogStart: fogStart,
             FogEnd: fogEnd,
@@ -3525,32 +3573,38 @@ public class GameApp : IGameRunner
 
     private float GetWorldAtmosphereStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.50f,
             GraphicsQuality.Medium => 0.66f,
             _ => 0.82f
         };
+        return baseStrength * (0.58f + lighting.SkyIlluminance * 0.42f);
     }
 
     private float GetWorldWarmLightStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.48f,
             GraphicsQuality.Medium => 0.66f,
             _ => 0.78f
         };
+        return baseStrength * (0.32f + lighting.DaylightFactor * 0.50f + lighting.TwilightFactor * 0.72f);
     }
 
     private float GetWorldCoolShadowStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.22f,
             GraphicsQuality.Medium => 0.34f,
             _ => 0.42f
         };
+        return baseStrength * (0.90f + lighting.NightFactor * 0.18f);
     }
 
     private float GetWorldContrastStrength()
@@ -3595,52 +3649,62 @@ public class GameApp : IGameRunner
 
     private float GetWorldSkyBlendStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.12f,
             GraphicsQuality.Medium => 0.18f,
             _ => 0.26f
         };
+        return baseStrength * (0.24f + lighting.SkyIlluminance * 0.76f);
     }
 
     private float GetWorldPostProcessStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.58f,
             GraphicsQuality.Medium => 0.82f,
             _ => 1f
         };
+        return baseStrength * (0.76f + lighting.SkyIlluminance * 0.24f);
     }
 
     private float GetWorldSunScatterStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.22f,
             GraphicsQuality.Medium => 0.34f,
             _ => 0.40f
         };
+        return baseStrength * (0.12f + lighting.DaylightFactor * 0.58f + lighting.TwilightFactor * 0.90f);
     }
 
     private float GetWorldAmbientLiftStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.08f,
             GraphicsQuality.Medium => 0.16f,
             _ => 0.24f
         };
+        return baseStrength * (0.20f + lighting.SkyIlluminance * 0.80f);
     }
 
     private float GetWorldHazeStrength()
     {
-        return _graphics.Quality switch
+        var lighting = GetCurrentAstronomicalLightingState();
+        var baseStrength = _graphics.Quality switch
         {
             GraphicsQuality.Low => 0.08f,
             GraphicsQuality.Medium => 0.14f,
             _ => 0.20f
         };
+        return baseStrength * (0.48f + lighting.SkyIlluminance * 0.52f);
     }
 
     private float GetWorldMaterialShadowStrength()
@@ -4675,24 +4739,44 @@ public class GameApp : IGameRunner
             (byte)255);
     }
 
-    private static Color GetSkyTopColor()
+    private Color GetSkyTopColor(AstronomicalLightingState lighting)
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(66, 122, 194, 255), 1.10f), 0.07f, 0.09f, 1.07f);
+        var day = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(66, 122, 194, 255), 1.10f), 0.07f, 0.09f, 1.07f);
+        var twilight = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(86, 96, 154, 255), 1.02f), 0.08f, 0.10f, 1.03f);
+        var night = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(18, 28, 54, 255), 0.88f), 0.02f, 0.12f, 1.01f);
+        return BlendAstronomicalSkyColor(day, twilight, night, lighting);
     }
 
-    private static Color GetSkyMidColor()
+    private Color GetSkyMidColor(AstronomicalLightingState lighting)
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(152, 196, 232, 255), 1.08f), 0.08f, 0.05f, 1.06f);
+        var day = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(152, 196, 232, 255), 1.08f), 0.08f, 0.05f, 1.06f);
+        var twilight = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(176, 142, 176, 255), 1.00f), 0.10f, 0.06f, 1.04f);
+        var night = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(34, 50, 82, 255), 0.90f), 0.03f, 0.12f, 1.01f);
+        return BlendAstronomicalSkyColor(day, twilight, night, lighting);
     }
 
-    private static Color GetSkyHorizonColor()
+    private Color GetSkyHorizonColor(AstronomicalLightingState lighting)
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(246, 222, 190, 255), 1.07f), 0.13f, 0.02f, 1.05f);
+        var day = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(246, 222, 190, 255), 1.07f), 0.13f, 0.02f, 1.05f);
+        var twilight = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(248, 166, 138, 255), 1.02f), 0.16f, 0.04f, 1.05f);
+        var night = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(40, 52, 76, 255), 0.88f), 0.03f, 0.12f, 1.00f);
+        return BlendAstronomicalSkyColor(day, twilight, night, lighting);
     }
 
-    private static Color GetSkyGlowColor()
+    private Color GetSkyGlowColor(AstronomicalLightingState lighting)
     {
-        return ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 198, 140, 255), 1.12f), 0.15f, 0f, 1.09f);
+        var day = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 198, 140, 255), 1.12f), 0.15f, 0f, 1.09f);
+        var twilight = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(255, 144, 112, 255), 1.10f), 0.18f, 0f, 1.08f);
+        var night = ApplySceneColorGrade(ApplyFilmicTonemap(new Color(126, 146, 210, 255), 0.92f), 0.04f, 0.08f, 1.03f);
+        return BlendAstronomicalSkyColor(day, twilight, night, lighting);
+    }
+
+    private static Color BlendAstronomicalSkyColor(Color day, Color twilight, Color night, AstronomicalLightingState lighting)
+    {
+        var twilightBlend = Math.Clamp(lighting.TwilightFactor, 0f, 1f);
+        var dayNightBlend = Math.Clamp(lighting.DaylightFactor, 0f, 1f);
+        var baseColor = LerpColor(night, twilight, twilightBlend);
+        return LerpColor(baseColor, day, dayNightBlend);
     }
 
     private void DrawPlayerAvatar()
@@ -4790,7 +4874,11 @@ public class GameApp : IGameRunner
             _platform.DrawCube(devicePosition + forward * 0.07f, 0.03f, 0.10f, 0.14f, new Color(118, 255, 228, 165));
         }
 
-        var sunShadowDirection = Vector3.Normalize(new Vector3(-WorldMap.GetSunLightDirection().X, 0f, -WorldMap.GetSunLightDirection().Z));
+        var sunDirection = GetCurrentAstronomicalLightingState().SunDirection;
+        var sunShadowFlat = new Vector3(-sunDirection.X, 0f, -sunDirection.Z);
+        var sunShadowDirection = sunShadowFlat.LengthSquared() < 0.000001f
+            ? Vector3.Normalize(new Vector3(0.4f, 0f, 0.9f))
+            : Vector3.Normalize(sunShadowFlat);
         _platform.DrawCube(root + sunShadowDirection * objectPassSettings.GroundShadowOffset + new Vector3(0f, -0.03f, 0f), 1.00f, 0.02f, 0.62f, new Color(objectPassSettings.ShadowColor.R, objectPassSettings.ShadowColor.G, objectPassSettings.ShadowColor.B, (byte)MathF.Round(objectPassSettings.GroundShadowAlpha)));
         _platform.DrawCube(root + new Vector3(0f, -0.02f, 0f), 0.82f, 0.02f, 0.82f, new Color(objectPassSettings.ShadowColor.R, objectPassSettings.ShadowColor.G, objectPassSettings.ShadowColor.B, (byte)MathF.Round(objectPassSettings.GroundShadowAlpha * 1.55f)));
         _platform.DrawCube(root + new Vector3(0f, -0.01f, 0f), 0.48f, 0.02f, 0.48f, new Color(objectPassSettings.ShadowColor.R, objectPassSettings.ShadowColor.G, objectPassSettings.ShadowColor.B, (byte)MathF.Round(objectPassSettings.ContactShadowAlpha)));
@@ -5998,8 +6086,139 @@ public class GameApp : IGameRunner
         var delta = deltaSeconds > 0f ? deltaSeconds : 1f / 60f;
         var runtimeDelta = Math.Clamp(delta, 1f / 240f, 0.1f);
         _runtimeSeconds += runtimeDelta;
-        _universe.AdvanceTime(runtimeDelta);
+        _universe.AdvanceTime(runtimeDelta * GetUniverseTimeScale());
     }
+
+    private static float GetUniverseTimeScale() => 720f;
+
+    internal PlanetFrame GetPlanetFrame(Vector3 localPosition)
+    {
+        var activeSystem = _universe.StarSystems.Count > 0
+            ? _universe.StarSystems[0]
+            : null;
+        var activeBody = activeSystem?.Bodies.FirstOrDefault(static body => body.Kind == CelestialBodyKind.Planet)
+            ?? activeSystem?.Bodies.FirstOrDefault(static body => body.Kind != CelestialBodyKind.Star);
+        if (activeSystem is null || activeBody is null)
+        {
+            return new PlanetFrame(
+                Body: null,
+                System: null,
+                BodyPosition: Vector3d.Zero,
+                SurfaceOrigin: Vector3d.Zero,
+                Up: new Vector3d(0d, 1d, 0d),
+                East: new Vector3d(1d, 0d, 0d),
+                North: new Vector3d(0d, 0d, 1d));
+        }
+
+        var bodyPosition = activeSystem.GetAbsolutePosition(activeBody, _universe.SimulationTimeSeconds);
+        var rotation = activeBody.GetRotationAngle(_universe.SimulationTimeSeconds);
+        var up = new Vector3d(Math.Cos(rotation), 0d, Math.Sin(rotation)).Normalize();
+        var east = new Vector3d(-Math.Sin(rotation), 0d, Math.Cos(rotation)).Normalize();
+        var north = new Vector3d(0d, 1d, 0d);
+        var surfaceOrigin = bodyPosition + up * activeBody.Radius;
+
+        return new PlanetFrame(activeBody, activeSystem, bodyPosition, surfaceOrigin, up, east, north);
+    }
+
+    internal Vector3d GetUniversePositionForLocalPoint(Vector3 localPosition)
+    {
+        var frame = GetPlanetFrame(localPosition);
+        return GetUniversePositionForLocalPoint(frame, localPosition);
+    }
+
+    private Vector3d GetUniversePositionForLocalPoint(PlanetFrame frame, Vector3 localPosition)
+    {
+        if (frame.Body is null)
+        {
+            return new Vector3d(localPosition.X, localPosition.Y, localPosition.Z);
+        }
+
+        var localCenterX = (_world.Width - 1) * 0.5f;
+        var localCenterZ = (_world.Depth - 1) * 0.5f;
+        var tangentX = localPosition.X - localCenterX;
+        var tangentZ = localPosition.Z - localCenterZ;
+        var altitude = localPosition.Y;
+
+        return frame.SurfaceOrigin
+            + frame.East * tangentX
+            + frame.North * tangentZ
+            + frame.Up * altitude;
+    }
+
+    internal AstronomicalLightingState GetAstronomicalLightingState(Vector3 localPosition)
+    {
+        var fallbackSunDirection = Vector3.Normalize(WorldMap.GetSunLightDirection());
+        var fallbackViewDirection = Vector3.Normalize(-fallbackSunDirection);
+        var frame = GetPlanetFrame(localPosition);
+        if (frame.Body is null || frame.System is null)
+        {
+            return new AstronomicalLightingState(
+                ActiveBody: null,
+                ActiveSystem: null,
+                SunDirection: fallbackSunDirection,
+                SunViewDirection: fallbackViewDirection,
+                SunAltitude: Math.Clamp(fallbackViewDirection.Y, -1f, 1f),
+                DaylightFactor: 1f,
+                TwilightFactor: 0f,
+                NightFactor: 0f,
+                SunIlluminance: 1f,
+                SkyIlluminance: 1f);
+        }
+
+        var starPosition = frame.System.GetAbsolutePosition(frame.System.Star, _universe.SimulationTimeSeconds);
+        var localUniversePosition = GetUniversePositionForLocalPoint(frame, localPosition);
+        var toStar = (starPosition - localUniversePosition).Normalize();
+        if (toStar == Vector3d.Zero)
+        {
+            return new AstronomicalLightingState(
+                frame.Body,
+                frame.System,
+                fallbackSunDirection,
+                fallbackViewDirection,
+                Math.Clamp(fallbackViewDirection.Y, -1f, 1f),
+                1f,
+                0f,
+                0f,
+                1f,
+                1f);
+        }
+
+        var sunViewDirection = Vector3.Normalize(new Vector3(
+            (float)Dot(toStar, frame.East),
+            (float)Dot(toStar, frame.Up),
+            (float)Dot(toStar, frame.North)));
+        var sunDirection = Vector3.Normalize(-sunViewDirection);
+        var sunAltitude = Math.Clamp(sunViewDirection.Y, -1f, 1f);
+        var daylight = SmoothStep01((sunAltitude + 0.10f) / 0.32f);
+        var twilightBase = 1f - SmoothStep01(Math.Abs(sunAltitude) / 0.26f);
+        var twilight = twilightBase * (1f - daylight * 0.72f);
+        var night = 1f - Math.Clamp(daylight + twilight * 0.42f, 0f, 1f);
+        var sunIlluminance = Math.Clamp(daylight + twilight * 0.34f, 0f, 1f);
+        var skyIlluminance = Math.Clamp(daylight * 0.88f + twilight * 0.42f, 0.02f, 1f);
+
+        return new AstronomicalLightingState(
+            ActiveBody: frame.Body,
+            ActiveSystem: frame.System,
+            SunDirection: sunDirection,
+            SunViewDirection: sunViewDirection,
+            SunAltitude: sunAltitude,
+            DaylightFactor: daylight,
+            TwilightFactor: twilight,
+            NightFactor: night,
+            SunIlluminance: sunIlluminance,
+            SkyIlluminance: skyIlluminance);
+    }
+
+    private AstronomicalLightingState GetCurrentAstronomicalLightingState()
+    {
+        var localPosition = _player is null
+            ? new Vector3(_world.Width * 0.5f, Math.Max(1f, _world.Height * 0.25f), _world.Depth * 0.5f)
+            : _player.Position;
+        return GetAstronomicalLightingState(localPosition);
+    }
+
+    private static double Dot(Vector3d left, Vector3d right)
+        => left.X * right.X + left.Y * right.Y + left.Z * right.Z;
 
     private void ResetAdaptiveTracking(Vector3 position)
     {

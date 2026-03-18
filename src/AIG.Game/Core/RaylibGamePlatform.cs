@@ -31,6 +31,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private bool _hasWorldAtlasShader;
     private int _worldAtlasCameraPosLoc = -1;
     private int _worldAtlasSunDirectionLoc = -1;
+    private int _worldAtlasSunIlluminanceLoc = -1;
+    private int _worldAtlasSkyIlluminanceLoc = -1;
     private int _worldAtlasFogColorLoc = -1;
     private int _worldAtlasFogRangeLoc = -1;
     private int _worldAtlasStrengthLoc = -1;
@@ -458,6 +460,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
 
         _worldAtlasCameraPosLoc = Raylib.GetShaderLocation(_worldAtlasShader, "cameraPos");
         _worldAtlasSunDirectionLoc = Raylib.GetShaderLocation(_worldAtlasShader, "sunDirection");
+        _worldAtlasSunIlluminanceLoc = Raylib.GetShaderLocation(_worldAtlasShader, "sunIlluminance");
+        _worldAtlasSkyIlluminanceLoc = Raylib.GetShaderLocation(_worldAtlasShader, "skyIlluminance");
         _worldAtlasFogColorLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogColor");
         _worldAtlasFogRangeLoc = Raylib.GetShaderLocation(_worldAtlasShader, "fogRange");
         _worldAtlasStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shaderStrength");
@@ -555,6 +559,16 @@ public sealed class RaylibGamePlatform : IGamePlatform
                 _worldMaterialPassSettings.SunDirection.Y,
                 _worldMaterialPassSettings.SunDirection.Z
             }, ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasSunIlluminanceLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSunIlluminanceLoc, _worldMaterialPassSettings.SunIlluminance, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasSkyIlluminanceLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSkyIlluminanceLoc, _worldMaterialPassSettings.SkyIlluminance, ShaderUniformDataType.Float);
         }
 
         if (_worldAtlasFogColorLoc >= 0)
@@ -900,6 +914,8 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _hasWorldAtlasShader = false;
         _worldAtlasCameraPosLoc = -1;
         _worldAtlasSunDirectionLoc = -1;
+        _worldAtlasSunIlluminanceLoc = -1;
+        _worldAtlasSkyIlluminanceLoc = -1;
         _worldAtlasFogColorLoc = -1;
         _worldAtlasFogRangeLoc = -1;
         _worldAtlasStrengthLoc = -1;

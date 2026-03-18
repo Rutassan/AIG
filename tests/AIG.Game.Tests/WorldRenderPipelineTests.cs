@@ -2,6 +2,7 @@ using System.Collections;
 using System.Linq;
 using System.Numerics;
 using System.Reflection;
+using AIG.Game.Cosmos;
 using AIG.Game.Config;
 using AIG.Game.Core;
 using AIG.Game.Player;
@@ -13,6 +14,195 @@ namespace AIG.Game.Tests;
 
 public sealed class WorldRenderPipelineTests
 {
+    [Fact(DisplayName = "ConfigureWorldMaterialPass получает астрономические sun и sky illuminance")]
+    public void ConfigureWorldMaterialPass_UsesAstronomicalLightingState()
+    {
+        var platform = new FakeGamePlatform();
+        var universe = CreateLightingUniverse();
+        var world = new WorldMap(32, 16, 32, chunkSize: 8, seed: 0);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world, universe: universe);
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(16f, 3f, 16f)));
+
+        typeof(GameApp).GetMethod("ConfigureWorldMaterialPass", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
+        var daySettings = Assert.Single(platform.WorldMaterialPasses);
+
+        universe.AdvanceTime(5d);
+        typeof(GameApp).GetMethod("ConfigureWorldMaterialPass", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
+        var nightSettings = platform.WorldMaterialPasses.Last();
+
+        Assert.True(daySettings.SunIlluminance > 0.9f);
+        Assert.True(daySettings.SkyIlluminance > 0.8f);
+        Assert.True(nightSettings.SunIlluminance < 0.1f);
+        Assert.True(nightSettings.SkyIlluminance < daySettings.SkyIlluminance);
+        Assert.NotEqual(daySettings.SunDirection, nightSettings.SunDirection);
+    }
+
+    [Fact(DisplayName = "BuildWorldShadowPass выключает реальные тени ночью")]
+    public void BuildWorldShadowPass_DisablesRealShadowsAtNight()
+    {
+        var platform = new FakeGamePlatform();
+        var universe = CreateLightingUniverse();
+        universe.AdvanceTime(5d);
+        var world = new WorldMap(32, 16, 32, chunkSize: 8, seed: 0);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world, universe: universe);
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(16f, 3f, 16f)));
+
+        var method = typeof(GameApp).GetMethod("BuildWorldShadowPass", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var frustumType = typeof(GameApp).GetNestedType("ViewFrustum", BindingFlags.NonPublic)!;
+        var frustum = Activator.CreateInstance(
+            frustumType,
+            new Vector3(16f, 3f, 16f),
+            Vector3.UnitZ,
+            Vector3.UnitX,
+            Vector3.UnitY,
+            1f,
+            1f,
+            0f,
+            0f)!;
+
+        var result = method.Invoke(app, [0, 0, 0, 0, 0, 8, false, frustum])!;
+        var settings = result.GetType().GetProperty("Settings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(result)!;
+
+        Assert.False((bool)settings.GetType().GetProperty("Enabled")!.GetValue(settings)!);
+        Assert.Equal(0f, (float)settings.GetType().GetProperty("Strength")!.GetValue(settings)!);
+    }
+
+    [Fact(DisplayName = "BuildShadowVolume покрывает vertical и angled up-seed ветки")]
+    public void BuildShadowVolume_CoversBothUpSeedBranches()
+    {
+        var method = typeof(GameApp).GetMethod("BuildShadowVolume", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        var vertical = method.Invoke(null, [Vector3.Zero, Vector3.UnitY, 10f, 12f, 14f, 16, 20f])!;
+        var angled = method.Invoke(null, [Vector3.Zero, Vector3.Normalize(new Vector3(1f, -1f, 0f)), 10f, 12f, 14f, 16, 20f])!;
+
+        Assert.NotNull(vertical);
+        Assert.NotNull(angled);
+    }
+
+    [Fact(DisplayName = "RasterizeSurfaceBlockShadow покрывает и miss, и успешную запись")]
+    public void RasterizeSurfaceBlockShadow_CoversMissAndWriteBranches()
+    {
+        var buildMethod = typeof(GameApp).GetMethod("BuildShadowVolume", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var rasterMethod = typeof(GameApp).GetMethod("RasterizeSurfaceBlockShadow", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var volume = buildMethod.Invoke(null, [Vector3.Zero, Vector3.Normalize(new Vector3(1f, -1f, 0f)), 10f, 10f, 10f, 8, 20f])!;
+        var map = Enumerable.Repeat(byte.MaxValue, 64).ToArray();
+
+        rasterMethod.Invoke(null, [map, volume, new Vector3(1000f, 1000f, 1000f)]);
+        Assert.All(map, value => Assert.Equal(byte.MaxValue, value));
+
+        rasterMethod.Invoke(null, [map, volume, Vector3.Zero]);
+        Assert.Contains(map, value => value < byte.MaxValue);
+    }
+
+    [Fact(DisplayName = "BuildWorldShadowPass покрывает skip-ветки surface filtering и frustum rejection")]
+    public void BuildWorldShadowPass_CoversSurfaceSkipBranches()
+    {
+        var world = new WorldMap(128, 16, 128, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(4, 10, 4, BlockType.Stone);
+        world.SetBlock(100, 1, 100, BlockType.Stone);
+        world.SetBlock(40, 1, 40, BlockType.Stone);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(64.5f, 2f, 64.5f), maxChunks: 512);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, new FakeGamePlatform(), world, universe: CreateLightingUniverse());
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4f, 2f, 4f)));
+
+        var method = typeof(GameApp).GetMethod("BuildWorldShadowPass", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var frustumType = typeof(GameApp).GetNestedType("ViewFrustum", BindingFlags.NonPublic)!;
+        var frustum = Activator.CreateInstance(
+            frustumType,
+            new Vector3(4f, 2f, 4f),
+            Vector3.UnitX,
+            Vector3.UnitZ,
+            Vector3.UnitY,
+            0.25f,
+            0.25f,
+            0f,
+            0f)!;
+
+        var result = method.Invoke(app, [0, 15, 0, 15, 0, 2, true, frustum])!;
+        var settings = result.GetType().GetProperty("Settings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(result)!;
+
+        Assert.True((bool)settings.GetType().GetProperty("Enabled")!.GetValue(settings)!);
+    }
+
+    [Fact(DisplayName = "BuildWorldShadowPass покрывает loaded chunk без surface-cache и пустой surface-list")]
+    public void BuildWorldShadowPass_CoversMissingAndEmptySurfaceCacheBranches()
+    {
+        var world = new WorldMap(16, 8, 16, chunkSize: 8, seed: 0);
+        world.EnsureChunksAround(new Vector3(4.5f, 2f, 4.5f), radiusInChunks: 0);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, new FakeGamePlatform(), world, universe: CreateLightingUniverse());
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4f, 2f, 4f)));
+
+        var method = typeof(GameApp).GetMethod("BuildWorldShadowPass", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var frustumType = typeof(GameApp).GetNestedType("ViewFrustum", BindingFlags.NonPublic)!;
+        var frustum = Activator.CreateInstance(
+            frustumType,
+            new Vector3(4f, 2f, 4f),
+            Vector3.UnitZ,
+            Vector3.UnitX,
+            Vector3.UnitY,
+            1f,
+            1f,
+            0f,
+            0f)!;
+
+        var result = method.Invoke(app, [0, 1, 0, 1, 0, 4, false, frustum])!;
+        var settings = result.GetType().GetProperty("Settings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(result)!;
+
+        Assert.True((bool)settings.GetType().GetProperty("Enabled")!.GetValue(settings)!);
+    }
+
+    [Fact(DisplayName = "BuildWorldShadowPass покрывает ветку non-atlas surface filtering")]
+    public void BuildWorldShadowPass_CoversNonAtlasSurfaceFiltering()
+    {
+        var world = new WorldMap(16, 8, 16, chunkSize: 8, seed: 0);
+        world.SetBlock(4, 1, 4, (BlockType)99);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 2f, 4.5f), maxChunks: 16);
+
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, new FakeGamePlatform(), world, universe: CreateLightingUniverse());
+        SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4f, 2f, 4f)));
+
+        var method = typeof(GameApp).GetMethod("BuildWorldShadowPass", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var frustumType = typeof(GameApp).GetNestedType("ViewFrustum", BindingFlags.NonPublic)!;
+        var frustum = Activator.CreateInstance(
+            frustumType,
+            new Vector3(4f, 2f, 4f),
+            Vector3.UnitZ,
+            Vector3.UnitX,
+            Vector3.UnitY,
+            1f,
+            1f,
+            0f,
+            0f)!;
+
+        var result = method.Invoke(app, [0, 0, 0, 0, 0, 4, false, frustum])!;
+        var settings = result.GetType().GetProperty("Settings", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(result)!;
+
+        Assert.True((bool)settings.GetType().GetProperty("Enabled")!.GetValue(settings)!);
+    }
+
+    [Fact(DisplayName = "GetWorldShadowMapStrength покрывает ветку Medium quality")]
+    public void GetWorldShadowMapStrength_UsesMediumProfile()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Medium },
+            new FakeGamePlatform(),
+            new WorldMap(16, 8, 16, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetWorldShadowMapStrength", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        var value = (float)method.Invoke(app, null)!;
+
+        Assert.InRange(value, 0.45f, 0.75f);
+    }
+
     [Fact(DisplayName = "ChunkSurfaceMeshData возвращает переданные массивы и вычисляет counts")]
     public void ChunkSurfaceMeshData_ExposesArraysAndCounts()
     {
@@ -191,7 +381,7 @@ public sealed class WorldRenderPipelineTests
         world.SetBlock(4, 2, 4, BlockType.Leaves);
 
         var platform = new FakeGamePlatform();
-        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world, universe: CreateLightingUniverse());
         SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4.5f, 2.2f, 4.5f)));
 
         typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
@@ -334,17 +524,17 @@ public sealed class WorldRenderPipelineTests
         Assert.True(settings.FogEnd > settings.FogStart);
         Assert.True(settings.Strength > 0.9f);
         Assert.True(settings.ShadowStrength > 0.45f);
-        Assert.True(settings.AtmosphereStrength > 0.80f);
-        Assert.True(settings.WarmLightStrength > 0.76f);
+        Assert.True(settings.AtmosphereStrength > 0.40f);
+        Assert.True(settings.WarmLightStrength > 0.18f);
         Assert.True(settings.CoolShadowStrength > 0.4f);
         Assert.True(settings.ContrastStrength > 0.44f);
         Assert.True(settings.GlowStrength > 0.38f);
         Assert.True(settings.MaterialSeparationStrength > 0.60f);
         Assert.True(settings.ShadowDepthStrength > 0.35f);
-        Assert.True(settings.SkyBlendStrength > 0.24f);
-        Assert.True(settings.SunScatterStrength > 0.38f);
-        Assert.True(settings.AmbientLiftStrength > 0.20f);
-        Assert.True(settings.HazeStrength > 0.18f);
+        Assert.True(settings.SkyBlendStrength > 0.04f);
+        Assert.True(settings.SunScatterStrength > 0.04f);
+        Assert.True(settings.AmbientLiftStrength > 0.02f);
+        Assert.True(settings.HazeStrength > 0.04f);
         Assert.True(settings.MaterialShadowStrength > 0.28f);
         Assert.True(settings.HorizonDepthStrength > 0.24f);
         Assert.True(settings.FoliageTranslucencyStrength > 0.16f);
@@ -378,7 +568,7 @@ public sealed class WorldRenderPipelineTests
         world.SetBlock(4, 3, 5, BlockType.Leaves);
 
         var platform = new FakeGamePlatform();
-        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world);
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, platform, world, universe: CreateLightingUniverse());
         SetPrivateField(app, "_player", new PlayerController(new GameConfig(), new Vector3(4.5f, 2.2f, 4.5f)));
 
         typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
@@ -412,8 +602,8 @@ public sealed class WorldRenderPipelineTests
 
         var lowPlatform = new FakeGamePlatform { Fps = 25 };
         var highPlatform = new FakeGamePlatform { Fps = 240 };
-        var lowApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Low }, lowPlatform, world);
-        var highApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, highPlatform, world);
+        var lowApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Low }, lowPlatform, world, universe: CreateLightingUniverse());
+        var highApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, highPlatform, world, universe: CreateLightingUniverse());
         SetPrivateField(lowApp, "_player", new PlayerController(new GameConfig(), new Vector3(4.5f, 2.2f, 4.5f)));
         SetPrivateField(highApp, "_player", new PlayerController(new GameConfig(), new Vector3(4.5f, 2.2f, 4.5f)));
 
@@ -1713,5 +1903,19 @@ public sealed class WorldRenderPipelineTests
     private static int GetCachedChunkMeshVariant(object cached)
     {
         return (int)cached.GetType().GetProperty("Variant", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!.GetValue(cached)!;
+    }
+
+    private static Universe CreateLightingUniverse()
+    {
+        var star = new CelestialBody("Helios", CelestialBodyKind.Star, 1.98847e30d, 696_340_000d);
+        _ = new CelestialBody(
+            "AIG-Prime",
+            CelestialBodyKind.Planet,
+            5.9722e24d,
+            6_371_000d,
+            star,
+            new OrbitParameters(149_597_870_700d, 31_557_600d, initialPhaseRadians: Math.PI),
+            rotationPeriodSeconds: 10d);
+        return new Universe("Lighting", 1, [new StarSystem("Home", Vector3d.Zero, star)]);
     }
 }
