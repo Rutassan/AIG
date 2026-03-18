@@ -180,8 +180,66 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(14, platform.DrawCubeCalls);
+        Assert.Equal(19, platform.DrawCubeCalls);
         Assert.Contains(platform.DrawnCubes, cube => cube.Width <= 0.09f && cube.Color.R >= 200);
+        Assert.Equal(13, platform.DrawnCubeWires.Count);
+    }
+
+    [Fact(DisplayName = "GameApp DrawFirstPersonHand конфигурирует held-block pass")]
+    public void GameApp_DrawFirstPersonHand_ConfiguresHeldBlockPass()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+
+        SetPrivateField(app, "_cameraMode", GameCameraMode.FirstPerson);
+        SetPrivateField(app, "_state", GetPrivateAppStateValue("Playing"));
+        SetPrivateField(app, "_selectedHotbarIndex", 2);
+
+        var method = typeof(GameApp).GetMethod("DrawFirstPersonHand", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app,
+        [
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3.6f, 4f),
+                Target = new Vector3(4f, 3.6f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective
+            }
+        ]);
+
+        Assert.Equal(1, platform.ConfigureHeldBlockPassCalls);
+        var settings = Assert.Single(platform.HeldBlockPasses);
+        Assert.Equal(BlockType.Wood, settings.Block);
+        Assert.True(settings.WarmWireColor.A > settings.CoolWireColor.A);
+    }
+
+    [Fact(DisplayName = "GameApp DrawFirstPersonHand конфигурирует object pass")]
+    public void GameApp_DrawFirstPersonHand_ConfiguresObjectPass()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+
+        SetPrivateField(app, "_cameraMode", GameCameraMode.FirstPerson);
+        SetPrivateField(app, "_state", GetPrivateAppStateValue("Playing"));
+
+        var method = typeof(GameApp).GetMethod("DrawFirstPersonHand", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app,
+        [
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3.6f, 4f),
+                Target = new Vector3(4f, 3.6f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective
+            }
+        ]);
+
+        Assert.Equal(1, platform.ConfigureObjectPassCalls);
+        var settings = Assert.Single(platform.ObjectPasses);
+        Assert.True(settings.HighlightColor.A > 0);
+        Assert.True(settings.WarmRimColor.R >= settings.HighlightColor.R || settings.WarmRimColor.G > 0);
     }
 
     [Fact(DisplayName = "GameApp DrawFirstPersonHand имеет fallback для почти вертикального взгляда")]
@@ -206,7 +264,8 @@ public sealed class CameraAndVisualTests
             }
         ]);
 
-        Assert.Equal(14, platform.DrawCubeCalls);
+        Assert.Equal(19, platform.DrawCubeCalls);
+        Assert.Equal(13, platform.DrawnCubeWires.Count);
     }
 
     [Fact(DisplayName = "DrawSunShaftOverlay безопасно выходит при нулевом размере экрана")]
@@ -237,6 +296,180 @@ public sealed class CameraAndVisualTests
         ]);
 
         Assert.Empty(platform.DrawnRectangles);
+    }
+
+    [Fact(DisplayName = "DrawSkyGradient конфигурирует sky pass")]
+    public void DrawSkyGradient_ConfiguresSkyPass()
+    {
+        var platform = new FakeGamePlatform { ScreenWidth = 1280, ScreenHeight = 720 };
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("DrawSkyGradient", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method!.Invoke(app,
+        [
+            new CameraViewBuilder.CameraView(
+                new Camera3D
+                {
+                    Position = new Vector3(4f, 3.6f, 4f),
+                    Target = new Vector3(4f, 3.6f, 3f),
+                    Up = Vector3.UnitY,
+                    Projection = CameraProjection.Perspective
+                },
+                new Vector3(4f, 3.6f, 4f),
+                new Vector3(0f, 0f, -1f))
+        ]);
+
+        Assert.Equal(1, platform.ConfigureSkyPassCalls);
+        var settings = Assert.Single(platform.SkyPasses);
+        Assert.True(settings.HorizonY > 0);
+        Assert.True(settings.CloudStrength > 0f);
+        Assert.True(settings.RidgeStrength > 0f);
+    }
+
+    [Fact(DisplayName = "ApplyVisualSurfaceStyle покрывает ветку листвы")]
+    public void ApplyVisualSurfaceStyle_CoversLeavesBranch()
+    {
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("ApplyVisualSurfaceStyle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var surface = new WorldMap.SurfaceBlock(2, 1, 2, BlockType.Leaves, 6, true, 2);
+
+        var color = Assert.IsType<Color>(method!.Invoke(app, [new Color(82, 130, 74, 255), surface, 6f])!);
+
+        Assert.NotEqual(0, color.A);
+    }
+
+    [Fact(DisplayName = "ApplyVisualSurfaceStyle покрывает ветку non-top-visible")]
+    public void ApplyVisualSurfaceStyle_CoversNonTopVisibleBranch()
+    {
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("ApplyVisualSurfaceStyle", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var surface = new WorldMap.SurfaceBlock(2, 1, 2, BlockType.Stone, 4, false, 0, AmbientOcclusion: 1, ReliefExposure: 1);
+
+        var color = Assert.IsType<Color>(method!.Invoke(app, [new Color(134, 129, 121, 255), surface, 6f])!);
+
+        Assert.NotEqual(0, color.A);
+    }
+
+    [Fact(DisplayName = "GetLeafDensityDelta уменьшает плотность для non-top-visible листвы")]
+    public void GetLeafDensityDelta_ReturnsMinusTwo_ForNonTopVisibleLeaf()
+    {
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, new FakeGamePlatform(), new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("GetLeafDensityDelta", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var surface = new WorldMap.SurfaceBlock(2, 1, 2, BlockType.Leaves, 4, false, 0);
+
+        var value = Assert.IsType<int>(method!.Invoke(app, [surface, 12f])!);
+
+        Assert.Equal(-2, value);
+    }
+
+    [Fact(DisplayName = "DrawScreenFogOverlay конфигурирует screen-space pass")]
+    public void DrawScreenFogOverlay_ConfiguresScreenSpacePass()
+    {
+        var platform = new FakeGamePlatform { ScreenWidth = 1280, ScreenHeight = 720 };
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("DrawScreenFogOverlay", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        method!.Invoke(app,
+        [
+            new CameraViewBuilder.CameraView(
+                new Camera3D
+                {
+                    Position = new Vector3(4f, 3.6f, 4f),
+                    Target = new Vector3(4f, 3.6f, 3f),
+                    Up = Vector3.UnitY,
+                    Projection = CameraProjection.Perspective
+                },
+                new Vector3(4f, 3.6f, 4f),
+                new Vector3(0f, 0f, -1f))
+        ]);
+
+        Assert.Equal(1, platform.ConfigureScreenSpacePassCalls);
+        var settings = Assert.Single(platform.ScreenSpacePasses);
+        Assert.True(settings.HorizonY > 0);
+        Assert.True(settings.Strength > 0f);
+        Assert.False(settings.DeviceOpen);
+    }
+
+    [Fact(DisplayName = "DrawCinematicPostProcessOverlay конфигурирует final composite pass")]
+    public void DrawCinematicPostProcessOverlay_ConfiguresFinalCompositePass()
+    {
+        var platform = new FakeGamePlatform { ScreenWidth = 1280, ScreenHeight = 720 };
+        var app = new GameApp(new GameConfig { FullscreenByDefault = false }, platform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var method = typeof(GameApp).GetMethod("DrawCinematicPostProcessOverlay", BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(CameraViewBuilder.CameraView)], null);
+        Assert.NotNull(method);
+
+        method!.Invoke(app,
+        [
+            new CameraViewBuilder.CameraView(
+                new Camera3D
+                {
+                    Position = new Vector3(4f, 3.6f, 4f),
+                    Target = new Vector3(4f, 3.6f, 3f),
+                    Up = Vector3.UnitY,
+                    Projection = CameraProjection.Perspective
+                },
+                new Vector3(4f, 3.6f, 4f),
+                new Vector3(0f, 0f, -1f))
+        ]);
+
+        Assert.Equal(1, platform.ConfigureFinalCompositePassCalls);
+        var settings = Assert.Single(platform.FinalCompositePasses);
+        Assert.True(settings.BloomStrength > 0f);
+        Assert.True(settings.AtmosphereStrength > 0f);
+        Assert.True(settings.VignetteStrength > 0f);
+        Assert.True(settings.FogBandStrength < 1f);
+    }
+
+    [Fact(DisplayName = "GameApp final composite больше не плавает от текущего FPS")]
+    public void GameApp_FinalCompositeSettings_AreStableAcrossFps()
+    {
+        var lowFpsPlatform = new FakeGamePlatform { ScreenWidth = 1280, ScreenHeight = 720, Fps = 30 };
+        var highFpsPlatform = new FakeGamePlatform { ScreenWidth = 1280, ScreenHeight = 720, Fps = 240 };
+        var view = new CameraViewBuilder.CameraView(
+            new Camera3D
+            {
+                Position = new Vector3(4f, 3.6f, 4f),
+                Target = new Vector3(4f, 3.6f, 3f),
+                Up = Vector3.UnitY,
+                Projection = CameraProjection.Perspective
+            },
+            new Vector3(4f, 3.6f, 4f),
+            new Vector3(0f, 0f, -1f));
+        var method = typeof(GameApp).GetMethod("BuildFinalCompositePassSettings", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var lowFpsApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, lowFpsPlatform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var highFpsApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High }, highFpsPlatform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+
+        var lowSettings = (FinalCompositePassSettings)method!.Invoke(lowFpsApp, [view])!;
+        var highSettings = (FinalCompositePassSettings)method.Invoke(highFpsApp, [view])!;
+
+        Assert.Equal(lowSettings.FogBandStrength, highSettings.FogBandStrength);
+        Assert.Equal(lowSettings.BloomStrength, highSettings.BloomStrength);
+        Assert.Equal(lowSettings.AtmosphereStrength, highSettings.AtmosphereStrength);
+        Assert.Equal(lowSettings.VignetteStrength, highSettings.VignetteStrength);
+    }
+
+    [Fact(DisplayName = "GameApp far-world coherence больше не зависит от текущего FPS")]
+    public void GameApp_GetFarWorldCoherenceStrength_IsStableAcrossFps()
+    {
+        var lowFpsPlatform = new FakeGamePlatform { Fps = 28 };
+        var highFpsPlatform = new FakeGamePlatform { Fps = 240 };
+        var method = typeof(GameApp).GetMethod("GetFarWorldCoherenceStrength", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var lowFpsApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Medium }, lowFpsPlatform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+        var highFpsApp = new GameApp(new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.Medium }, highFpsPlatform, new WorldMap(8, 8, 8, chunkSize: 8, seed: 0));
+
+        var lowCoherence = (float)method!.Invoke(lowFpsApp, null)!;
+        var highCoherence = (float)method.Invoke(highFpsApp, null)!;
+
+        Assert.Equal(lowCoherence, highCoherence);
     }
 
     [Fact(DisplayName = "GameApp DrawFirstPersonHand при screen-space браслете не рисует вторую 3D-руку")]
@@ -720,6 +953,38 @@ public sealed class CameraAndVisualTests
         Assert.NotEqual(sunlitColor.B, denseColor.B);
     }
 
+    [Fact(DisplayName = "ApplyLeafSurfaceStyle покрывает ветку non-top-visible листвы")]
+    public void ApplyLeafSurfaceStyle_CoversNonTopVisibleLeafBranch()
+    {
+        var app = new GameApp(
+            new GameConfig
+            {
+                FullscreenByDefault = false,
+                FogEnabled = false,
+                GraphicsQuality = GraphicsQuality.High
+            },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod(
+            "ApplyLeafSurfaceStyle",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(Color), typeof(WorldMap.SurfaceBlock), typeof(int), typeof(float), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(method);
+
+        var baseColor = new Color(84, 132, 68, 255);
+        var topVisible = new WorldMap.SurfaceBlock(10, 6, 10, BlockType.Leaves, VisibleFaces: 4, TopVisible: true, SkyExposure: 4, AmbientOcclusion: 3, ReliefExposure: 2, SunVisibility: 2);
+        var sideLeaf = new WorldMap.SurfaceBlock(10, 6, 10, BlockType.Leaves, VisibleFaces: 3, TopVisible: false, SkyExposure: 2, AmbientOcclusion: 5, ReliefExposure: 1, SunVisibility: 1);
+
+        var topColor = (Color)method!.Invoke(app, [baseColor, topVisible, 2, 0.5f, 6f])!;
+        var sideColor = (Color)method.Invoke(app, [baseColor, sideLeaf, 2, 0.5f, 6f])!;
+
+        Assert.NotEqual(topColor.G, sideColor.G);
+        Assert.NotEqual(topColor.B, sideColor.B);
+    }
+
     [Fact(DisplayName = "GetDecorativeVegetationKind покрывает ветки quality, distance и block guards")]
     public void GetDecorativeVegetationKind_CoversQualityAndGuards()
     {
@@ -775,9 +1040,60 @@ public sealed class CameraAndVisualTests
         Assert.Equal("Bush", method.Invoke(highApp, [FindSurface(highApp, "Bush", 3f), 3f])!.ToString());
         Assert.Equal("Flower", method.Invoke(highApp, [FindSurface(highApp, "Flower", 3f), 3f])!.ToString());
         Assert.Equal("Grass", method.Invoke(highApp, [FindSurface(highApp, "Grass", 3f), 3f])!.ToString());
+        for (var x = 0; x < 18; x++)
+        {
+            for (var z = 0; z < 18; z++)
+            {
+                var reliefSurface = new WorldMap.SurfaceBlock(x, 2, z, BlockType.Grass, VisibleFaces: 4, TopVisible: true, SkyExposure: 4, AmbientOcclusion: 0, ReliefExposure: 4);
+                var reliefKind = method.Invoke(highApp, [reliefSurface, 3f])!.ToString();
+                if (reliefKind is "Bush" or "Flower" or "Grass")
+                {
+                    Assert.NotEqual("None", reliefKind);
+                    goto ReliefCovered;
+                }
+            }
+        }
+
+        throw new InvalidOperationException("Не нашли high-quality поверхность для ветки ReliefExposure >= 4.");
+
+    ReliefCovered:
         Assert.Equal("Flower", method.Invoke(mediumApp, [FindSurface(mediumApp, "Flower", 3f), 3f])!.ToString());
         Assert.Equal("Grass", method.Invoke(mediumApp, [FindSurface(mediumApp, "Grass", 3f), 3f])!.ToString());
         Assert.Equal("Grass", method.Invoke(lowApp, [FindSurface(lowApp, "Grass", 3f), 3f])!.ToString());
+    }
+
+    [Fact(DisplayName = "GetDecorativeVegetationKind покрывает fade+dither ветку на дальней границе")]
+    public void GetDecorativeVegetationKind_CoversFadeDitherBranch()
+    {
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false, GraphicsQuality = GraphicsQuality.High, FogEnabled = false },
+            new FakeGamePlatform(),
+            new WorldMap(16, 16, 16, chunkSize: 8, seed: 0));
+
+        var method = typeof(GameApp).GetMethod(
+            "GetDecorativeVegetationKind",
+            BindingFlags.Instance | BindingFlags.NonPublic,
+            binder: null,
+            [typeof(WorldMap.SurfaceBlock), typeof(float)],
+            modifiers: null);
+        Assert.NotNull(method);
+
+        for (var x = 0; x < 18; x++)
+        {
+            for (var z = 0; z < 18; z++)
+            {
+                var surface = new WorldMap.SurfaceBlock(x, 2, z, BlockType.Grass, VisibleFaces: 4, TopVisible: true, SkyExposure: 4);
+                var nearKind = method!.Invoke(app, [surface, 3f])!.ToString();
+                var farKind = method.Invoke(app, [surface, 9.6f])!.ToString();
+                if (nearKind is "Bush" or "Flower" or "Grass" && farKind == "None")
+                {
+                    Assert.Equal("None", farKind);
+                    return;
+                }
+            }
+        }
+
+        throw new Xunit.Sdk.XunitException("Не найдена поверхность, которая попадает в fade+dither ветку декоративной растительности.");
     }
 
     [Fact(DisplayName = "DrawDecorativeVegetationAccent рисует траву, цветок и куст без лишнего рендера")]
@@ -1085,7 +1401,7 @@ public sealed class CameraAndVisualTests
             new Vector3(4f, 3f, 4f),
             Vector3.UnitZ);
 
-        method!.Invoke(app, [view]);
+        method!.Invoke(app, [view, 1f]);
 
         Assert.Equal(0, platform.DrawRectangleCalls);
     }
@@ -1118,7 +1434,7 @@ public sealed class CameraAndVisualTests
             new Vector3(4f, 3f, 4f),
             Vector3.UnitZ);
 
-        method!.Invoke(app, [view]);
+        method!.Invoke(app, [view, 1f]);
 
         Assert.Equal(0, platform.DrawRectangleCalls);
     }
@@ -1151,7 +1467,7 @@ public sealed class CameraAndVisualTests
             new Vector3(4f, 3f, 4f),
             Vector3.UnitZ);
 
-        method!.Invoke(app, [view]);
+        method!.Invoke(app, [view, 1f]);
 
         Assert.Equal(0, platform.DrawRectangleCalls);
     }
@@ -1298,13 +1614,31 @@ public sealed class CameraAndVisualTests
 
         method!.Invoke(app, [towardSunView]);
 
-        Assert.True(platform.DrawRectangleCalls >= 17);
+        Assert.True(platform.DrawRectangleCalls >= 35);
         Assert.Contains(platform.DrawnRectangles, rect => rect.Width >= 220 && rect.Color.R >= 250 && rect.Color.G >= 200);
         Assert.Contains(platform.DrawnRectangles, rect => rect.X == 0 && rect.Height == platform.ScreenHeight);
         Assert.Contains(platform.DrawnRectangles, rect => rect.Y == platform.ScreenHeight - rect.Height && rect.Width == platform.ScreenWidth);
-        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 255 && rect.Color.G == 216);
-        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 255 && rect.Color.G == 206);
-        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 86 && rect.Color.G == 104);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 240 && rect.Color.G >= 198 && rect.Color.B <= 190);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 190 && rect.Color.G >= 208 && rect.Color.B >= 228);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R <= 90 && rect.Color.G <= 110 && rect.Color.B >= 108);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 220 && rect.Color.G >= 200 && rect.Color.B >= 170 && rect.Color.B <= 180);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 90 && rect.Color.R <= 100 && rect.Color.G >= 110 && rect.Color.G <= 120);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 190 && rect.Color.R <= 200 && rect.Color.G >= 206 && rect.Color.G <= 212);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 120 && rect.Color.R <= 126 && rect.Color.G >= 110 && rect.Color.G <= 114);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 170 && rect.Color.R <= 178 && rect.Color.G >= 194 && rect.Color.G <= 200);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R >= 70 && rect.Color.R <= 78 && rect.Color.G >= 86 && rect.Color.G <= 90);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 172 && rect.Color.G == 196);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 108 && rect.Color.G == 94);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 154 && rect.Color.G == 176);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 94 && rect.Color.G == 88);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 214 && rect.Color.G == 224);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 108 && rect.Color.G == 122);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 196 && rect.Color.G == 210);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 124 && rect.Color.G == 132);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 208 && rect.Color.G == 218);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 132 && rect.Color.G == 140);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 200 && rect.Color.G == 212);
+        Assert.Contains(platform.DrawnRectangles, rect => rect.Width == platform.ScreenWidth && rect.Color.R == 126 && rect.Color.G == 136);
     }
 
     [Fact(DisplayName = "DrawCinematicSunBloomOverlay завершает работу при невалидном viewport")]

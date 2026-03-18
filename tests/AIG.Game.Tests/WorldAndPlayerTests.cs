@@ -115,6 +115,57 @@ public sealed class WorldAndPlayerTests
         Assert.Equal(0, world.LoadedChunkCount);
     }
 
+    [Fact(DisplayName = "Chunk residency удерживает дальний чанк до истечения TTL")]
+    public void World_ChunkResidency_KeepsFarChunkUntilExpiry()
+    {
+        var world = new WorldMap(width: 96, height: 32, depth: 96, chunkSize: 16, seed: 777);
+        var nearCenter = new Vector3(8f, 0f, 8f);
+        var farCenter = new Vector3(40f, 0f, 8f);
+
+        world.EnsureChunksAround(nearCenter, radiusInChunks: 0);
+        world.EnsureChunksAround(farCenter, radiusInChunks: 0);
+        Assert.True(world.IsChunkLoaded(0, 0));
+        Assert.True(world.IsChunkLoaded(2, 0));
+
+        world.TouchChunkResidency(farCenter, radiusInChunks: 0, ttlFrames: 2);
+        world.UnloadFarChunks(nearCenter, keepRadiusInChunks: 0);
+        Assert.True(world.IsChunkLoaded(2, 0));
+
+        world.AdvanceChunkResidency(1);
+        world.UnloadFarChunks(nearCenter, keepRadiusInChunks: 0);
+        Assert.True(world.IsChunkLoaded(2, 0));
+
+        world.AdvanceChunkResidency(1);
+        world.UnloadFarChunks(nearCenter, keepRadiusInChunks: 0);
+        Assert.False(world.IsChunkLoaded(2, 0));
+    }
+
+    [Fact(DisplayName = "Chunk residency helpers корректно обрабатывают пустой мир и невалидные параметры")]
+    public void World_ChunkResidencyHelpers_HandleEmptyAndInvalidInput()
+    {
+        var emptyWorld = new WorldMap(width: 0, height: 8, depth: 0, chunkSize: 8, seed: 0);
+        emptyWorld.TouchChunkResidency(new Vector3(0f, 0f, 0f), radiusInChunks: 0, ttlFrames: 5);
+        emptyWorld.TouchChunkResidency(new Vector3(0f, 0f, 0f), radiusInChunks: -1, ttlFrames: 5);
+        emptyWorld.TouchChunkResidency(new Vector3(0f, 0f, 0f), radiusInChunks: 0, ttlFrames: 0);
+        emptyWorld.AdvanceChunkResidency(0);
+        emptyWorld.AdvanceChunkResidency(1);
+
+        var world = new WorldMap(width: 32, height: 16, depth: 32, chunkSize: 8, seed: 0);
+        world.EnsureChunksAround(new Vector3(4f, 0f, 4f), radiusInChunks: 0);
+        var residencyField = typeof(WorldMap).GetField("_chunkResidencyTtl", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(residencyField);
+        var residency = (Dictionary<(int ChunkX, int ChunkZ), int>)residencyField!.GetValue(world)!;
+
+        world.TouchChunkResidency(new Vector3(4f, 0f, 4f), radiusInChunks: 0, ttlFrames: 3);
+        Assert.Equal(3, residency[(0, 0)]);
+
+        world.TouchChunkResidency(new Vector3(4f, 0f, 4f), radiusInChunks: 0, ttlFrames: 1);
+        Assert.Equal(3, residency[(0, 0)]);
+
+        world.AdvanceChunkResidency(0);
+        Assert.Equal(3, residency[(0, 0)]);
+    }
+
     [Fact(DisplayName = "Budgeted-стриминг чанков догружает мир по лимиту и не превышает бюджет")]
     public void World_EnsureChunksAroundBudgeted_LoadsChunksIncrementally()
     {
@@ -679,6 +730,373 @@ public sealed class WorldAndPlayerTests
         Assert.Equal(blockedVisibility, block.SunVisibility);
     }
 
+    [Fact(DisplayName = "Кэш поверхностей считает daylight для комнаты с отверстием и без него")]
+    public void World_SurfaceCache_ComputesDaylightPropagation()
+    {
+        var world = new WorldMap(width: 24, height: 10, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        BuildRoom(world, originX: 2, originZ: 2, roofOpeningX: 4, roofOpeningZ: 4);
+        BuildRoom(world, originX: 12, originZ: 12, roofOpeningX: -1, roofOpeningZ: -1);
+        world.SetBlock(4, 2, 4, BlockType.Stone);
+        world.SetBlock(14, 2, 14, BlockType.Stone);
+
+        world.EnsureChunksAround(new Vector3(8f, 3f, 8f), radiusInChunks: 3);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(8f, 3f, 8f), maxChunks: 16);
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var litChunk));
+        Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var darkChunk));
+
+        var litSurface = Assert.Single(litChunk.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        var darkSurface = Assert.Single(darkChunk.Where(s => s.X == 14 && s.Y == 2 && s.Z == 14));
+
+        Assert.True(litSurface.Daylight > 0);
+        Assert.Equal(0, darkSurface.Daylight);
+    }
+
+    [Fact(DisplayName = "Закрытие отверстия сверху убирает daylight из шахты")]
+    public void World_SurfaceCache_RemovesDaylight_WhenRoofOpeningGetsClosed()
+    {
+        var world = new WorldMap(width: 24, height: 10, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        BuildRoom(world, originX: 2, originZ: 2, roofOpeningX: 4, roofOpeningZ: 4);
+        world.SetBlock(4, 2, 4, BlockType.Stone);
+
+        world.EnsureChunksAround(new Vector3(8f, 3f, 8f), radiusInChunks: 2);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(8f, 3f, 8f), maxChunks: 16);
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var openChunk));
+        var litSurface = Assert.Single(openChunk.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.True(litSurface.Daylight > 0);
+
+        world.SetBlock(4, 4, 4, BlockType.Stone);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(8f, 3f, 8f), maxChunks: 16);
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var closedChunk));
+        var darkSurface = Assert.Single(closedChunk.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.Equal(0, darkSurface.Daylight);
+    }
+
+    [Fact(DisplayName = "LocalDaylightField.SetMax покрывает границы и отказ от ослабления значения")]
+    public void World_LocalDaylightField_SetMax_CoversBoundsAndClamp()
+    {
+        var fieldType = typeof(WorldMap).GetNestedType("LocalDaylightField", BindingFlags.NonPublic);
+        Assert.NotNull(fieldType);
+        var field = Activator.CreateInstance(fieldType!, 1, 2, 1, 2, 4);
+        var setMax = fieldType.GetMethod("SetMax", BindingFlags.Instance | BindingFlags.Public);
+        var get = fieldType.GetMethod("Get", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(setMax);
+        Assert.NotNull(get);
+
+        Assert.False((bool)setMax!.Invoke(field, [0, 0, 0, 5])!);
+        Assert.True((bool)setMax.Invoke(field, [1, 0, 1, WorldMap.MaxDaylight + 4])!);
+        Assert.False((bool)setMax.Invoke(field, [1, 0, 1, 7])!);
+        Assert.Equal(WorldMap.MaxDaylight, (int)get!.Invoke(field, [1, 0, 1])!);
+        Assert.Equal(0, (int)get.Invoke(field, [9, 0, 9])!);
+    }
+
+    [Fact(DisplayName = "BuildDaylightField распространяет skylight по длинному коридору и упирается в крышу")]
+    public void World_BuildDaylightField_PropagatesAlongCorridor()
+    {
+        var world = new WorldMap(width: 32, height: 6, depth: 32, chunkSize: 16, seed: 0);
+
+        var buildMethod = typeof(WorldMap).GetMethod("BuildDaylightField", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(buildMethod);
+        Func<int, int, int, bool> isSolid = (x, y, z) =>
+        {
+            if (!world.IsInside(x, y, z))
+            {
+                return false;
+            }
+
+            if (y > 4)
+            {
+                return false;
+            }
+
+            if (z != 2)
+            {
+                return true;
+            }
+
+            if (x == 1)
+            {
+                return false;
+            }
+
+            if (x >= 2 && x <= 15)
+            {
+                return y == 4;
+            }
+
+            return true;
+        };
+
+        var field = buildMethod!.Invoke(world, [0, 0, isSolid])!;
+        var fieldType = field.GetType();
+        var get = fieldType.GetMethod("Get", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(get);
+
+        var litNearOpening = (int)get!.Invoke(field, [2, 3, 2])!;
+        var litFarCorridor = (int)get.Invoke(field, [15, 3, 2])!;
+        var blockedRoof = (int)get.Invoke(field, [2, 3, 1])!;
+
+        Assert.Equal(WorldMap.MaxDaylight - 1, litNearOpening);
+        Assert.Equal(1, litFarCorridor);
+        Assert.Equal(0, blockedRoof);
+    }
+
+    [Fact(DisplayName = "Кэш поверхностей считает local light в закрытой комнате от явного источника света")]
+    public void World_SurfaceCache_ComputesLocalLightPropagation()
+    {
+        var world = new WorldMap(width: 24, height: 10, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        BuildRoom(world, originX: 12, originZ: 12, roofOpeningX: -1, roofOpeningZ: -1);
+        world.SetBlock(14, 2, 14, BlockType.Stone);
+        world.SetBlock(13, 2, 14, BlockType.Stone);
+        world.SetLocalLightSource(14, 3, 13, WorldMap.MaxLocalLight);
+
+        world.EnsureChunksAround(new Vector3(16f, 3f, 16f), radiusInChunks: 2);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(16f, 3f, 16f), maxChunks: 16);
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var surfaces));
+        var nearEmitter = Assert.Single(surfaces.Where(s => s.X == 14 && s.Y == 2 && s.Z == 14));
+        var fartherFromEmitter = Assert.Single(surfaces.Where(s => s.X == 13 && s.Y == 2 && s.Z == 14));
+
+        Assert.Equal(0, nearEmitter.Daylight);
+        Assert.True(nearEmitter.LocalLight > 0);
+        Assert.True(nearEmitter.LocalLight >= fartherFromEmitter.LocalLight);
+    }
+
+    [Fact(DisplayName = "Кэш поверхностей согласует local light через границу чанков")]
+    public void World_SurfaceCache_KeepsLocalLightConsistentAcrossChunkBoundary()
+    {
+        var world = new WorldMap(width: 24, height: 8, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        world.SetBlock(7, 2, 8, BlockType.Stone);
+        world.SetBlock(8, 2, 8, BlockType.Stone);
+        world.SetLocalLightSource(8, 3, 8, WorldMap.MaxLocalLight);
+
+        world.EnsureChunksAround(new Vector3(8.5f, 3f, 8.5f), radiusInChunks: 2);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(8.5f, 3f, 8.5f), maxChunks: 16);
+
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 1, out var leftChunk));
+        Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var rightChunk));
+
+        var leftSurface = Assert.Single(leftChunk.Where(s => s.X == 7 && s.Y == 2 && s.Z == 8));
+        var rightSurface = Assert.Single(rightChunk.Where(s => s.X == 8 && s.Y == 2 && s.Z == 8));
+
+        Assert.True(leftSurface.LocalLight > 0);
+        Assert.True(rightSurface.LocalLight > 0);
+        Assert.InRange(Math.Abs(leftSurface.LocalLight - rightSurface.LocalLight), 0, 2);
+    }
+
+    [Fact(DisplayName = "BuildLocalLightField распространяет локальный свет по воздуху и не проходит сквозь стены")]
+    public void World_BuildLocalLightField_PropagatesAndStopsAtWalls()
+    {
+        var world = new WorldMap(width: 32, height: 6, depth: 32, chunkSize: 16, seed: 0);
+
+        var buildMethod = typeof(WorldMap).GetMethod("BuildLocalLightField", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(buildMethod);
+        Func<int, int, int, bool> isSolid = (x, y, z) =>
+        {
+            if (!world.IsInside(x, y, z))
+            {
+                return false;
+            }
+
+            if (z != 2)
+            {
+                return true;
+            }
+
+            return x == 10;
+        };
+
+        Func<int, int, int, int> emission = (x, y, z) => x == 3 && y == 2 && z == 2 ? WorldMap.MaxLocalLight : 0;
+
+        var field = buildMethod!.Invoke(world, [0, 0, isSolid, emission])!;
+        var fieldType = field.GetType();
+        var get = fieldType.GetMethod("Get", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(get);
+
+        var atEmitter = (int)get!.Invoke(field, [3, 2, 2])!;
+        var alongCorridor = (int)get.Invoke(field, [7, 2, 2])!;
+        var behindWall = (int)get.Invoke(field, [11, 2, 2])!;
+        var outsideCorridor = (int)get.Invoke(field, [7, 2, 1])!;
+
+        Assert.Equal(WorldMap.MaxLocalLight, atEmitter);
+        Assert.Equal(WorldMap.MaxLocalLight - 4, alongCorridor);
+        Assert.Equal(0, behindWall);
+        Assert.Equal(0, outsideCorridor);
+    }
+
+    [Fact(DisplayName = "LocalLightField.SetMax покрывает границы и отказ от ослабления значения")]
+    public void World_LocalLightField_SetMax_CoversBoundsAndClamp()
+    {
+        var fieldType = typeof(WorldMap).GetNestedType("LocalLightField", BindingFlags.NonPublic);
+        Assert.NotNull(fieldType);
+        var field = Activator.CreateInstance(fieldType!, 1, 2, 1, 2, 4);
+        var setMax = fieldType.GetMethod("SetMax", BindingFlags.Instance | BindingFlags.Public);
+        var get = fieldType.GetMethod("Get", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(setMax);
+        Assert.NotNull(get);
+
+        Assert.False((bool)setMax!.Invoke(field, [0, 0, 0, 5])!);
+        Assert.True((bool)setMax.Invoke(field, [1, 0, 1, WorldMap.MaxLocalLight + 4])!);
+        Assert.False((bool)setMax.Invoke(field, [1, 0, 1, 7])!);
+        Assert.Equal(WorldMap.MaxLocalLight, (int)get!.Invoke(field, [1, 0, 1])!);
+        Assert.Equal(0, (int)get.Invoke(field, [9, 0, 9])!);
+    }
+
+    [Fact(DisplayName = "SetLocalLightSource помечает чанки грязными и снимет свет при удалении источника")]
+    public void World_SetLocalLightSource_RefreshesSurfaceCache()
+    {
+        var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        BuildRoom(world, originX: 2, originZ: 2, roofOpeningX: -1, roofOpeningZ: -1);
+        world.SetBlock(4, 2, 4, BlockType.Stone);
+        world.EnsureChunksAround(new Vector3(4.5f, 3f, 4.5f), radiusInChunks: 1);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 3f, 4.5f), maxChunks: 16);
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var darkCache));
+        var darkSurface = Assert.Single(darkCache.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.Equal(0, darkSurface.LocalLight);
+
+        world.SetLocalLightSource(4, 3, 3, WorldMap.MaxLocalLight);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 3f, 4.5f), maxChunks: 16);
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var litCache));
+        var litSurface = Assert.Single(litCache.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.True(litSurface.LocalLight > 0);
+
+        world.SetLocalLightSource(4, 3, 3, 0);
+        _ = world.RebuildDirtyChunkSurfaces(new Vector3(4.5f, 3f, 4.5f), maxChunks: 16);
+        Assert.True(world.TryGetChunkSurfaceBlocks(0, 0, out var clearedCache));
+        var clearedSurface = Assert.Single(clearedCache.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.Equal(0, clearedSurface.LocalLight);
+    }
+
+    [Fact(DisplayName = "API локального света обрабатывает выход за границы и отсутствие источника")]
+    public void World_LocalLightApi_HandlesBoundsAndMissingSource()
+    {
+        var world = new WorldMap(width: 8, height: 8, depth: 8, chunkSize: 8, seed: 0);
+
+        world.SetLocalLightSource(-1, 2, 2, WorldMap.MaxLocalLight);
+        world.SetLocalLightSource(2, 2, 2, WorldMap.MaxLocalLight);
+
+        Assert.Equal(0, world.GetLocalLightSource(-1, 2, 2));
+        Assert.Equal(WorldMap.MaxLocalLight, world.GetLocalLightSource(2, 2, 2));
+        Assert.Equal(0, world.GetLocalLightSource(3, 2, 2));
+    }
+
+    [Fact(DisplayName = "Snapshot local light и snapshot rebuild читают только локальные источники чанка")]
+    public void World_RebuildChunkSurfaceBlocksFromSnapshot_UsesLocalLightSnapshot()
+    {
+        var world = new WorldMap(width: 24, height: 8, depth: 24, chunkSize: 8, seed: 0);
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        BuildRoom(world, originX: 2, originZ: 2, roofOpeningX: -1, roofOpeningZ: -1);
+        world.SetBlock(4, 2, 4, BlockType.Stone);
+        world.SetLocalLightSource(4, 3, 3, WorldMap.MaxLocalLight);
+        world.SetLocalLightSource(20, 3, 20, WorldMap.MaxLocalLight);
+
+        world.EnsureChunksAround(new Vector3(4.5f, 3f, 4.5f), radiusInChunks: 2);
+
+        var snapshotMethod = typeof(WorldMap).GetMethod("TryCreateSurfaceSnapshot", BindingFlags.Instance | BindingFlags.NonPublic);
+        var rebuildMethod = typeof(WorldMap).GetMethod("RebuildChunkSurfaceBlocksFromSnapshot", BindingFlags.Instance | BindingFlags.NonPublic);
+        var lightSnapshotMethod = typeof(WorldMap).GetMethod("SnapshotLocalLightSourcesForChunk", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(snapshotMethod);
+        Assert.NotNull(rebuildMethod);
+        Assert.NotNull(lightSnapshotMethod);
+
+        var args = new object?[] { 0, 0, null };
+        Assert.True((bool)snapshotMethod!.Invoke(world, args)!);
+        var snapshot = Assert.IsAssignableFrom<IReadOnlyDictionary<(int ChunkX, int ChunkZ), BlockType[,,]>>(args[2]);
+
+        var rebuilt = Assert.IsAssignableFrom<IReadOnlyList<WorldMap.SurfaceBlock>>(rebuildMethod!.Invoke(world, [0, 0, snapshot])!);
+        var litSurface = Assert.Single(rebuilt.Where(s => s.X == 4 && s.Y == 2 && s.Z == 4));
+        Assert.True(litSurface.LocalLight > 0);
+
+        var localSnapshot = Assert.IsType<Dictionary<(int X, int Y, int Z), byte>>(lightSnapshotMethod!.Invoke(world, [0, 0])!);
+        Assert.Contains((4, 3, 3), localSnapshot.Keys);
+        Assert.DoesNotContain((20, 3, 20), localSnapshot.Keys);
+    }
+
+    [Fact(DisplayName = "BuildLocalLightField не распространяет источник света с уровнем 1 дальше своей клетки")]
+    public void World_BuildLocalLightField_DoesNotSpreadUnitLight()
+    {
+        var world = new WorldMap(width: 16, height: 6, depth: 16, chunkSize: 8, seed: 0);
+        var buildMethod = typeof(WorldMap).GetMethod("BuildLocalLightField", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(buildMethod);
+
+        Func<int, int, int, bool> isSolid = (_, _, _) => false;
+        Func<int, int, int, int> emission = (x, y, z) => x == 2 && y == 2 && z == 2 ? 1 : 0;
+
+        var field = buildMethod!.Invoke(world, [0, 0, isSolid, emission])!;
+        var get = field.GetType().GetMethod("Get", BindingFlags.Instance | BindingFlags.Public);
+        Assert.NotNull(get);
+
+        Assert.Equal(1, (int)get!.Invoke(field, [2, 2, 2])!);
+        Assert.Equal(0, (int)get.Invoke(field, [3, 2, 2])!);
+    }
+
     [Fact(DisplayName = "Кэш поверхностей чанка не скрывает старую картинку до пересборки и обновляется после изменения блока")]
     public void World_SurfaceCache_RebuildsInBudgetAndRefreshesAfterSetBlock()
     {
@@ -705,6 +1123,45 @@ public sealed class WorldAndPlayerTests
 
         Assert.True(world.TryGetChunkSurfaceBlocks(1, 1, out var refreshedSurface));
         Assert.NotEmpty(refreshedSurface);
+    }
+
+    private static void BuildRoom(WorldMap world, int originX, int originZ, int roofOpeningX, int roofOpeningZ)
+    {
+        for (var x = originX; x < originX + 5; x++)
+        {
+            for (var z = originZ; z < originZ + 5; z++)
+            {
+                world.SetBlock(x, 1, z, BlockType.Stone);
+                world.SetBlock(x, 5, z, BlockType.Stone);
+            }
+        }
+
+        for (var y = 1; y <= 5; y++)
+        {
+            for (var offset = 0; offset < 5; offset++)
+            {
+                world.SetBlock(originX, y, originZ + offset, BlockType.Stone);
+                world.SetBlock(originX + 4, y, originZ + offset, BlockType.Stone);
+                world.SetBlock(originX + offset, y, originZ, BlockType.Stone);
+                world.SetBlock(originX + offset, y, originZ + 4, BlockType.Stone);
+            }
+        }
+
+        for (var x = originX + 1; x < originX + 4; x++)
+        {
+            for (var y = 2; y < 5; y++)
+            {
+                for (var z = originZ + 1; z < originZ + 4; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        if (roofOpeningX >= 0 && roofOpeningZ >= 0)
+        {
+            world.SetBlock(roofOpeningX, 5, roofOpeningZ, BlockType.Air);
+        }
     }
 
     [Fact(DisplayName = "RebuildDirtyChunkSurfaces корректно обрабатывает пустой мир и нулевой бюджет")]

@@ -33,6 +33,13 @@ internal sealed class FakeGamePlatform : IGamePlatform
     private readonly List<TexturedBlockCall> _texturedBlockCalls = [];
     private readonly List<TexturedChunkMeshCall> _texturedChunkMeshCalls = [];
     private readonly List<WorldMaterialPassSettings> _worldMaterialPassCalls = [];
+    private readonly List<WorldShadowPassSettings> _worldShadowPassCalls = [];
+    private readonly List<SkyPassSettings> _skyPassCalls = [];
+    private readonly List<ScreenSpacePassSettings> _screenSpacePassCalls = [];
+    private readonly List<SelectionPassSettings> _selectionPassCalls = [];
+    private readonly List<HeldBlockPassSettings> _heldBlockPassCalls = [];
+    private readonly List<ObjectPassSettings> _objectPassCalls = [];
+    private readonly List<FinalCompositePassSettings> _finalCompositePassCalls = [];
     private readonly List<string> _screenshots = [];
 
     public int DrawCubeCalls { get; private set; }
@@ -44,6 +51,13 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public int DrawTexturedBlockInstancedInstances { get; private set; }
     public int DrawTexturedChunkMeshCalls { get; private set; }
     public int ConfigureWorldMaterialPassCalls { get; private set; }
+    public int ConfigureWorldShadowPassCalls { get; private set; }
+    public int ConfigureSkyPassCalls { get; private set; }
+    public int ConfigureScreenSpacePassCalls { get; private set; }
+    public int ConfigureSelectionPassCalls { get; private set; }
+    public int ConfigureHeldBlockPassCalls { get; private set; }
+    public int ConfigureObjectPassCalls { get; private set; }
+    public int ConfigureFinalCompositePassCalls { get; private set; }
     public int DrawCubeWiresCalls { get; private set; }
     public int DrawTextCalls { get; private set; }
     public int DrawLineCalls { get; private set; }
@@ -77,6 +91,13 @@ internal sealed class FakeGamePlatform : IGamePlatform
     public IReadOnlyList<TexturedBlockCall> DrawnTexturedBlocks => _texturedBlockCalls;
     public IReadOnlyList<TexturedChunkMeshCall> DrawnTexturedChunkMeshes => _texturedChunkMeshCalls;
     public IReadOnlyList<WorldMaterialPassSettings> WorldMaterialPasses => _worldMaterialPassCalls;
+    public IReadOnlyList<WorldShadowPassSettings> WorldShadowPasses => _worldShadowPassCalls;
+    public IReadOnlyList<SkyPassSettings> SkyPasses => _skyPassCalls;
+    public IReadOnlyList<ScreenSpacePassSettings> ScreenSpacePasses => _screenSpacePassCalls;
+    public IReadOnlyList<SelectionPassSettings> SelectionPasses => _selectionPassCalls;
+    public IReadOnlyList<HeldBlockPassSettings> HeldBlockPasses => _heldBlockPassCalls;
+    public IReadOnlyList<ObjectPassSettings> ObjectPasses => _objectPassCalls;
+    public IReadOnlyList<FinalCompositePassSettings> FinalCompositePasses => _finalCompositePassCalls;
     public IReadOnlyList<string> SavedScreenshots => _screenshots;
 
     public void EnqueueWindowShouldClose(params bool[] values)
@@ -280,6 +301,48 @@ internal sealed class FakeGamePlatform : IGamePlatform
     {
         ConfigureWorldMaterialPassCalls++;
         _worldMaterialPassCalls.Add(settings);
+    }
+
+    public void ConfigureWorldShadowPass(WorldShadowPassSettings settings, byte[] nearShadowMap, byte[] farShadowMap)
+    {
+        ConfigureWorldShadowPassCalls++;
+        _worldShadowPassCalls.Add(settings);
+    }
+
+    public void ConfigureSkyPass(SkyPassSettings settings)
+    {
+        ConfigureSkyPassCalls++;
+        _skyPassCalls.Add(settings);
+    }
+
+    public void ConfigureScreenSpacePass(ScreenSpacePassSettings settings)
+    {
+        ConfigureScreenSpacePassCalls++;
+        _screenSpacePassCalls.Add(settings);
+    }
+
+    public void ConfigureSelectionPass(SelectionPassSettings settings)
+    {
+        ConfigureSelectionPassCalls++;
+        _selectionPassCalls.Add(settings);
+    }
+
+    public void ConfigureHeldBlockPass(HeldBlockPassSettings settings)
+    {
+        ConfigureHeldBlockPassCalls++;
+        _heldBlockPassCalls.Add(settings);
+    }
+
+    public void ConfigureObjectPass(ObjectPassSettings settings)
+    {
+        ConfigureObjectPassCalls++;
+        _objectPassCalls.Add(settings);
+    }
+
+    public void ConfigureFinalCompositePass(FinalCompositePassSettings settings)
+    {
+        ConfigureFinalCompositePassCalls++;
+        _finalCompositePassCalls.Add(settings);
     }
 
     public void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms)

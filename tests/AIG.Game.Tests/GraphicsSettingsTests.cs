@@ -42,10 +42,10 @@ public sealed class GraphicsSettingsTests
         settings.CycleQuality();
         Assert.Equal(GraphicsQuality.High, settings.Quality);
         Assert.False(settings.DrawBlockWires);
-        Assert.Equal(100, settings.RenderDistance);
-        Assert.Equal(1000, settings.DistantViewDistance);
-        Assert.Equal(58f, settings.FogNear);
-        Assert.Equal(108f, settings.FogFar);
+        Assert.Equal(190, settings.RenderDistance);
+        Assert.Equal(1900, settings.DistantViewDistance);
+        Assert.Equal(96f, settings.FogNear);
+        Assert.Equal(206f, settings.FogFar);
         Assert.Equal(new Color(156, 166, 171, 255).G, settings.FogColor.G);
         Assert.Equal(1.15f, settings.ViewBobScale);
 
@@ -93,10 +93,10 @@ public sealed class GraphicsSettingsTests
             GraphicsQuality = GraphicsQuality.High
         });
 
-        Assert.Equal(100, settings.ResolveRenderDistance(120));
-        Assert.Equal(56, settings.ResolveRenderDistance(80));
-        Assert.Equal(40, settings.ResolveRenderDistance(70));
-        Assert.Equal(24, settings.ResolveRenderDistance(58));
+        Assert.Equal(190, settings.ResolveRenderDistance(120));
+        Assert.Equal(150, settings.ResolveRenderDistance(80));
+        Assert.Equal(88, settings.ResolveRenderDistance(70));
+        Assert.Equal(48, settings.ResolveRenderDistance(58));
         Assert.Equal(24, settings.ResolveRenderDistance(30));
     }
 
@@ -108,12 +108,12 @@ public sealed class GraphicsSettingsTests
             GraphicsQuality = GraphicsQuality.High
         });
 
-        Assert.Equal(68, settings.ResolveRenderDistance(99));
-        Assert.Equal(46, settings.ResolveRenderDistance(79));
-        Assert.Equal(34, settings.ResolveRenderDistance(69));
-        Assert.Equal(28, settings.ResolveRenderDistance(64));
-        Assert.Equal(24, settings.ResolveRenderDistance(54));
-        Assert.Equal(24, settings.ResolveRenderDistance(49));
+        Assert.Equal(190, settings.ResolveRenderDistance(99));
+        Assert.Equal(104, settings.ResolveRenderDistance(79));
+        Assert.Equal(72, settings.ResolveRenderDistance(69));
+        Assert.Equal(60, settings.ResolveRenderDistance(64));
+        Assert.Equal(40, settings.ResolveRenderDistance(54));
+        Assert.Equal(32, settings.ResolveRenderDistance(49));
     }
 
     [Fact(DisplayName = "ResolveRenderDistance для medium/low использует свои минимумы")]
@@ -144,16 +144,16 @@ public sealed class GraphicsSettingsTests
             GraphicsQuality = GraphicsQuality.High
         });
 
-        Assert.Equal(1000, high.ResolveDistantViewDistance(0));
-        Assert.Equal(260, high.ResolveDistantViewDistance(44));
-        Assert.Equal(320, high.ResolveDistantViewDistance(49));
-        Assert.Equal(420, high.ResolveDistantViewDistance(54));
-        Assert.Equal(520, high.ResolveDistantViewDistance(59));
-        Assert.Equal(620, high.ResolveDistantViewDistance(64));
-        Assert.Equal(700, high.ResolveDistantViewDistance(69));
-        Assert.Equal(820, high.ResolveDistantViewDistance(79));
-        Assert.Equal(920, high.ResolveDistantViewDistance(89));
-        Assert.Equal(1000, high.ResolveDistantViewDistance(90));
+        Assert.Equal(1900, high.ResolveDistantViewDistance(0));
+        Assert.Equal(420, high.ResolveDistantViewDistance(44));
+        Assert.Equal(620, high.ResolveDistantViewDistance(49));
+        Assert.Equal(820, high.ResolveDistantViewDistance(54));
+        Assert.Equal(1000, high.ResolveDistantViewDistance(59));
+        Assert.Equal(1200, high.ResolveDistantViewDistance(64));
+        Assert.Equal(1400, high.ResolveDistantViewDistance(69));
+        Assert.Equal(1600, high.ResolveDistantViewDistance(79));
+        Assert.Equal(1750, high.ResolveDistantViewDistance(89));
+        Assert.Equal(1900, high.ResolveDistantViewDistance(90));
     }
 
     [Fact(DisplayName = "ResolveDistantViewDistance для medium/low использует свои ветки")]

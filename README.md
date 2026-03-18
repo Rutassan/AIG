@@ -28,23 +28,35 @@
 - усиленная material system для разных типов блоков;
 - постобработка, небо, облачные полосы и дальний фон, согласованные с новым рендером;
 - усиленный shader stack мира с `sun scatter`, `ambient lift`, `haze` и material-shadow response;
-- дополнительная глубина рендера через `horizon depth` и `foliage translucency`;
+- дополнительная глубина рендера через `horizon depth`, `foliage translucency` и последующие shader-driven слои глубины;
 - автопроверки производительности и стабильности;
 - полное автоматическое тестовое покрытие.
 
 ## Текущее состояние
 
-Последняя завершённая версия: `0.021`.
+Последняя завершённая версия: `0.022 (29)`.
 
 На этом этапе в проекте уже реализованы:
 - текстурный atlas блоков;
 - `chunk meshing` для поверхности мира;
-- shader-driven world pass;
-- material-channel в mesh-вершинах;
-- усиленная material system и material-separation в shader;
-- лёгкие солнечные тени без тяжёлой shadow-map системы;
-- улучшенные небо, cloud bands, дальний фон и post-process;
-- более зрелый shader-driven light stack: `sun scatter`, `ambient lift`, `shadow depth`, `haze`, `material shadow`, `horizon depth`, `foliage translucency`;
+- настоящий `frustum culling` для чанков и поверхностей;
+- явный visibility split `near / mid / far / atmospheric`;
+- первый настоящий `voxel daylight propagation` для surface-кэша;
+- отдельный `local light propagation` и явные локальные источники света для будущих факелов и ламп;
+- первый настоящий `shadow pass` от солнца с `near/far` shadow maps;
+- явные pass-контракты для `sky`, `screen-space`, `selection` и `held-block`;
+- отдельные `object pass` и `final composite pass`;
+- мягкие overlap-зоны между `near / mid / far / atmospheric` и более цельный дальний terrain handoff;
+- расширенный `mid/far world` с более честным дальним terrain-mesh;
+- отдельный `distant terrain mesh` для ultra-far terrain-чанков;
+- отдельный `far-world streaming + cache residency` для дальнего мира;
+- отдельный `cheap far-lighting contract` для distant terrain mesh: `far` и `ultra-far` больше не тянут одинаково дорогой local-light payload;
+- двухконтурная `shadow policy`: near-world сохраняет полноценные тени, а дальний мир уходит в более дешёвый shadow-proxy response без полной стоимости far shadow resolve;
+- high-профиль дальнего мира поднят до текущего предела архитектуры: `190` real-world distance для distant terrain mesh и расширенный far-world streaming под этот режим;
+- более честная source-driven lighting model: закрытые шахты и комнаты без источников света больше не держат прежний магический ambient, а локальный свет и daylight заметно сильнее управляют итоговой освещённостью;
+- очищенный visual stack без новой архитектуры: уменьшены `haze`, screen-space glow и навязчивость финального композита, усилена читаемость материалов и foliage в среднем плане;
+- отдельная правка дальнего слоя: уменьшено выбеливание `far/ultra-far`, горизонт лучше отделён от неба, а distant terrain mesh держит форму заметно увереннее;
+- более зрелый shader-driven light stack: `sun scatter`, `ambient lift`, `shadow depth`, `haze`, `material shadow`, `horizon depth`, `foliage translucency`, `secondary bounce`, `sky response`, `far gradient`, `shadow contour`, `atmospheric contour`, `relief bridge`, `shadow haze fusion`, `light plasticity`, `far readability`, `final cohesion`, `view material`;
 - обновлённая подсветка блока;
 - доработанный held-block и спецслои рендера;
 - стабильный `autocheck` / `autoperf`;
@@ -142,20 +154,31 @@ dotnet test AIG.sln --collect:"XPlat Code Coverage" -v minimal
 - texture atlas блоков;
 - textured mesh path;
 - `chunk meshing`;
+- настоящий `frustum culling`;
+- явный split мира на `near / mid / far / atmospheric`;
+- локальное skylight field и daylight payload поверхности;
+- отдельный local-light payload и явные локальные источники света;
+- первый CPU shadow pass от солнца с near/far shadow maps;
+- отдельные pass-настройки для `sky`, `screen-space`, `selection` и `held-block`;
+- отдельные `object pass` и `final composite pass`;
+- расширенный дальний mesh-пояс для terrain-dominant чанков;
+- отдельный `distant terrain mesh` и отдельный `far-world streaming` для большого мира;
 - CPU/GPU-кэш мешей;
 - shader-driven world pass;
 - material-channel для разных типов блоков;
 - material-separation для лучшего различия блоков под светом и в тени;
 - material-shadow response для более выразительного различия материалов именно в тенях;
-- `horizon depth` и `foliage translucency` для более глубокой дальней атмосферы и лучшего солнечного прохода через растительность;
+- `horizon depth`, `foliage translucency`, `secondary bounce`, `sky response`, `far gradient`, `shadow contour`, `atmosphere gradient`, `distance shadow lift`, `sky contour`, `distant silhouette`, `atmospheric contour`;
+- финальные shader-driven слои `relief bridge`, `shadow haze fusion`, `light plasticity`, `far readability`, `final cohesion`, `view material`;
 - атмосферный туман;
-- стилизованный свет, distance haze и лёгкие солнечные тени;
+- стилизованный свет, distance haze и первые настоящие солнечные тени;
 - улучшенные небо, облачные полосы и дальний фон;
 - лёгкий post-process без тяжёлого offscreen-пайплайна;
 - дополнительные secondary effects, связывающие солнце, haze, небо и дальний фон в более цельный кадр;
-- доработанные highlight- и held-block-слои.
+- доработанные highlight- и held-block-слои;
+- более зрелое смешивание `daylight + local light` и более цельный light payload на границах чанков.
 
-Дальнейшая цель — приблизить графику к аккуратному Minecraft/Luanti-подобному виду, но сохранить нормальную производительность на обычном железе.
+Этапы `0.022 (10) - 0.022 (23)` перевели проект на новый архитектурный курс: сначала появилась более честная система видимости мира, затем первый настоящий daylight payload в surface-кэше чанков, после этого мир получил отдельный канал локального света, затем поверх этого ввели первый реальный shadow pass от солнца, потом render stack разнесён на более явные pass-контракты, дальше `mid/far world` подтянут под тот же фундамент, в `0.022 (16)` добавлена финальная склейка shadow cascades, дальнего мира и атмосферы, в `0.022 (17)` дожат сам shadow resolve через PCF-подобную фильтрацию, slope bias и более зрелый cascade handoff, в `0.022 (18)` сам световой payload стал цельнее на chunk boundaries и в mesh lighting, в `0.022 (19)` добавлены явные `object pass` и `final composite pass`, в `0.022 (20)` переходы между `near/mid/far/atmospheric` стали мягче через overlap-band visibility blending и более цельный far-terrain handoff, в `0.022 (21)` все финальные screen-space, shadow и far-world параметры сведены через единый стабильный `render polish profile`, в `0.022 (22)` появился отдельный `distant terrain mesh` слой для ultra-far terrain-чанков, а в `0.022 (23)` над ним введён отдельный `far-world streaming + cache residency` слой. Текущий рендер теперь строится как цепочка `visibility -> light -> shadows -> passes -> far world -> final cohesion`, и дальний мир уже не только рисуется отдельно, но и удерживается отдельным streaming-path, а не простым backdrop или повторением ближних правил.
 
 ## Структура проекта
 

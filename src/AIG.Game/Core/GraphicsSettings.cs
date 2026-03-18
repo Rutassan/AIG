@@ -42,15 +42,14 @@ internal sealed class GraphicsSettings
             var highAdaptiveDistance = measuredFps switch
             {
                 < 45 => 24,
-                < 50 => 24,
-                < 55 => 24,
-                < 60 => 24,
-                < 65 => 28,
-                < 70 => 34,
-                < 75 => 40,
-                < 80 => 46,
-                < 90 => 56,
-                < 100 => 68,
+                < 50 => 32,
+                < 55 => 40,
+                < 60 => 48,
+                < 65 => 60,
+                < 70 => 72,
+                < 75 => 88,
+                < 80 => 104,
+                < 90 => 150,
                 _ => RenderDistance
             };
 
@@ -81,14 +80,14 @@ internal sealed class GraphicsSettings
         {
             return measuredFps switch
             {
-                < 45 => 260,
-                < 50 => 320,
-                < 55 => 420,
-                < 60 => 520,
-                < 65 => 620,
-                < 70 => 700,
-                < 80 => 820,
-                < 90 => 920,
+                < 45 => 420,
+                < 50 => 620,
+                < 55 => 820,
+                < 60 => 1000,
+                < 65 => 1200,
+                < 70 => 1400,
+                < 80 => 1600,
+                < 90 => 1750,
                 _ => DistantViewDistance
             };
         }
@@ -157,11 +156,11 @@ internal sealed class GraphicsSettings
                 ViewBobScale = 1f;
                 break;
             default:
-                RenderDistance = 100;
-                DistantViewDistance = 1000;
+                RenderDistance = 190;
+                DistantViewDistance = 1900;
                 DrawBlockWires = _forceBlockWires;
-                FogNear = 58f;
-                FogFar = 108f;
+                FogNear = 96f;
+                FogFar = 206f;
                 LightStrength = 1f;
                 Contrast = 1.1f;
                 FogColor = new Color(156, 166, 171, 255);

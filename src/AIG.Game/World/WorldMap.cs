@@ -10,7 +10,10 @@ public sealed class WorldMap
     private const int MaxChunkGenerationsInFlight = 2;
     private const int MaxSurfaceRebuildsInFlight = 2;
     private const int TreeVariantCount = 5;
+    private const int LightFieldBorder = 2;
     public const int MaxSunVisibility = 6;
+    public const int MaxDaylight = 15;
+    public const int MaxLocalLight = 15;
     private static readonly Vector3 SunLightDirection = Vector3.Normalize(new Vector3(-0.62f, -0.74f, -0.24f));
     private static readonly Vector3 SunTraceDirection = -SunLightDirection;
 
@@ -24,7 +27,135 @@ public sealed class WorldMap
         int SkyExposure,
         int AmbientOcclusion = 0,
         int ReliefExposure = 0,
-        int SunVisibility = MaxSunVisibility);
+        int SunVisibility = MaxSunVisibility,
+        int Daylight = MaxDaylight,
+        int LocalLight = 0);
+
+    private sealed class LocalDaylightField
+    {
+        private readonly byte[] _values;
+
+        public LocalDaylightField(int minX, int maxX, int minZ, int maxZ, int height)
+        {
+            MinX = minX;
+            MaxX = maxX;
+            MinZ = minZ;
+            MaxZ = maxZ;
+            Height = height;
+            Width = MaxX - MinX + 1;
+            Depth = MaxZ - MinZ + 1;
+            _values = new byte[Width * Depth * Height];
+        }
+
+        public int MinX { get; }
+        public int MaxX { get; }
+        public int MinZ { get; }
+        public int MaxZ { get; }
+        public int Width { get; }
+        public int Depth { get; }
+        public int Height { get; }
+
+        public bool Contains(int x, int y, int z)
+            => x >= MinX && x <= MaxX && z >= MinZ && z <= MaxZ && y >= 0 && y < Height;
+
+        public int Get(int x, int y, int z)
+        {
+            if (!Contains(x, y, z))
+            {
+                return 0;
+            }
+
+            return _values[GetIndex(x, y, z)];
+        }
+
+        public bool SetMax(int x, int y, int z, int value)
+        {
+            if (!Contains(x, y, z))
+            {
+                return false;
+            }
+
+            var index = GetIndex(x, y, z);
+            var next = (byte)Math.Clamp(value, 0, MaxDaylight);
+            if (next <= _values[index])
+            {
+                return false;
+            }
+
+            _values[index] = next;
+            return true;
+        }
+
+        private int GetIndex(int x, int y, int z)
+        {
+            var localX = x - MinX;
+            var localZ = z - MinZ;
+            return (y * Depth + localZ) * Width + localX;
+        }
+    }
+
+    private sealed class LocalLightField
+    {
+        private readonly byte[] _values;
+
+        public LocalLightField(int minX, int maxX, int minZ, int maxZ, int height)
+        {
+            MinX = minX;
+            MaxX = maxX;
+            MinZ = minZ;
+            MaxZ = maxZ;
+            Height = height;
+            Width = MaxX - MinX + 1;
+            Depth = MaxZ - MinZ + 1;
+            _values = new byte[Width * Depth * Height];
+        }
+
+        public int MinX { get; }
+        public int MaxX { get; }
+        public int MinZ { get; }
+        public int MaxZ { get; }
+        public int Width { get; }
+        public int Depth { get; }
+        public int Height { get; }
+
+        public bool Contains(int x, int y, int z)
+            => x >= MinX && x <= MaxX && z >= MinZ && z <= MaxZ && y >= 0 && y < Height;
+
+        public int Get(int x, int y, int z)
+        {
+            if (!Contains(x, y, z))
+            {
+                return 0;
+            }
+
+            return _values[GetIndex(x, y, z)];
+        }
+
+        public bool SetMax(int x, int y, int z, int value)
+        {
+            if (!Contains(x, y, z))
+            {
+                return false;
+            }
+
+            var index = GetIndex(x, y, z);
+            var next = (byte)Math.Clamp(value, 0, MaxLocalLight);
+            if (next <= _values[index])
+            {
+                return false;
+            }
+
+            _values[index] = next;
+            return true;
+        }
+
+        private int GetIndex(int x, int y, int z)
+        {
+            var localX = x - MinX;
+            var localZ = z - MinZ;
+            return (y * Depth + localZ) * Width + localX;
+        }
+    }
 
     private static readonly IReadOnlyList<SurfaceBlock> EmptySurfaceBlocks = Array.Empty<SurfaceBlock>();
     private readonly record struct GeneratedChunkResult(int ChunkX, int ChunkZ, Chunk Chunk);
@@ -34,7 +165,9 @@ public sealed class WorldMap
     private readonly Dictionary<(int ChunkX, int ChunkZ), int> _chunkSurfaceCacheRevision = new();
     private readonly HashSet<(int ChunkX, int ChunkZ)> _dirtySurfaceChunks = new();
     private readonly Dictionary<(int ChunkX, int ChunkZ), int> _surfaceRevisions = new();
+    private readonly Dictionary<(int ChunkX, int ChunkZ), int> _chunkResidencyTtl = new();
     private readonly Dictionary<(int X, int Y, int Z), BlockType> _overrides = new();
+    private readonly Dictionary<(int X, int Y, int Z), byte> _localLightSources = new();
     private readonly object _backgroundSync = new();
     private readonly HashSet<(int ChunkX, int ChunkZ)> _pendingChunkGenerations = new();
     private readonly HashSet<(int ChunkX, int ChunkZ)> _pendingSurfaceRebuilds = new();
@@ -113,6 +246,39 @@ public sealed class WorldMap
         var chunkX = x / ChunkSize;
         var chunkZ = z / ChunkSize;
         MarkChunkAndNeighborsDirty(chunkX, chunkZ);
+    }
+
+    public void SetLocalLightSource(int x, int y, int z, int intensity)
+    {
+        if (!IsInside(x, y, z))
+        {
+            return;
+        }
+
+        var key = (x, y, z);
+        var next = (byte)Math.Clamp(intensity, 0, MaxLocalLight);
+        if (next == 0)
+        {
+            _localLightSources.Remove(key);
+        }
+        else
+        {
+            _localLightSources[key] = next;
+        }
+
+        var chunkX = x / ChunkSize;
+        var chunkZ = z / ChunkSize;
+        MarkChunkAndNeighborsDirty(chunkX, chunkZ);
+    }
+
+    public int GetLocalLightSource(int x, int y, int z)
+    {
+        if (!IsInside(x, y, z))
+        {
+            return 0;
+        }
+
+        return _localLightSources.TryGetValue((x, y, z), out var intensity) ? intensity : 0;
     }
 
     public bool IsSolid(int x, int y, int z)
@@ -407,6 +573,7 @@ public sealed class WorldMap
             _chunkSurfaceCacheRevision.Clear();
             _dirtySurfaceChunks.Clear();
             _surfaceRevisions.Clear();
+            _chunkResidencyTtl.Clear();
             return;
         }
 
@@ -421,6 +588,11 @@ public sealed class WorldMap
         var loadedChunks = new List<(int ChunkX, int ChunkZ)>(_chunks.Keys);
         foreach (var key in loadedChunks)
         {
+            if (_chunkResidencyTtl.TryGetValue(key, out var ttl) && ttl > 0)
+            {
+                continue;
+            }
+
             if (Math.Abs(key.ChunkX - centerChunkX) > keepRadiusInChunks
                 || Math.Abs(key.ChunkZ - centerChunkZ) > keepRadiusInChunks)
             {
@@ -429,6 +601,7 @@ public sealed class WorldMap
                 _chunkSurfaceCacheRevision.Remove(key);
                 _dirtySurfaceChunks.Remove(key);
                 _surfaceRevisions.Remove(key);
+                _chunkResidencyTtl.Remove(key);
                 removedChunks.Add(key);
             }
         }
@@ -436,6 +609,76 @@ public sealed class WorldMap
         foreach (var removed in removedChunks)
         {
             MarkChunkAndNeighborsDirty(removed.ChunkX, removed.ChunkZ);
+        }
+    }
+
+    public void TouchChunkResidency(Vector3 position, int radiusInChunks, int ttlFrames)
+    {
+        if (_chunkCountX == 0 || _chunkCountZ == 0 || ttlFrames <= 0 || radiusInChunks < 0 || _chunks.Count == 0)
+        {
+            return;
+        }
+
+        var worldX = (int)MathF.Floor(position.X);
+        var worldZ = (int)MathF.Floor(position.Z);
+        var clampedX = Math.Clamp(worldX, 0, Width - 1);
+        var clampedZ = Math.Clamp(worldZ, 0, Depth - 1);
+        var centerChunkX = clampedX / ChunkSize;
+        var centerChunkZ = clampedZ / ChunkSize;
+        var radius = Math.Max(0, radiusInChunks);
+
+        var minChunkX = Math.Max(0, centerChunkX - radius);
+        var maxChunkX = Math.Min(_chunkCountX - 1, centerChunkX + radius);
+        var minChunkZ = Math.Max(0, centerChunkZ - radius);
+        var maxChunkZ = Math.Min(_chunkCountZ - 1, centerChunkZ + radius);
+        for (var chunkX = minChunkX; chunkX <= maxChunkX; chunkX++)
+        {
+            for (var chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++)
+            {
+                var key = (chunkX, chunkZ);
+                if (!_chunks.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                if (!_chunkResidencyTtl.TryGetValue(key, out var currentTtl) || currentTtl < ttlFrames)
+                {
+                    _chunkResidencyTtl[key] = ttlFrames;
+                }
+            }
+        }
+    }
+
+    public void AdvanceChunkResidency(int frames)
+    {
+        if (frames <= 0 || _chunkResidencyTtl.Count == 0)
+        {
+            return;
+        }
+
+        List<(int ChunkX, int ChunkZ)>? expired = null;
+        var keys = new List<(int ChunkX, int ChunkZ)>(_chunkResidencyTtl.Keys);
+        foreach (var key in keys)
+        {
+            var nextTtl = _chunkResidencyTtl[key] - frames;
+            if (nextTtl > 0)
+            {
+                _chunkResidencyTtl[key] = nextTtl;
+                continue;
+            }
+
+            expired ??= [];
+            expired.Add(key);
+        }
+
+        if (expired is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < expired.Count; i++)
+        {
+            _chunkResidencyTtl.Remove(expired[i]);
         }
     }
 
@@ -556,6 +799,8 @@ public sealed class WorldMap
         var chunkMinX = chunkX * ChunkSize;
         var chunkMinZ = chunkZ * ChunkSize;
         var blocks = new List<SurfaceBlock>(chunk.Size * chunk.Size * 3);
+        var daylightField = BuildDaylightField(chunkX, chunkZ, IsSolidNoLoad);
+        var localLightField = BuildLocalLightField(chunkX, chunkZ, IsSolidNoLoad, GetLocalLightSourceNoLoad);
 
         for (var localX = 0; localX < chunk.Size; localX++)
         {
@@ -591,7 +836,9 @@ public sealed class WorldMap
                     var ambientOcclusion = CountAmbientOcclusionNoLoad(worldX, y, worldZ, topVisible);
                     var reliefExposure = CountReliefExposureNoLoad(worldX, y, worldZ, topVisible);
                     var sunVisibility = CountSunVisibilityNoLoad(worldX, y, worldZ);
-                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility));
+                    var daylight = SampleSurfaceDaylight(daylightField, worldX, y, worldZ);
+                    var localLight = SampleSurfaceLocalLight(localLightField, worldX, y, worldZ);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility, daylight, localLight));
                 }
             }
         }
@@ -1463,6 +1710,13 @@ public sealed class WorldMap
         var chunkMinX = chunkX * ChunkSize;
         var chunkMinZ = chunkZ * ChunkSize;
         var blocks = new List<SurfaceBlock>(ChunkSize * ChunkSize * 3);
+        var daylightField = BuildDaylightField(chunkX, chunkZ, (sx, sy, sz) => IsSolidInSnapshot(sx, sy, sz, snapshot));
+        var localLightSnapshot = SnapshotLocalLightSourcesForChunk(chunkX, chunkZ);
+        var localLightField = BuildLocalLightField(
+            chunkX,
+            chunkZ,
+            (sx, sy, sz) => IsSolidInSnapshot(sx, sy, sz, snapshot),
+            (sx, sy, sz) => GetLocalLightSourceInSnapshot(sx, sy, sz, localLightSnapshot));
 
         for (var localX = 0; localX < ChunkSize; localX++)
         {
@@ -1498,7 +1752,9 @@ public sealed class WorldMap
                     var ambientOcclusion = CountAmbientOcclusionSnapshot(worldX, y, worldZ, snapshot, topVisible);
                     var reliefExposure = CountReliefExposureSnapshot(worldX, y, worldZ, snapshot, topVisible);
                     var sunVisibility = CountSunVisibilitySnapshot(worldX, y, worldZ, snapshot);
-                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility));
+                    var daylight = SampleSurfaceDaylight(daylightField, worldX, y, worldZ);
+                    var localLight = SampleSurfaceLocalLight(localLightField, worldX, y, worldZ);
+                    blocks.Add(new SurfaceBlock(worldX, y, worldZ, block, visibleFaces, topVisible, skyExposure, ambientOcclusion, reliefExposure, sunVisibility, daylight, localLight));
                 }
             }
         }
@@ -1596,6 +1852,196 @@ public sealed class WorldMap
         return CountSunVisibilityCore(x, y, z, (sx, sy, sz) => IsSolidInSnapshot(sx, sy, sz, snapshot));
     }
 
+    private LocalDaylightField BuildDaylightField(int chunkX, int chunkZ, Func<int, int, int, bool> isSolid)
+    {
+        var minX = Math.Max(0, chunkX * ChunkSize - LightFieldBorder);
+        var maxX = Math.Min(Width - 1, chunkX * ChunkSize + ChunkSize - 1 + LightFieldBorder);
+        var minZ = Math.Max(0, chunkZ * ChunkSize - LightFieldBorder);
+        var maxZ = Math.Min(Depth - 1, chunkZ * ChunkSize + ChunkSize - 1 + LightFieldBorder);
+        var field = new LocalDaylightField(minX, maxX, minZ, maxZ, Height);
+        var queue = new Queue<(int X, int Y, int Z, int Light)>();
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var z = minZ; z <= maxZ; z++)
+            {
+                for (var y = Height - 1; y >= 0; y--)
+                {
+                    if (isSolid(x, y, z))
+                    {
+                        break;
+                    }
+
+                    if (field.SetMax(x, y, z, MaxDaylight))
+                    {
+                        queue.Enqueue((x, y, z, MaxDaylight));
+                    }
+                }
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            var (x, y, z, light) = queue.Dequeue();
+            if (light <= 1)
+            {
+                continue;
+            }
+
+            PropagateDaylight(field, isSolid, queue, x + 1, y, z, light - 1);
+            PropagateDaylight(field, isSolid, queue, x - 1, y, z, light - 1);
+            PropagateDaylight(field, isSolid, queue, x, y, z + 1, light - 1);
+            PropagateDaylight(field, isSolid, queue, x, y, z - 1, light - 1);
+            PropagateDaylight(field, isSolid, queue, x, y - 1, z, light);
+            PropagateDaylight(field, isSolid, queue, x, y + 1, z, light - 1);
+        }
+
+        return field;
+    }
+
+    private LocalLightField BuildLocalLightField(
+        int chunkX,
+        int chunkZ,
+        Func<int, int, int, bool> isSolid,
+        Func<int, int, int, int> getEmission)
+    {
+        var minX = Math.Max(0, chunkX * ChunkSize - LightFieldBorder);
+        var maxX = Math.Min(Width - 1, chunkX * ChunkSize + ChunkSize - 1 + LightFieldBorder);
+        var minZ = Math.Max(0, chunkZ * ChunkSize - LightFieldBorder);
+        var maxZ = Math.Min(Depth - 1, chunkZ * ChunkSize + ChunkSize - 1 + LightFieldBorder);
+        var field = new LocalLightField(minX, maxX, minZ, maxZ, Height);
+        var queue = new Queue<(int X, int Y, int Z, int Light)>();
+
+        for (var x = minX; x <= maxX; x++)
+        {
+            for (var z = minZ; z <= maxZ; z++)
+            {
+                for (var y = 0; y < Height; y++)
+                {
+                    var emission = Math.Clamp(getEmission(x, y, z), 0, MaxLocalLight);
+                    if (emission <= 0)
+                    {
+                        continue;
+                    }
+
+                    if (field.SetMax(x, y, z, emission))
+                    {
+                        queue.Enqueue((x, y, z, emission));
+                    }
+                }
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            var (x, y, z, light) = queue.Dequeue();
+            if (light <= 1)
+            {
+                continue;
+            }
+
+            PropagateLocalLight(field, isSolid, queue, x + 1, y, z, light - 1);
+            PropagateLocalLight(field, isSolid, queue, x - 1, y, z, light - 1);
+            PropagateLocalLight(field, isSolid, queue, x, y, z + 1, light - 1);
+            PropagateLocalLight(field, isSolid, queue, x, y, z - 1, light - 1);
+            PropagateLocalLight(field, isSolid, queue, x, y - 1, z, light - 1);
+            PropagateLocalLight(field, isSolid, queue, x, y + 1, z, light - 1);
+        }
+
+        return field;
+    }
+
+    private static void PropagateDaylight(
+        LocalDaylightField field,
+        Func<int, int, int, bool> isSolid,
+        Queue<(int X, int Y, int Z, int Light)> queue,
+        int x,
+        int y,
+        int z,
+        int light)
+    {
+        if (light <= 0 || !field.Contains(x, y, z) || isSolid(x, y, z))
+        {
+            return;
+        }
+
+        if (field.SetMax(x, y, z, light))
+        {
+            queue.Enqueue((x, y, z, light));
+        }
+    }
+
+    private static void PropagateLocalLight(
+        LocalLightField field,
+        Func<int, int, int, bool> isSolid,
+        Queue<(int X, int Y, int Z, int Light)> queue,
+        int x,
+        int y,
+        int z,
+        int light)
+    {
+        if (light <= 0 || !field.Contains(x, y, z) || isSolid(x, y, z))
+        {
+            return;
+        }
+
+        if (field.SetMax(x, y, z, light))
+        {
+            queue.Enqueue((x, y, z, light));
+        }
+    }
+
+    private static int SampleSurfaceDaylight(LocalDaylightField field, int x, int y, int z)
+    {
+        var direct = Math.Max(field.Get(x, y + 1, z), field.Get(x, y, z));
+        var lateralAverage =
+            (field.Get(x + 1, y, z)
+            + field.Get(x - 1, y, z)
+            + field.Get(x, y, z + 1)
+            + field.Get(x, y, z - 1)) / 4f;
+        var diagonalAverage =
+            (field.Get(x + 1, y, z + 1)
+            + field.Get(x + 1, y, z - 1)
+            + field.Get(x - 1, y, z + 1)
+            + field.Get(x - 1, y, z - 1)) / 4f;
+        var lower = field.Get(x, y - 1, z) * 0.5f;
+        var smoothed = MathF.Round(direct * 0.46f + lateralAverage * 0.32f + diagonalAverage * 0.16f + lower * 0.06f);
+        return Math.Clamp((int)MathF.Max(direct, smoothed), 0, MaxDaylight);
+    }
+
+    private static int SampleSurfaceLocalLight(LocalLightField field, int x, int y, int z)
+    {
+        var center = field.Get(x, y, z);
+        var above = field.Get(x, y + 1, z);
+        var lateralAverage =
+            (field.Get(x + 1, y, z)
+            + field.Get(x - 1, y, z)
+            + field.Get(x, y, z + 1)
+            + field.Get(x, y, z - 1)) / 4f;
+        var diagonalAverage =
+            (field.Get(x + 1, y, z + 1)
+            + field.Get(x + 1, y, z - 1)
+            + field.Get(x - 1, y, z + 1)
+            + field.Get(x - 1, y, z - 1)) / 4f;
+        var below = field.Get(x, y - 1, z);
+        var smoothed = MathF.Round(center * 0.36f + above * 0.18f + lateralAverage * 0.28f + diagonalAverage * 0.12f + below * 0.06f);
+        return Math.Clamp((int)MathF.Max(center, smoothed), 0, MaxLocalLight);
+    }
+
+    private int GetLocalLightSourceNoLoad(int x, int y, int z)
+    {
+        return _localLightSources.TryGetValue((x, y, z), out var intensity) ? intensity : 0;
+    }
+
+    private static int GetLocalLightSourceInSnapshot(
+        int x,
+        int y,
+        int z,
+        IReadOnlyDictionary<(int X, int Y, int Z), byte> snapshot)
+    {
+        return snapshot.TryGetValue((x, y, z), out var intensity) ? intensity : 0;
+    }
+
     private int CountSunVisibilityCore(int x, int y, int z, Func<int, int, int, bool> isSolid)
     {
         var origin = new Vector3(x + 0.5f, y + 0.68f, z + 0.5f);
@@ -1658,6 +2104,32 @@ public sealed class WorldMap
             var y = entry.Key.Y;
             var z = entry.Key.Z;
             if (x < chunkMinX || x > chunkMaxX || z < chunkMinZ || z > chunkMaxZ || y < 0 || y >= Height)
+            {
+                continue;
+            }
+
+            snapshot[entry.Key] = entry.Value;
+        }
+
+        return snapshot;
+    }
+
+    private Dictionary<(int X, int Y, int Z), byte> SnapshotLocalLightSourcesForChunk(int chunkX, int chunkZ)
+    {
+        if (_localLightSources.Count == 0)
+        {
+            return [];
+        }
+
+        var minX = Math.Max(0, chunkX * ChunkSize - 1);
+        var maxX = Math.Min(Width - 1, chunkX * ChunkSize + ChunkSize);
+        var minZ = Math.Max(0, chunkZ * ChunkSize - 1);
+        var maxZ = Math.Min(Depth - 1, chunkZ * ChunkSize + ChunkSize);
+        var snapshot = new Dictionary<(int X, int Y, int Z), byte>();
+        foreach (var entry in _localLightSources)
+        {
+            if (entry.Key.X < minX || entry.Key.X > maxX
+                || entry.Key.Z < minZ || entry.Key.Z > maxZ)
             {
                 continue;
             }

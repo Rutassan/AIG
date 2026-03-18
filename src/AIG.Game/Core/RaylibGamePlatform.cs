@@ -49,10 +49,61 @@ public sealed class RaylibGamePlatform : IGamePlatform
     private int _worldAtlasMaterialShadowStrengthLoc = -1;
     private int _worldAtlasHorizonDepthStrengthLoc = -1;
     private int _worldAtlasFoliageTranslucencyStrengthLoc = -1;
+    private int _worldAtlasSecondaryBounceStrengthLoc = -1;
+    private int _worldAtlasDistanceMaterialStrengthLoc = -1;
+    private int _worldAtlasSkyResponseStrengthLoc = -1;
+    private int _worldAtlasFarGradientStrengthLoc = -1;
+    private int _worldAtlasShadowContourStrengthLoc = -1;
+    private int _worldAtlasAtmosphereGradientStrengthLoc = -1;
+    private int _worldAtlasDistanceShadowLiftStrengthLoc = -1;
+    private int _worldAtlasSkyContourStrengthLoc = -1;
+    private int _worldAtlasDistantSilhouetteStrengthLoc = -1;
+    private int _worldAtlasAtmosphericContourStrengthLoc = -1;
+    private int _worldAtlasReliefBridgeStrengthLoc = -1;
+    private int _worldAtlasShadowHazeFusionStrengthLoc = -1;
+    private int _worldAtlasLightPlasticityStrengthLoc = -1;
+    private int _worldAtlasFarReadabilityStrengthLoc = -1;
+    private int _worldAtlasFinalCohesionStrengthLoc = -1;
+    private int _worldAtlasViewMaterialStrengthLoc = -1;
+    private int _worldAtlasShadowCascadeBlendStrengthLoc = -1;
+    private int _worldAtlasFarWorldCohesionStrengthLoc = -1;
+    private int _worldAtlasShadowMapNearLoc = -1;
+    private int _worldAtlasShadowMapFarLoc = -1;
+    private int _worldAtlasShadowMapEnabledLoc = -1;
+    private int _worldAtlasShadowNearOriginLoc = -1;
+    private int _worldAtlasShadowNearRightLoc = -1;
+    private int _worldAtlasShadowNearUpLoc = -1;
+    private int _worldAtlasShadowNearForwardLoc = -1;
+    private int _worldAtlasShadowNearHalfExtentsLoc = -1;
+    private int _worldAtlasShadowFarOriginLoc = -1;
+    private int _worldAtlasShadowFarRightLoc = -1;
+    private int _worldAtlasShadowFarUpLoc = -1;
+    private int _worldAtlasShadowFarForwardLoc = -1;
+    private int _worldAtlasShadowFarHalfExtentsLoc = -1;
+    private int _worldAtlasShadowDistanceRangeLoc = -1;
+    private int _worldAtlasShadowFarProxyRangeLoc = -1;
+    private int _worldAtlasShadowFarProxyStrengthLoc = -1;
+    private int _worldAtlasShadowFilterRadiusLoc = -1;
+    private int _worldAtlasShadowCascadeBlendWidthLoc = -1;
+    private int _worldAtlasShadowMapBiasLoc = -1;
+    private int _worldAtlasShadowSlopeBiasStrengthLoc = -1;
+    private int _worldAtlasShadowMapStrengthLoc = -1;
     private WorldMaterialPassSettings _worldMaterialPassSettings;
     private bool _hasWorldMaterialPassSettings;
+    private WorldShadowPassSettings _worldShadowPassSettings;
+    private bool _hasWorldShadowPassSettings;
+    private SkyPassSettings _skyPassSettings;
+    private ScreenSpacePassSettings _screenSpacePassSettings;
+    private SelectionPassSettings _selectionPassSettings;
+    private HeldBlockPassSettings _heldBlockPassSettings;
+    private ObjectPassSettings _objectPassSettings;
+    private FinalCompositePassSettings _finalCompositePassSettings;
     private Texture2D _worldAtlasTexture;
     private bool _hasWorldAtlasTexture;
+    private Texture2D _worldShadowNearTexture;
+    private bool _hasWorldShadowNearTexture;
+    private Texture2D _worldShadowFarTexture;
+    private bool _hasWorldShadowFarTexture;
 
     public void SetConfigFlags(ConfigFlags flags) => Raylib.SetConfigFlags(flags);
     public void SetExitKey(KeyboardKey key) => Raylib.SetExitKey(key);
@@ -138,6 +189,48 @@ public sealed class RaylibGamePlatform : IGamePlatform
         EnsureWorldAtlasTexture();
         EnsureWorldMaterialShader();
         ApplyWorldMaterialPassSettings();
+    }
+
+    public void ConfigureWorldShadowPass(WorldShadowPassSettings settings, byte[] nearShadowMap, byte[] farShadowMap)
+    {
+        _worldShadowPassSettings = settings;
+        _hasWorldShadowPassSettings = true;
+        EnsureWorldMaterialShader();
+        EnsureShadowTexture(ref _worldShadowNearTexture, ref _hasWorldShadowNearTexture, Math.Max(1, settings.NearResolution));
+        EnsureShadowTexture(ref _worldShadowFarTexture, ref _hasWorldShadowFarTexture, Math.Max(1, settings.FarResolution));
+        UpdateShadowTexture(_worldShadowNearTexture, nearShadowMap);
+        UpdateShadowTexture(_worldShadowFarTexture, farShadowMap);
+        ApplyWorldShadowPassSettings();
+    }
+
+    public void ConfigureSkyPass(SkyPassSettings settings)
+    {
+        _skyPassSettings = settings;
+    }
+
+    public void ConfigureScreenSpacePass(ScreenSpacePassSettings settings)
+    {
+        _screenSpacePassSettings = settings;
+    }
+
+    public void ConfigureSelectionPass(SelectionPassSettings settings)
+    {
+        _selectionPassSettings = settings;
+    }
+
+    public void ConfigureHeldBlockPass(HeldBlockPassSettings settings)
+    {
+        _heldBlockPassSettings = settings;
+    }
+
+    public void ConfigureObjectPass(ObjectPassSettings settings)
+    {
+        _objectPassSettings = settings;
+    }
+
+    public void ConfigureFinalCompositePass(FinalCompositePassSettings settings)
+    {
+        _finalCompositePassSettings = settings;
     }
 
     public void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms)
@@ -383,8 +476,48 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasMaterialShadowStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "materialShadowStrength");
         _worldAtlasHorizonDepthStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "horizonDepthStrength");
         _worldAtlasFoliageTranslucencyStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "foliageTranslucencyStrength");
+        _worldAtlasSecondaryBounceStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "secondaryBounceStrength");
+        _worldAtlasDistanceMaterialStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "distanceMaterialStrength");
+        _worldAtlasSkyResponseStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "skyResponseStrength");
+        _worldAtlasFarGradientStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "farGradientStrength");
+        _worldAtlasShadowContourStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowContourStrength");
+        _worldAtlasAtmosphereGradientStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "atmosphereGradientStrength");
+        _worldAtlasDistanceShadowLiftStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "distanceShadowLiftStrength");
+        _worldAtlasSkyContourStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "skyContourStrength");
+        _worldAtlasDistantSilhouetteStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "distantSilhouetteStrength");
+        _worldAtlasAtmosphericContourStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "atmosphericContourStrength");
+        _worldAtlasReliefBridgeStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "reliefBridgeStrength");
+        _worldAtlasShadowHazeFusionStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowHazeFusionStrength");
+        _worldAtlasLightPlasticityStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "lightPlasticityStrength");
+        _worldAtlasFarReadabilityStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "farReadabilityStrength");
+        _worldAtlasFinalCohesionStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "finalCohesionStrength");
+        _worldAtlasViewMaterialStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "viewMaterialStrength");
+        _worldAtlasShadowCascadeBlendStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowCascadeBlendStrength");
+        _worldAtlasFarWorldCohesionStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "farWorldCohesionStrength");
+        _worldAtlasShadowMapNearLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowMapNear");
+        _worldAtlasShadowMapFarLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowMapFar");
+        _worldAtlasShadowMapEnabledLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowMapEnabled");
+        _worldAtlasShadowNearOriginLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowNearOrigin");
+        _worldAtlasShadowNearRightLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowNearRight");
+        _worldAtlasShadowNearUpLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowNearUp");
+        _worldAtlasShadowNearForwardLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowNearForward");
+        _worldAtlasShadowNearHalfExtentsLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowNearHalfExtents");
+        _worldAtlasShadowFarOriginLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarOrigin");
+        _worldAtlasShadowFarRightLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarRight");
+        _worldAtlasShadowFarUpLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarUp");
+        _worldAtlasShadowFarForwardLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarForward");
+        _worldAtlasShadowFarHalfExtentsLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarHalfExtents");
+        _worldAtlasShadowDistanceRangeLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowDistanceRange");
+        _worldAtlasShadowFarProxyRangeLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarProxyRange");
+        _worldAtlasShadowFarProxyStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFarProxyStrength");
+        _worldAtlasShadowFilterRadiusLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowFilterRadius");
+        _worldAtlasShadowCascadeBlendWidthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowCascadeBlendWidth");
+        _worldAtlasShadowMapBiasLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowMapBias");
+        _worldAtlasShadowSlopeBiasStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowSlopeBiasStrength");
+        _worldAtlasShadowMapStrengthLoc = Raylib.GetShaderLocation(_worldAtlasShader, "shadowMapStrength");
         _hasWorldAtlasShader = true;
         ApplyWorldMaterialPassSettings();
+        ApplyWorldShadowPassSettings();
     }
 
     private void ApplyWorldShader(ref Material material)
@@ -523,6 +656,224 @@ public sealed class RaylibGamePlatform : IGamePlatform
         {
             Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFoliageTranslucencyStrengthLoc, _worldMaterialPassSettings.FoliageTranslucencyStrength, ShaderUniformDataType.Float);
         }
+
+        if (_worldAtlasSecondaryBounceStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSecondaryBounceStrengthLoc, _worldMaterialPassSettings.SecondaryBounceStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasDistanceMaterialStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasDistanceMaterialStrengthLoc, _worldMaterialPassSettings.DistanceMaterialStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasSkyResponseStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSkyResponseStrengthLoc, _worldMaterialPassSettings.SkyResponseStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasFarGradientStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFarGradientStrengthLoc, _worldMaterialPassSettings.FarGradientStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowContourStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowContourStrengthLoc, _worldMaterialPassSettings.ShadowContourStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasAtmosphereGradientStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasAtmosphereGradientStrengthLoc, _worldMaterialPassSettings.AtmosphereGradientStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasDistanceShadowLiftStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasDistanceShadowLiftStrengthLoc, _worldMaterialPassSettings.DistanceShadowLiftStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasSkyContourStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasSkyContourStrengthLoc, _worldMaterialPassSettings.SkyContourStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasDistantSilhouetteStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasDistantSilhouetteStrengthLoc, _worldMaterialPassSettings.DistantSilhouetteStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasAtmosphericContourStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasAtmosphericContourStrengthLoc, _worldMaterialPassSettings.AtmosphericContourStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasReliefBridgeStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasReliefBridgeStrengthLoc, _worldMaterialPassSettings.ReliefBridgeStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasShadowHazeFusionStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowHazeFusionStrengthLoc, _worldMaterialPassSettings.ShadowHazeFusionStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasLightPlasticityStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasLightPlasticityStrengthLoc, _worldMaterialPassSettings.LightPlasticityStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasFarReadabilityStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFarReadabilityStrengthLoc, _worldMaterialPassSettings.FarReadabilityStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasFinalCohesionStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFinalCohesionStrengthLoc, _worldMaterialPassSettings.FinalCohesionStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasViewMaterialStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasViewMaterialStrengthLoc, _worldMaterialPassSettings.ViewMaterialStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasShadowCascadeBlendStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowCascadeBlendStrengthLoc, _worldMaterialPassSettings.ShadowCascadeBlendStrength, ShaderUniformDataType.Float);
+        }
+        if (_worldAtlasFarWorldCohesionStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasFarWorldCohesionStrengthLoc, _worldMaterialPassSettings.FarWorldCohesionStrength, ShaderUniformDataType.Float);
+        }
+    }
+
+    private void ApplyWorldShadowPassSettings()
+    {
+        if (!_hasWorldAtlasShader || !_hasWorldShadowPassSettings)
+        {
+            return;
+        }
+
+        if (_hasWorldShadowNearTexture && _worldAtlasShadowMapNearLoc >= 0)
+        {
+            Raylib.SetShaderValueTexture(_worldAtlasShader, _worldAtlasShadowMapNearLoc, _worldShadowNearTexture);
+        }
+
+        if (_hasWorldShadowFarTexture && _worldAtlasShadowMapFarLoc >= 0)
+        {
+            Raylib.SetShaderValueTexture(_worldAtlasShader, _worldAtlasShadowMapFarLoc, _worldShadowFarTexture);
+        }
+
+        var enabled = _worldShadowPassSettings.Enabled ? 1f : 0f;
+        if (_worldAtlasShadowMapEnabledLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowMapEnabledLoc, enabled, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowNearOriginLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowNearOriginLoc, ToArray(_worldShadowPassSettings.NearOrigin), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowNearRightLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowNearRightLoc, ToArray(_worldShadowPassSettings.NearRight), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowNearUpLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowNearUpLoc, ToArray(_worldShadowPassSettings.NearUp), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowNearForwardLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowNearForwardLoc, ToArray(_worldShadowPassSettings.NearForward), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowNearHalfExtentsLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowNearHalfExtentsLoc, new[]
+            {
+                _worldShadowPassSettings.NearHalfWidth,
+                _worldShadowPassSettings.NearHalfHeight,
+                _worldShadowPassSettings.NearHalfDepth
+            }, ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowFarOriginLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarOriginLoc, ToArray(_worldShadowPassSettings.FarOrigin), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowFarRightLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarRightLoc, ToArray(_worldShadowPassSettings.FarRight), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowFarUpLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarUpLoc, ToArray(_worldShadowPassSettings.FarUp), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowFarForwardLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarForwardLoc, ToArray(_worldShadowPassSettings.FarForward), ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowFarHalfExtentsLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarHalfExtentsLoc, new[]
+            {
+                _worldShadowPassSettings.FarHalfWidth,
+                _worldShadowPassSettings.FarHalfHeight,
+                _worldShadowPassSettings.FarHalfDepth
+            }, ShaderUniformDataType.Vec3);
+        }
+
+        if (_worldAtlasShadowDistanceRangeLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowDistanceRangeLoc, new[]
+            {
+                _worldShadowPassSettings.NearDistance,
+                _worldShadowPassSettings.FarDistance
+            }, ShaderUniformDataType.Vec2);
+        }
+
+        if (_worldAtlasShadowFarProxyRangeLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarProxyRangeLoc, new[]
+            {
+                _worldShadowPassSettings.FarProxyStartDistance,
+                _worldShadowPassSettings.FarProxyEndDistance
+            }, ShaderUniformDataType.Vec2);
+        }
+
+        if (_worldAtlasShadowFarProxyStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFarProxyStrengthLoc, _worldShadowPassSettings.FarProxyStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowFilterRadiusLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowFilterRadiusLoc, new[]
+            {
+                _worldShadowPassSettings.NearFilterRadius,
+                _worldShadowPassSettings.FarFilterRadius
+            }, ShaderUniformDataType.Vec2);
+        }
+
+        if (_worldAtlasShadowCascadeBlendWidthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowCascadeBlendWidthLoc, _worldShadowPassSettings.CascadeBlendWidth, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowMapBiasLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowMapBiasLoc, _worldShadowPassSettings.Bias, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowSlopeBiasStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowSlopeBiasStrengthLoc, _worldShadowPassSettings.SlopeBiasStrength, ShaderUniformDataType.Float);
+        }
+
+        if (_worldAtlasShadowMapStrengthLoc >= 0)
+        {
+            Raylib.SetShaderValue(_worldAtlasShader, _worldAtlasShadowMapStrengthLoc, _worldShadowPassSettings.Strength, ShaderUniformDataType.Float);
+        }
     }
 
     private void ReleaseTexturedBlockResources()
@@ -561,11 +912,102 @@ public sealed class RaylibGamePlatform : IGamePlatform
         _worldAtlasMaterialSeparationStrengthLoc = -1;
         _worldAtlasShadowDepthStrengthLoc = -1;
         _worldAtlasSkyBlendStrengthLoc = -1;
+        _worldAtlasSunScatterStrengthLoc = -1;
+        _worldAtlasAmbientLiftStrengthLoc = -1;
+        _worldAtlasHazeStrengthLoc = -1;
+        _worldAtlasMaterialShadowStrengthLoc = -1;
+        _worldAtlasHorizonDepthStrengthLoc = -1;
+        _worldAtlasFoliageTranslucencyStrengthLoc = -1;
+        _worldAtlasSecondaryBounceStrengthLoc = -1;
+        _worldAtlasDistanceMaterialStrengthLoc = -1;
+        _worldAtlasSkyResponseStrengthLoc = -1;
+        _worldAtlasFarGradientStrengthLoc = -1;
+        _worldAtlasShadowContourStrengthLoc = -1;
+        _worldAtlasAtmosphereGradientStrengthLoc = -1;
+        _worldAtlasDistanceShadowLiftStrengthLoc = -1;
+        _worldAtlasSkyContourStrengthLoc = -1;
+        _worldAtlasDistantSilhouetteStrengthLoc = -1;
+        _worldAtlasAtmosphericContourStrengthLoc = -1;
+        _worldAtlasReliefBridgeStrengthLoc = -1;
+        _worldAtlasShadowHazeFusionStrengthLoc = -1;
+        _worldAtlasLightPlasticityStrengthLoc = -1;
+        _worldAtlasFarReadabilityStrengthLoc = -1;
+        _worldAtlasFinalCohesionStrengthLoc = -1;
+        _worldAtlasViewMaterialStrengthLoc = -1;
+        _worldAtlasShadowCascadeBlendStrengthLoc = -1;
+        _worldAtlasFarWorldCohesionStrengthLoc = -1;
+        _worldAtlasShadowMapNearLoc = -1;
+        _worldAtlasShadowMapFarLoc = -1;
+        _worldAtlasShadowMapEnabledLoc = -1;
+        _worldAtlasShadowNearOriginLoc = -1;
+        _worldAtlasShadowNearRightLoc = -1;
+        _worldAtlasShadowNearUpLoc = -1;
+        _worldAtlasShadowNearForwardLoc = -1;
+        _worldAtlasShadowNearHalfExtentsLoc = -1;
+        _worldAtlasShadowFarOriginLoc = -1;
+        _worldAtlasShadowFarRightLoc = -1;
+        _worldAtlasShadowFarUpLoc = -1;
+        _worldAtlasShadowFarForwardLoc = -1;
+        _worldAtlasShadowFarHalfExtentsLoc = -1;
+        _worldAtlasShadowDistanceRangeLoc = -1;
+        _worldAtlasShadowFarProxyRangeLoc = -1;
+        _worldAtlasShadowFarProxyStrengthLoc = -1;
+        _worldAtlasShadowFilterRadiusLoc = -1;
+        _worldAtlasShadowCascadeBlendWidthLoc = -1;
+        _worldAtlasShadowMapBiasLoc = -1;
+        _worldAtlasShadowSlopeBiasStrengthLoc = -1;
+        _worldAtlasShadowMapStrengthLoc = -1;
 
         if (_hasWorldAtlasTexture)
         {
             Raylib.UnloadTexture(_worldAtlasTexture);
             _hasWorldAtlasTexture = false;
+        }
+
+        if (_hasWorldShadowNearTexture)
+        {
+            Raylib.UnloadTexture(_worldShadowNearTexture);
+            _hasWorldShadowNearTexture = false;
+        }
+
+        if (_hasWorldShadowFarTexture)
+        {
+            Raylib.UnloadTexture(_worldShadowFarTexture);
+            _hasWorldShadowFarTexture = false;
+        }
+    }
+
+    private static float[] ToArray(Vector3 value) => [value.X, value.Y, value.Z];
+
+    private static void EnsureShadowTexture(ref Texture2D texture, ref bool hasTexture, int resolution)
+    {
+        if (hasTexture && texture.Width == resolution && texture.Height == resolution)
+        {
+            return;
+        }
+
+        if (hasTexture)
+        {
+            Raylib.UnloadTexture(texture);
+            hasTexture = false;
+        }
+
+        var image = Raylib.GenImageColor(resolution, resolution, new Color(255, 255, 255, 255));
+        texture = Raylib.LoadTextureFromImage(image);
+        Raylib.UnloadImage(image);
+        hasTexture = texture.Id > 0;
+    }
+
+    private static unsafe void UpdateShadowTexture(Texture2D texture, byte[] values)
+    {
+        if (texture.Id <= 0 || values.Length == 0)
+        {
+            return;
+        }
+
+        fixed (byte* ptr = values)
+        {
+            Raylib.UpdateTexture(texture, ptr);
         }
     }
 

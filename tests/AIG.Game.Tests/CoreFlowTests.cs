@@ -866,8 +866,36 @@ public sealed class CoreFlowTests
         var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
         Assert.Single(logs);
         var logText = File.ReadAllText(logs[0]);
-        Assert.Contains("warmup_frames_ignored=60", logText, StringComparison.Ordinal);
+        Assert.Contains("warmup_frames_ignored=120", logText, StringComparison.Ordinal);
         Assert.Contains("result=PASS", logText, StringComparison.Ordinal);
+    }
+
+    [Fact(DisplayName = "WarmupAutoPerfVisualCache прогревает несколько проходов и восстанавливает позу игрока")]
+    public void WarmupAutoPerfVisualCache_WarmsMultiplePasses_AndRestoresPlayerPose()
+    {
+        var platform = new FakeGamePlatform();
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 64, height: 24, depth: 64, chunkSize: 16, seed: 777);
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(32.5f, 6.2f, 32.5f));
+        var originalLook = Vector3.Normalize(new Vector3(0.3f, -0.2f, 0.9f));
+        player.SetPose(player.Position, originalLook);
+
+        typeof(GameApp).GetMethod("InitializePlatform", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [false]);
+        typeof(GameApp).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(app, player);
+
+        typeof(GameApp).GetMethod("WarmupAutoPerfVisualCache", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, [player.Position]);
+
+        Assert.True(platform.BeginDrawingCalls >= 48);
+        var warmedPlayer = (PlayerController)typeof(GameApp).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(app)!;
+        Assert.Equal(player.Position, warmedPlayer.Position);
+        Assert.InRange(Vector3.Distance(originalLook, warmedPlayer.LookDirection), 0f, 0.0001f);
+
+        typeof(GameApp).GetMethod("ShutdownPlatform", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(app, null);
     }
 
     [Fact(DisplayName = "RunAutoPerf учитывает warmup и пишет FAIL на длинном нестабильном прогоне")]
@@ -891,7 +919,7 @@ public sealed class CoreFlowTests
         var logs = Directory.GetFiles(outputDir, "autoperf-*.log");
         Assert.Single(logs);
         var logText = File.ReadAllText(logs[0]);
-        Assert.Contains("warmup_frames_ignored=60", logText, StringComparison.Ordinal);
+        Assert.Contains("warmup_frames_ignored=120", logText, StringComparison.Ordinal);
         Assert.Contains("result=FAIL", logText, StringComparison.Ordinal);
     }
 
@@ -1480,10 +1508,12 @@ public sealed class CoreFlowTests
 
         for (var x = 0; x < world.Width; x++)
         {
-            for (var z = 0; z < world.Depth; z++)
+            for (var y = 0; y < world.Height; y++)
             {
-                world.SetBlock(x, 0, z, BlockType.Air);
-                world.SetBlock(x, 1, z, BlockType.Air);
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
             }
         }
 
@@ -1521,7 +1551,7 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.True(platform.DrawCubeCalls > 0);
+        Assert.True(platform.DrawCubeCalls > 0 || platform.DrawTexturedChunkMeshCalls > 0);
     }
 
     [Fact(DisplayName = "DrawWorld в дефолтном большом мире рисует геометрию возле спавна")]
@@ -1591,10 +1621,12 @@ public sealed class CoreFlowTests
         var world = new WorldMap(width: 16, height: 8, depth: 16, chunkSize: 8, seed: 0);
         for (var x = 0; x < world.Width; x++)
         {
-            for (var z = 0; z < world.Depth; z++)
+            for (var y = 0; y < world.Height; y++)
             {
-                world.SetBlock(x, 0, z, BlockType.Air);
-                world.SetBlock(x, 1, z, BlockType.Air);
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
             }
         }
 
@@ -1611,7 +1643,9 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.DoesNotContain(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(70.5f, 2.5f, 9.5f)) < 0.01f);
     }
 
     [Fact(DisplayName = "DrawWorld отрисовывает неизвестный тип блока через fallback-цвет")]
@@ -1673,18 +1707,20 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.DoesNotContain(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(90.5f, 2.5f, 10.5f)) < 0.01f);
     }
 
-    [Fact(DisplayName = "DrawWorld отсекает очень дальние стволы на very-far LOD")]
-    public void DrawWorld_CullsVeryFarWood()
+    [Fact(DisplayName = "DrawWorld сохраняет очень дальние стволы внутри нового high real-world range")]
+    public void DrawWorld_KeepsVeryFarWoodWithinExtendedRange()
     {
         var config = new GameConfig
         {
             FullscreenByDefault = false,
             GraphicsQuality = GraphicsQuality.High
         };
-        var world = new WorldMap(width: 160, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        var world = new WorldMap(width: 256, height: 12, depth: 32, chunkSize: 8, seed: 0);
 
         for (var x = 0; x < world.Width; x++)
         {
@@ -1695,7 +1731,7 @@ public sealed class CoreFlowTests
             }
         }
 
-        world.SetBlock(70, 2, 9, BlockType.Wood);
+        world.SetBlock(140, 2, 9, BlockType.Wood);
 
         var platform = new FakeGamePlatform();
         var app = new GameApp(config, platform, world);
@@ -1712,7 +1748,9 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.Contains(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(140.5f, 2.5f, 9.5f)) < 0.01f);
     }
 
     [Fact(DisplayName = "DrawWorld отсекает нетеррейн-блок на ultra-far LOD")]
@@ -1723,7 +1761,7 @@ public sealed class CoreFlowTests
             FullscreenByDefault = false,
             GraphicsQuality = GraphicsQuality.High
         };
-        var world = new WorldMap(width: 192, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        var world = new WorldMap(width: 320, height: 12, depth: 32, chunkSize: 8, seed: 0);
 
         for (var x = 0; x < world.Width; x++)
         {
@@ -1734,7 +1772,7 @@ public sealed class CoreFlowTests
             }
         }
 
-        world.SetBlock(90, 2, 10, (BlockType)999);
+        world.SetBlock(220, 2, 10, (BlockType)999);
 
         var platform = new FakeGamePlatform();
         var app = new GameApp(config, platform, world);
@@ -1751,7 +1789,9 @@ public sealed class CoreFlowTests
         Assert.NotNull(method);
         method!.Invoke(app, null);
 
-        Assert.Equal(0, platform.DrawCubeCalls);
+        Assert.DoesNotContain(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(220.5f, 2.5f, 10.5f)) < 0.01f);
     }
 
     [Fact(DisplayName = "DrawWorld отсекает ultra-far неизвестный блок при keepChance=0 после sparse-множителя")]
@@ -1762,7 +1802,7 @@ public sealed class CoreFlowTests
             FullscreenByDefault = false,
             GraphicsQuality = GraphicsQuality.High
         };
-        var world = new WorldMap(width: 176, height: 12, depth: 32, chunkSize: 8, seed: 0);
+        var world = new WorldMap(width: 320, height: 12, depth: 32, chunkSize: 8, seed: 0);
 
         for (var x = 0; x < world.Width; x++)
         {
@@ -1773,7 +1813,7 @@ public sealed class CoreFlowTests
             }
         }
 
-        world.SetBlock(108, 2, 9, (BlockType)999); // дистанция ~100 блоков: keepChance становится 0 в sparse ветке
+        world.SetBlock(220, 2, 9, (BlockType)999); // дистанция > 190 блоков: блок выходит за real-world range
 
         var platform = new FakeGamePlatform
         {
@@ -1794,6 +1834,132 @@ public sealed class CoreFlowTests
         method!.Invoke(app, null);
 
         Assert.Equal(0, platform.DrawCubeCalls);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает дальнюю листву, когда foliage keep становится нулевым")]
+    public void DrawWorld_CullsFarLeaves_WhenFoliageKeepBecomesZero()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 256, height: 12, depth: 32, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                world.SetBlock(x, 0, z, BlockType.Air);
+                world.SetBlock(x, 1, z, BlockType.Air);
+            }
+        }
+
+        world.SetBlock(193, 2, 10, BlockType.Leaves);
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 120
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 10.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_adaptiveRenderDistance", 56f);
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+        world.EnsureChunksAround(player.Position, radiusInChunks: 12);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 400);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.DoesNotContain(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(193.5f, 2.5f, 10.5f)) < 0.01f);
+    }
+
+    [Fact(DisplayName = "DrawWorld отсекает atmospheric non-terrain поверхности до этапа draw")]
+    public void DrawWorld_CullsAtmosphericNonTerrainSurfaces()
+    {
+        var config = new GameConfig
+        {
+            FullscreenByDefault = false,
+            GraphicsQuality = GraphicsQuality.High
+        };
+        var world = new WorldMap(width: 256, height: 12, depth: 40, chunkSize: 8, seed: 0);
+
+        for (var x = 0; x < world.Width; x++)
+        {
+            for (var y = 0; y < world.Height; y++)
+            {
+                for (var z = 0; z < world.Depth; z++)
+                {
+                    world.SetBlock(x, y, z, BlockType.Air);
+                }
+            }
+        }
+
+        var platform = new FakeGamePlatform
+        {
+            Fps = 120
+        };
+        var app = new GameApp(config, platform, world);
+        var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 11.5f));
+        player.SetPose(player.Position, new Vector3(1f, 0f, 0f));
+        SetPrivateField(app, "_player", player);
+        SetPrivateField(app, "_adaptiveRenderDistance", 190f);
+        var appStateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(appStateType);
+        SetPrivateField(app, "_state", Enum.Parse(appStateType!, "Playing"));
+
+        var buildProfile = typeof(GameApp).GetMethod("BuildWorldVisibilityProfile", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var blendMethod = typeof(GameApp).GetMethod("GetVisibilityBlendWeights", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var edgeKeepMethod = typeof(GameApp).GetMethod("GetDistanceEdgeKeep", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var sparseKeepMethod = typeof(GameApp).GetMethod("GetSparseFarKeepChance", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var ditherMethod = typeof(GameApp).GetMethod("PassSpatialDither", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var profile = buildProfile.Invoke(null, [22f, 22f, 190f, 195.5f])!;
+        var selected = (X: -1, Z: -1);
+
+        for (var x = 190; x <= 220 && selected.X < 0; x++)
+        {
+            for (var z = 0; z < world.Depth; z++)
+            {
+                var distance = Vector2.Distance(new Vector2(player.Position.X, player.Position.Z), new Vector2(x + 0.5f, z + 0.5f));
+                var blend = blendMethod.Invoke(null, [distance, profile])!;
+                var atmospheric = (float)blend.GetType().GetProperty("Atmospheric")!.GetValue(blend)!;
+                if (atmospheric < 0.92f)
+                {
+                    continue;
+                }
+
+                var keepChance = (float)edgeKeepMethod.Invoke(app, [distance, 190f, 5.5f])!;
+                keepChance *= (float)sparseKeepMethod.Invoke(app, [BlockType.Wood, distance, 96f, 190f, 190f])!;
+                var pass = (bool)ditherMethod.Invoke(null, [x, 2, z, (int)BlockType.Wood * 37 + 17, keepChance])!;
+                if (!pass)
+                {
+                    continue;
+                }
+
+                selected = (x, z);
+                break;
+            }
+        }
+
+        Assert.True(selected.X >= 0, "Нужна точка в atmospheric-band, проходящая spatial dither.");
+        world.SetBlock(selected.X, 2, selected.Z, BlockType.Wood);
+        world.EnsureChunksAround(player.Position, radiusInChunks: 28);
+        _ = world.RebuildDirtyChunkSurfaces(player.Position, maxChunks: 600);
+
+        var method = typeof(GameApp).GetMethod("DrawWorld", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        method!.Invoke(app, null);
+
+        Assert.DoesNotContain(
+            platform.DrawnCubes,
+            call => Vector3.Distance(call.Position, new Vector3(selected.X + 0.5f, 2.5f, selected.Z + 0.5f)) < 0.01f);
     }
 
     [Fact(DisplayName = "DrawWorld применяет far-style для дальнего блока Dirt")]
@@ -1866,7 +2032,7 @@ public sealed class CoreFlowTests
 
         var platform = new FakeGamePlatform
         {
-            Fps = 66 // High-профиль адаптируется до RenderDistance=34
+            Fps = 66 // High-профиль адаптируется до нового дальнего high-range без мгновенного full 190
         };
         var app = new GameApp(config, platform, world);
         var player = new PlayerController(config, new Vector3(8.5f, 2.2f, 15.5f));
@@ -2080,7 +2246,7 @@ public sealed class CoreFlowTests
         }
 
         Assert.True(later > next);
-        Assert.True(later <= 56);
+        Assert.True(later <= 150);
     }
 
     [Fact(DisplayName = "Forward prefetch подгружает чанки по направлению взгляда")]
@@ -2656,9 +2822,12 @@ public sealed class CoreFlowTests
 
         var method = typeof(GameApp).GetMethod("DrawHitFaceHighlight", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
+        var settingsMethod = typeof(GameApp).GetMethod("BuildSelectionPassSettings", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(settingsMethod);
 
         var hit = new BlockRaycastHit(1, 1, 1, 0, 1, 1);
-        method!.Invoke(app, [hit, new Vector3(1f, 0f, 0f)]);
+        var settings = settingsMethod!.Invoke(null, null)!;
+        method!.Invoke(app, [hit, new Vector3(1f, 0f, 0f), settings]);
 
         var highlight = platform.DrawnCubeWires.Single(wire => MathF.Abs(wire.Width - 0.035f) < 0.0001f);
         Assert.True(MathF.Abs(highlight.Width - 0.035f) < 0.0001f);
@@ -2677,16 +2846,19 @@ public sealed class CoreFlowTests
 
         var method = typeof(GameApp).GetMethod("DrawHitFaceHighlight", BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
+        var settingsMethod = typeof(GameApp).GetMethod("BuildSelectionPassSettings", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(settingsMethod);
 
         var hit = new BlockRaycastHit(1, 1, 1, 1, 1, 2);
-        method!.Invoke(app, [hit, new Vector3(0f, 0f, 1f)]);
+        var settings = settingsMethod!.Invoke(null, null)!;
+        method!.Invoke(app, [hit, new Vector3(0f, 0f, 1f), settings]);
 
         var fill = Assert.Single(platform.DrawnCubes);
         Assert.True(MathF.Abs(fill.Length - 0.035f) < 0.0001f);
         Assert.Equal(255, fill.Color.R);
         Assert.Equal(236, fill.Color.G);
         Assert.Equal(162, fill.Color.B);
-        Assert.Equal(7, platform.DrawnCubeWires.Count);
+        Assert.Equal(15, platform.DrawnCubeWires.Count);
     }
 
     [Fact(DisplayName = "TryGetHitFaceNormal отклоняет скачок previous более чем на 1 блок по любой оси")]
@@ -2954,6 +3126,32 @@ public sealed class CoreFlowTests
         Assert.True(MathF.Abs(highlight.Length - 1.02f) < 0.0001f);
     }
 
+    [Fact(DisplayName = "DrawBlockHighlight конфигурирует selection pass для resolved face")]
+    public void DrawBlockHighlight_ConfiguresSelectionPass_ForResolvedFace()
+    {
+        var platform = new FakeGamePlatform();
+        var app = new GameApp(
+            new GameConfig { FullscreenByDefault = false },
+            platform,
+            new WorldMap(width: 16, height: 16, depth: 16, chunkSize: 8, seed: 0));
+
+        var stateType = typeof(GameApp).GetNestedType("AppState", BindingFlags.NonPublic);
+        Assert.NotNull(stateType);
+        var playingState = Enum.Parse(stateType!, "Playing");
+        SetPrivateField(app, "_state", playingState);
+
+        var method = typeof(GameApp).GetMethod("DrawBlockHighlight", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var hit = new BlockRaycastHit(10, 5, 8, 10, 6, 8);
+        method!.Invoke(app, [(BlockRaycastHit?)hit, new Vector3(10.5f, 5.6f, 9.6f), new Vector3(0f, 0f, -1f)]);
+
+        Assert.Equal(1, platform.ConfigureSelectionPassCalls);
+        var settings = Assert.Single(platform.SelectionPasses);
+        Assert.True(settings.Size > settings.Thickness);
+        Assert.True(settings.OutlineColor.A > settings.FillColor.A);
+    }
+
     [Fact(DisplayName = "DrawBlockHighlight рисует рамку блока, если не удалось получить грань")]
     public void DrawBlockHighlight_DrawsFullBlockFallback_WhenFaceUnknown()
     {
@@ -3180,6 +3378,9 @@ public sealed class CoreFlowTests
 
         var terrainSurface = new WorldMap.SurfaceBlock(8, 2, 8, BlockType.Stone, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
         var customTerrainBlend = Activator.CreateInstance(lodType!, [0.3f, 0.2f, 0.5f])!;
+        var visibilityType = typeof(GameApp).GetNestedType("VisibilityBlendWeights", BindingFlags.NonPublic);
+        Assert.NotNull(visibilityType);
+        var terrainVisibility = Activator.CreateInstance(visibilityType!, [0f, 0.10f, 0.62f, 0.28f])!;
         var terrainColor = (Color)method!.Invoke(
             app,
             [
@@ -3187,18 +3388,25 @@ public sealed class CoreFlowTests
                 terrainSurface,
                 30f,
                 0.8f,
-                customTerrainBlend
+                customTerrainBlend,
+                terrainVisibility
             ])!;
 
         var expectedFar = (Color)typeof(GameApp).GetMethod("ApplyFarSurfaceStyle", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
             app,
             [new Color(124, 120, 113, 255), terrainSurface, 30f])!;
-        Assert.Equal(expectedFar.R, terrainColor.R);
-        Assert.Equal(expectedFar.G, terrainColor.G);
-        Assert.Equal(expectedFar.B, terrainColor.B);
+        var expectedNear = (Color)typeof(GameApp).GetMethod("ApplyVisualSurfaceStyle", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(
+            app,
+            [new Color(124, 120, 113, 255), terrainSurface, 30f])!;
+        Assert.InRange(Math.Abs(terrainColor.R - expectedFar.R), 0, 18);
+        Assert.InRange(Math.Abs(terrainColor.G - expectedFar.G), 0, 18);
+        Assert.InRange(Math.Abs(terrainColor.B - expectedFar.B), 0, 18);
+        Assert.NotEqual(expectedFar, terrainColor);
+        Assert.True(Math.Abs(terrainColor.R - expectedNear.R) > 0 || Math.Abs(terrainColor.G - expectedNear.G) > 0 || Math.Abs(terrainColor.B - expectedNear.B) > 0);
 
         var fallbackSurface = new WorldMap.SurfaceBlock(9, 2, 9, BlockType.Wood, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
         var fallbackBlend = Activator.CreateInstance(lodType, [0.4f, 0.1f, 0.5f])!;
+        var fallbackVisibility = Activator.CreateInstance(visibilityType, [0.18f, 0.20f, 0.42f, 0.20f])!;
         var fallbackColor = (Color)method.Invoke(
             app,
             [
@@ -3206,7 +3414,8 @@ public sealed class CoreFlowTests
                 fallbackSurface,
                 24f,
                 0.5f,
-                fallbackBlend
+                fallbackBlend,
+                fallbackVisibility
             ])!;
 
         Assert.InRange(fallbackColor.R, 0, 255);
@@ -3227,6 +3436,9 @@ public sealed class CoreFlowTests
 
         var surface = new WorldMap.SurfaceBlock(9, 2, 9, BlockType.Wood, VisibleFaces: 4, TopVisible: true, SkyExposure: 3);
         var blend = Activator.CreateInstance(lodType!, [0f, 0.5f, 0f])!;
+        var visibilityType = typeof(GameApp).GetNestedType("VisibilityBlendWeights", BindingFlags.NonPublic);
+        Assert.NotNull(visibilityType);
+        var visibility = Activator.CreateInstance(visibilityType!, [0f, 0.52f, 0.48f, 0f])!;
         var color = (Color)method!.Invoke(
             app,
             [
@@ -3234,7 +3446,8 @@ public sealed class CoreFlowTests
                 surface,
                 24f,
                 0.5f,
-                blend
+                blend,
+                visibility
             ])!;
 
         Assert.InRange(color.R, 0, 255);

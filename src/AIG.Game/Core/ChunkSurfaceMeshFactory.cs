@@ -26,6 +26,12 @@ public sealed class ChunkSurfaceMeshData
 
 internal static class ChunkSurfaceMeshFactory
 {
+    internal enum DistantTerrainLightingProfile
+    {
+        Far,
+        UltraFar
+    }
+
     private readonly record struct FaceDefinition(
         Vector3 Normal,
         Vector3 V0,
@@ -56,7 +62,17 @@ internal static class ChunkSurfaceMeshFactory
 
             var center = new Vector3(surface.X + 0.5f, surface.Y + 0.5f, surface.Z + 0.5f);
             var tiles = WorldTextureAtlas.GetFaceTiles(surface.Block);
-            var sunLight = 0.72f + (surface.SunVisibility / (float)WorldMap.MaxSunVisibility) * 0.28f;
+            var daylight = Math.Clamp(surface.Daylight / (float)WorldMap.MaxDaylight, 0f, 1f);
+            var localLight = Math.Clamp(surface.LocalLight / (float)WorldMap.MaxLocalLight, 0f, 1f);
+            var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+            var combinedLight = MathF.Max(daylight * 0.96f, localLight);
+            var bouncedLocalLight = localLight * (surface.TopVisible ? 0.12f : 0.20f);
+            var sunLight = 0.06f
+                + daylight * 0.34f
+                + sunVisibility * 0.20f
+                + localLight * 0.28f
+                + combinedLight * 0.14f
+                + bouncedLocalLight * 0.08f;
             var occlusion = 1f - surface.AmbientOcclusion * 0.045f;
             var relief = 0.92f + surface.ReliefExposure * 0.02f;
 
@@ -177,6 +193,71 @@ internal static class ChunkSurfaceMeshFactory
             indices.ToArray());
     }
 
+    public static ChunkSurfaceMeshData BuildDistantTerrainProxy(
+        IReadOnlyList<WorldMap.SurfaceBlock> surfaces,
+        int sampleStep,
+        DistantTerrainLightingProfile lightingProfile)
+    {
+        var step = Math.Max(1, sampleStep);
+        var vertices = new List<float>(surfaces.Count * 6);
+        var texCoords = new List<float>(surfaces.Count * 4);
+        var normals = new List<float>(surfaces.Count * 6);
+        var colors = new List<byte>(surfaces.Count * 8);
+        var indices = new List<ushort>(surfaces.Count * 6);
+        var halfSpan = Math.Clamp(step * 0.5f, 0.5f, 2.5f);
+
+        for (var i = 0; i < surfaces.Count; i++)
+        {
+            var surface = surfaces[i];
+            if (!surface.TopVisible
+                || !GameApp.IsTerrainSurfaceBlock(surface.Block)
+                || surface.X % step != 0
+                || surface.Z % step != 0)
+            {
+                continue;
+            }
+
+            var center = new Vector3(surface.X + 0.5f, surface.Y + 0.5f, surface.Z + 0.5f);
+            var tiles = WorldTextureAtlas.GetFaceTiles(surface.Block);
+            var daylight = Math.Clamp(surface.Daylight / (float)WorldMap.MaxDaylight, 0f, 1f);
+            var localLight = Math.Clamp(surface.LocalLight / (float)WorldMap.MaxLocalLight, 0f, 1f);
+            var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+            var relief = 0.94f + Math.Clamp(surface.ReliefExposure / 6f, 0f, 1f) * 0.10f;
+            var cheapLocalLight = lightingProfile == DistantTerrainLightingProfile.Far
+                ? MathF.Min(localLight, 0.40f) * 0.26f
+                : 0f;
+            var daylightEnvelope = MathF.Max(daylight * 0.94f, sunVisibility * 0.72f);
+            var sunLight = lightingProfile == DistantTerrainLightingProfile.Far
+                ? 0.22f + daylightEnvelope * 0.32f + cheapLocalLight * 0.06f + sunVisibility * 0.10f
+                : 0.18f + daylightEnvelope * 0.28f + sunVisibility * 0.10f + Math.Clamp(surface.SkyExposure / 5f, 0f, 1f) * 0.02f;
+
+            AddFaceIfVisible(new FaceDefinition(
+                new Vector3(0f, 1f, 0f),
+                center + new Vector3(-halfSpan, 0.5f, -halfSpan),
+                center + new Vector3(halfSpan, 0.5f, -halfSpan),
+                center + new Vector3(halfSpan, 0.5f, halfSpan),
+                center + new Vector3(-halfSpan, 0.5f, halfSpan),
+                tiles.Top,
+                ApplyLight(212, sunLight, relief),
+                EncodeDistantTerrainSunChannel(surface, lightingProfile),
+                EncodeDistantTerrainAccentChannel(surface, lightingProfile),
+                EncodeMaterialChannel(surface.Block)),
+                visible: true,
+                vertices,
+                texCoords,
+                normals,
+                colors,
+                indices);
+        }
+
+        return new ChunkSurfaceMeshData(
+            vertices.ToArray(),
+            texCoords.ToArray(),
+            normals.ToArray(),
+            colors.ToArray(),
+            indices.ToArray());
+    }
+
     private static void AddFaceIfVisible(
         FaceDefinition face,
         bool visible,
@@ -244,21 +325,25 @@ internal static class ChunkSurfaceMeshFactory
 
     private static byte ApplyLight(byte baseShade, float sunLight, float accent)
     {
-        var value = baseShade * Math.Clamp(sunLight * accent, 0.45f, 1.25f);
-        return (byte)Math.Clamp((int)MathF.Round(value), 48, 255);
+        var value = baseShade * Math.Clamp(sunLight * accent, 0.10f, 1.25f);
+        return (byte)Math.Clamp((int)MathF.Round(value), 12, 255);
     }
 
     private static byte EncodeSunChannel(WorldMap.SurfaceBlock surface, float topBias, float visibilityBias)
     {
+        var daylight = Math.Clamp(surface.Daylight / (float)WorldMap.MaxDaylight, 0f, 1f);
+        var localLight = Math.Clamp(surface.LocalLight / (float)WorldMap.MaxLocalLight, 0f, 1f);
         var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
         var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
         var sky = Math.Clamp(surface.SkyExposure / 5f, 0f, 1f);
-        var value = 0.30f
-            + sunVisibility * (0.52f + visibilityBias)
-            + sky * 0.10f
-            + (surface.TopVisible ? 0.08f : -0.04f)
+        var value = 0.04f
+            + daylight * 0.30f
+            + localLight * 0.24f
+            + sunVisibility * (0.26f + visibilityBias)
+            + sky * 0.04f
+            + (surface.TopVisible ? 0.04f : -0.05f)
             + topBias
-            - cavity * 0.14f;
+            - cavity * 0.18f;
         return EncodeUnit(value);
     }
 
@@ -291,5 +376,36 @@ internal static class ChunkSurfaceMeshFactory
     private static byte EncodeUnit(float value)
     {
         return (byte)Math.Clamp((int)MathF.Round(Math.Clamp(value, 0.05f, 1f) * 255f), 18, 255);
+    }
+
+    private static byte EncodeDistantTerrainSunChannel(WorldMap.SurfaceBlock surface, DistantTerrainLightingProfile lightingProfile)
+    {
+        var daylight = Math.Clamp(surface.Daylight / (float)WorldMap.MaxDaylight, 0f, 1f);
+        var localLight = Math.Clamp(surface.LocalLight / (float)WorldMap.MaxLocalLight, 0f, 1f);
+        var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+        var sky = Math.Clamp(surface.SkyExposure / 5f, 0f, 1f);
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var localContribution = lightingProfile == DistantTerrainLightingProfile.Far
+            ? MathF.Min(localLight, 0.40f) * 0.05f
+            : 0f;
+        var value = 0.07f
+            + daylight * 0.26f
+            + sunVisibility * (lightingProfile == DistantTerrainLightingProfile.Far ? 0.20f : 0.22f)
+            + sky * 0.02f
+            + localContribution
+            + (surface.TopVisible ? 0.03f : -0.03f)
+            - cavity * (lightingProfile == DistantTerrainLightingProfile.Far ? 0.14f : 0.12f);
+        return EncodeUnit(value);
+    }
+
+    private static byte EncodeDistantTerrainAccentChannel(WorldMap.SurfaceBlock surface, DistantTerrainLightingProfile lightingProfile)
+    {
+        var ridge = Math.Clamp(surface.ReliefExposure / 4f, 0f, 1f);
+        var cavity = Math.Clamp(surface.AmbientOcclusion / 8f, 0f, 1f);
+        var sunVisibility = Math.Clamp(surface.SunVisibility / (float)WorldMap.MaxSunVisibility, 0f, 1f);
+        var value = lightingProfile == DistantTerrainLightingProfile.Far
+            ? 0.42f + ridge * 0.34f + sunVisibility * 0.05f - cavity * 0.16f
+            : 0.40f + ridge * 0.30f + sunVisibility * 0.03f - cavity * 0.14f;
+        return EncodeUnit(value);
     }
 }

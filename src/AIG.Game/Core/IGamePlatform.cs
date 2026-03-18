@@ -27,7 +27,117 @@ public readonly record struct WorldMaterialPassSettings(
     float HazeStrength,
     float MaterialShadowStrength,
     float HorizonDepthStrength,
-    float FoliageTranslucencyStrength);
+    float FoliageTranslucencyStrength,
+    float SecondaryBounceStrength,
+    float DistanceMaterialStrength,
+    float SkyResponseStrength,
+    float FarGradientStrength,
+    float ShadowContourStrength,
+    float AtmosphereGradientStrength,
+    float DistanceShadowLiftStrength,
+    float SkyContourStrength,
+    float DistantSilhouetteStrength,
+    float AtmosphericContourStrength,
+    float ReliefBridgeStrength,
+    float ShadowHazeFusionStrength,
+    float LightPlasticityStrength,
+    float FarReadabilityStrength,
+    float FinalCohesionStrength,
+    float ViewMaterialStrength,
+    float ShadowCascadeBlendStrength,
+    float FarWorldCohesionStrength);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct WorldShadowPassSettings(
+    bool Enabled,
+    int NearResolution,
+    int FarResolution,
+    float NearFilterRadius,
+    float FarFilterRadius,
+    Vector3 NearOrigin,
+    Vector3 NearRight,
+    Vector3 NearUp,
+    Vector3 NearForward,
+    float NearHalfWidth,
+    float NearHalfHeight,
+    float NearHalfDepth,
+    Vector3 FarOrigin,
+    Vector3 FarRight,
+    Vector3 FarUp,
+    Vector3 FarForward,
+    float FarHalfWidth,
+    float FarHalfHeight,
+    float FarHalfDepth,
+    float NearDistance,
+    float FarDistance,
+    float FarProxyStartDistance,
+    float FarProxyEndDistance,
+    float FarProxyStrength,
+    float CascadeBlendWidth,
+    float Bias,
+    float SlopeBiasStrength,
+    float Strength);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct SkyPassSettings(
+    Color TopColor,
+    Color MidColor,
+    Color HorizonColor,
+    Color GlowColor,
+    int HorizonY,
+    float CloudStrength,
+    float RidgeStrength);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct ScreenSpacePassSettings(
+    Color FogColor,
+    int HorizonY,
+    float Strength,
+    float OverlayAlpha,
+    bool DeviceOpen);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct SelectionPassSettings(
+    Color FillColor,
+    Color OutlineColor,
+    Color CoolOutlineColor,
+    Color WarmOutlineColor,
+    Color OuterCoolOutlineColor,
+    float Thickness,
+    float Size);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct HeldBlockPassSettings(
+    BlockType Block,
+    Color BaseColor,
+    Color ShadowColor,
+    Color AccentColor,
+    Color EdgeColor,
+    Color CoolFacetColor,
+    Color WarmRimColor,
+    Color WarmWireColor,
+    Color CoolWireColor);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct ObjectPassSettings(
+    Color ShadowColor,
+    Color HighlightColor,
+    Color WarmRimColor,
+    float GroundShadowOffset,
+    float GroundShadowAlpha,
+    float ContactShadowAlpha);
+
+[ExcludeFromCodeCoverage]
+public readonly record struct FinalCompositePassSettings(
+    Color FogColor,
+    int HorizonY,
+    float Strength,
+    float OverlayAlpha,
+    bool DeviceOpen,
+    float FogBandStrength,
+    float BloomStrength,
+    float AtmosphereStrength,
+    float VignetteStrength);
 
 public interface IGamePlatform
 {
@@ -57,6 +167,13 @@ public interface IGamePlatform
     void DrawCube(Vector3 position, float width, float height, float length, Color color);
     void DrawCubeInstanced(IReadOnlyList<Matrix4x4> transforms, Color color);
     void ConfigureWorldMaterialPass(WorldMaterialPassSettings settings);
+    void ConfigureWorldShadowPass(WorldShadowPassSettings settings, byte[] nearShadowMap, byte[] farShadowMap);
+    void ConfigureSkyPass(SkyPassSettings settings);
+    void ConfigureScreenSpacePass(ScreenSpacePassSettings settings);
+    void ConfigureSelectionPass(SelectionPassSettings settings);
+    void ConfigureHeldBlockPass(HeldBlockPassSettings settings);
+    void ConfigureObjectPass(ObjectPassSettings settings);
+    void ConfigureFinalCompositePass(FinalCompositePassSettings settings);
     void DrawTexturedBlockInstanced(BlockType block, IReadOnlyList<Matrix4x4> transforms);
     void DrawTexturedChunkMesh(int chunkX, int chunkZ, int revision, ChunkSurfaceMeshData mesh);
     void DrawCubeWires(Vector3 position, float width, float height, float length, Color color);
