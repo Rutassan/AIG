@@ -1,5 +1,6 @@
 using AIG.Game.Config;
 using AIG.Game.Core;
+using AIG.Game.Cosmos;
 using AIG.Game.World;
 using System.Globalization;
 
@@ -13,19 +14,20 @@ public static class Program
     internal static Func<string, float, int, IGameRunner> AutoPerfFactory { get; set; } = static (outputDir, durationSeconds, minFps) => new AutoPerfRunner(outputDir, durationSeconds, minFps);
     internal static Func<GameConfig> AutoCaptureConfigFactory { get; set; } = static () => new GameConfig
     {
-        Title = "AIG 0.022 (29) Autocap",
+        Title = "AIG 0.023 Autocap",
         FullscreenByDefault = false,
         GraphicsQuality = GraphicsQuality.High
     };
     internal static Func<GameConfig> AutoPerfConfigFactory { get; set; } = static () => new GameConfig
     {
-        Title = "AIG 0.022 (29) Autoperf",
+        Title = "AIG 0.023 Autoperf",
         FullscreenByDefault = false,
         GraphicsQuality = GraphicsQuality.High
     };
     internal static Func<IGamePlatform> PlatformFactory { get; set; } = static () => new RaylibGamePlatform();
     internal static Func<GameConfig, WorldMap> WorldFactory { get; set; } = static config =>
         new WorldMap(width: 2304, height: 72, depth: 2304, chunkSize: config.ChunkSize, seed: config.WorldSeed);
+    internal static Func<GameConfig, Universe> UniverseFactory { get; set; } = static config => Universe.CreateDefault(config.WorldSeed);
 
     public static void Main(string[] args)
     {
@@ -112,7 +114,7 @@ public static class Program
         {
             var config = AutoCaptureConfigFactory();
             var world = WorldFactory(config);
-            var app = new GameApp(config, PlatformFactory(), world);
+            var app = new GameApp(config, PlatformFactory(), world, universe: UniverseFactory(config));
             app.RunAutoCapture(outputDir);
         }
     }
@@ -123,7 +125,7 @@ public static class Program
         {
             var config = AutoPerfConfigFactory();
             var world = WorldFactory(config);
-            var app = new GameApp(config, PlatformFactory(), world);
+            var app = new GameApp(config, PlatformFactory(), world, universe: UniverseFactory(config));
             app.RunAutoPerf(outputDir, durationSeconds, minFps);
         }
     }
@@ -134,7 +136,7 @@ public static class Program
         {
             var config = AutoCaptureConfigFactory();
             var world = WorldFactory(config);
-            var app = new GameApp(config, PlatformFactory(), world);
+            var app = new GameApp(config, PlatformFactory(), world, universe: UniverseFactory(config));
             app.RunAutoDeviceCapture(outputDir);
         }
     }

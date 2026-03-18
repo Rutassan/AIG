@@ -34,7 +34,7 @@
 
 ## Текущее состояние
 
-Последняя завершённая версия: `0.022 (29)`.
+Последняя завершённая версия: `0.023`.
 
 На этом этапе в проекте уже реализованы:
 - текстурный atlas блоков;
@@ -56,6 +56,7 @@
 - более честная source-driven lighting model: закрытые шахты и комнаты без источников света больше не держат прежний магический ambient, а локальный свет и daylight заметно сильнее управляют итоговой освещённостью;
 - очищенный visual stack без новой архитектуры: уменьшены `haze`, screen-space glow и навязчивость финального композита, усилена читаемость материалов и foliage в среднем плане;
 - отдельная правка дальнего слоя: уменьшено выбеливание `far/ultra-far`, горизонт лучше отделён от неба, а distant terrain mesh держит форму заметно увереннее;
+- введён первый космический симуляционный фундамент: `Universe`, `StarSystem`, `CelestialBody`, общее simulation time и базовый гравитационный API;
 - более зрелый shader-driven light stack: `sun scatter`, `ambient lift`, `shadow depth`, `haze`, `material shadow`, `horizon depth`, `foliage translucency`, `secondary bounce`, `sky response`, `far gradient`, `shadow contour`, `atmospheric contour`, `relief bridge`, `shadow haze fusion`, `light plasticity`, `far readability`, `final cohesion`, `view material`;
 - обновлённая подсветка блока;
 - доработанный held-block и спецслои рендера;

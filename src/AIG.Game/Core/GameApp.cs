@@ -2,6 +2,7 @@ using System.Numerics;
 using System.IO;
 using System.Collections.Generic;
 using AIG.Game.Bot;
+using AIG.Game.Cosmos;
 using AIG.Game.Config;
 using AIG.Game.Gameplay;
 using AIG.Game.Player;
@@ -90,6 +91,7 @@ public class GameApp : IGameRunner
     private readonly GameConfig _config;
     private readonly IGamePlatform _platform;
     private readonly WorldMap _world;
+    private readonly Universe _universe;
     private readonly BlockType[] _hotbar = [BlockType.Dirt, BlockType.Stone, BlockType.Wood, BlockType.Leaves];
     private readonly GraphicsSettings _graphics;
     private readonly PlayerVisualState _playerVisual = new();
@@ -142,21 +144,24 @@ public class GameApp : IGameRunner
     private int _framesSinceShadowPassBuild;
 
     public GameApp()
-        : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()))
+        : this(CreateDefaultConfig(), new RaylibGamePlatform(), CreateDefaultWorld(CreateDefaultConfig()), null, CreateDefaultUniverse(CreateDefaultConfig()))
     {
     }
 
-    internal GameApp(GameConfig config, IGamePlatform platform, WorldMap world, GameCaptureManager? captureManager = null)
+    internal GameApp(GameConfig config, IGamePlatform platform, WorldMap world, GameCaptureManager? captureManager = null, Universe? universe = null)
     {
         _config = config;
         _platform = platform;
         _world = world;
+        _universe = universe ?? CreateDefaultUniverse(config);
         _graphics = new GraphicsSettings(config);
         _captureManager = captureManager ?? new GameCaptureManager(
             config.ScreenshotDirectory,
             config.VideoDirectory,
             config.VideoCaptureFps);
     }
+
+    internal Universe Universe => _universe;
 
     private enum AppState
     {
@@ -189,7 +194,7 @@ public class GameApp : IGameRunner
         try
         {
             diagnostics = BotDiagnosticsLog.Create(_config);
-            diagnostics?.Write("app", $"run-start world={_world.Width}x{_world.Height}x{_world.Depth} seed={_world.Seed}");
+            diagnostics?.Write("app", $"run-start world={_world.Width}x{_world.Height}x{_world.Depth} seed={_world.Seed} systems={_universe.StarSystems.Count}");
 
             InitializePlatform(enableFullscreen: true);
             platformInitialized = true;
@@ -5780,6 +5785,11 @@ public class GameApp : IGameRunner
         return new WorldMap(width: 2304, height: 72, depth: 2304, chunkSize: config.ChunkSize, seed: config.WorldSeed);
     }
 
+    private static Universe CreateDefaultUniverse(GameConfig config)
+    {
+        return Universe.CreateDefault(config.WorldSeed);
+    }
+
     private Vector3 CreateSpawnPosition()
     {
         var centerX = Math.Clamp(_world.Width / 2, 0, _world.Width - 1);
@@ -5986,7 +5996,9 @@ public class GameApp : IGameRunner
     private void AdvanceRuntime(float deltaSeconds)
     {
         var delta = deltaSeconds > 0f ? deltaSeconds : 1f / 60f;
-        _runtimeSeconds += Math.Clamp(delta, 1f / 240f, 0.1f);
+        var runtimeDelta = Math.Clamp(delta, 1f / 240f, 0.1f);
+        _runtimeSeconds += runtimeDelta;
+        _universe.AdvanceTime(runtimeDelta);
     }
 
     private void ResetAdaptiveTracking(Vector3 position)
